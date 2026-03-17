@@ -1,3 +1,5 @@
 /datasets/
 
 /recipes/voxceleb/results/
+
+/speechbrain.egg-info/
