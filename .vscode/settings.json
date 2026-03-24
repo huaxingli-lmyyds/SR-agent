@@ -1,4 +1,15 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    // 指定使用 Pylance 作为语言服务器
+    
+    "python.languageServer": "Pylance",
+    "python.analysis.autoImportCompletions": true,
+    "editor.quickSuggestions": {
+        "strings": true
+    },
+
+    
+
+
 }

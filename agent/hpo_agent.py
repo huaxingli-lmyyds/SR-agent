@@ -1,4 +1,6 @@
 import os
+import re
+from tabnanny import verbose
 import dotenv
 import yaml
 import subprocess
@@ -9,10 +11,11 @@ from langchain_core.prompts import PromptTemplate
 
 # load environment variables from .env file
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
-os.environ["ZHIPUAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
-os.environ["ZHIU_API_BASE_URL"] = os.getenv("ZHIU_API_BASE_URL")
+os.environ["OPENAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
+os.environ["OPENAI_API_BASE"] = os.getenv("ZHIU_API_BASE_URL")
 
-from langchain_community.chat_models import ChatZhipuAI
+
+from langchain_openai import ChatOpenAI
 
 # the path to the ECAPA-TDNN configuration file
 CONFIG_PATH = "../configs/train_ecapa_tdnn.yaml"
@@ -30,7 +33,7 @@ EXPERIMENTS_DIR.mkdir(exist_ok=True)
 EXPERIMENTS_CONFIGS_DIR.mkdir(exist_ok=True)
 
 # create the LLM
-llm = ChatZhipuAI(model="glm-4.7", temperature=0.2, max_tokens=2000)
+llm = ChatOpenAI(model="GLM-4.7", temperature=0.2, max_tokens=2000)
 
 # define the tools
 @tool
@@ -40,7 +43,7 @@ def modify_config(config_json: str, persist: bool = True) -> str:
 
     参数:
       config_json: JSON 字符串或 dict，表示要更新的字段
-        例如: '{"lr": 0.02,"classifier": {"input_size": 1000}}'
+        例如: '{"lr": 0.0005,"classifier": {"input_size": 200}}'
       persist: 是否写回文件（True）或仅预览（False），默认 True。
 
     Returns:
@@ -268,8 +271,9 @@ def get_training_logs() -> str:
       训练日志内容或错误信息
     """
     try:
-        config = load_yaml_config(CONFIG_PATH)
-        log_path = config.get('train_log', 'results/ecapa_augment/1986/train_log.txt')
+        config = load_yaml_config_hyperpyyaml(CONFIG_PATH)
+        log_path = config.get('train_log')
+        
         
         if not os.path.exists(log_path):
             return f"训练日志文件不存在: {log_path}"
@@ -417,19 +421,41 @@ def get_best_experiment(metric: str = "eer") -> str:
         return f"❌ 查找最佳实验失败: {str(e)}"
 
 def load_yaml_config(config_path):
-    """加载包含 SpeechBrain 特殊标签的 YAML 配置文件"""
-    from ruamel.yaml import YAML
-    
-    # 方法1: 尝试使用 ruamel.yaml 加载
+    """加载 YAML 配置文件"""
     try:
-        yaml_parser = YAML()
-        yaml_parser.preserve_quotes = True
-        # 尝试不同的加载方式
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml_parser.load(f)
-        return config
+        return parse_yaml_simpler(config_path)
     except Exception as e:
-        # 方法2: 如果失败，使用简单的文本解析
+        print(f"⚠️ 加载 YAML 配置失败: {e}")
+        return {}
+    
+    
+def load_yaml_config_hyperpyyaml(config_path):
+    """加载包含 SpeechBrain 特殊标签的 YAML 配置文件，使用 hyperpyyaml
+    
+    注意：此函数不会实例化对象（如 !new: 标签），仅解析配置和引用
+    使用 resolve_references 而不是 load_hyperpyyaml 来避免对象实例化
+    """
+    try:
+        from hyperpyyaml import load_hyperpyyaml
+        
+        # 使用 hyperpyyaml 加载配置，能够处理 !ref, !new:, !name: 等特殊标签
+        with open(config_path, 'r', encoding='utf-8') as f:
+            # 提供默认的 overrides 来处理 !PLACEHOLDER 标签
+            overrides = {
+                'data_folder': './data'  # 为占位符提供默认值
+            }
+            
+            # hyperpyyaml 的 load_hyperpyyaml 可以处理 SpeechBrain 的特殊标签
+            # 返回 (config, overrides) 元组，我们只需要 config
+            config = load_hyperpyyaml(f, overrides=overrides)
+        
+        return config
+    except ImportError:
+        print("⚠️ hyperpyyaml 未安装，使用备用解析方法")
+        return parse_yaml_simpler(config_path)
+    except Exception as e:
+        print(f"⚠️ hyperpyyaml 加载失败: {e}")
+        print("尝试使用备用解析方法...")
         return parse_yaml_simpler(config_path)
 
 
@@ -538,7 +564,7 @@ def create_agent():
         agent = create_agent(
             model=llm,  # 使用 ZhipuAI 模型
             tools=tools,
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
         )
         
         return agent

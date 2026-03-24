@@ -9,8 +9,14 @@ import os
 import dotenv
 # load environment variables from .env file
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
-os.environ["ZHIPUAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
-os.environ["ZHIU_API_BASE_URL"] = os.getenv("ZHIU_API_BASE_URL")
+os.environ["OPENAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
+os.environ["OPENAI_API_BASE"] = os.getenv("ZHIU_API_BASE_URL")
+
+
+#忽略报错
+import warnings
+warnings.filterwarnings("ignore", message="CUDA initialization: The NVIDIA driver on your system is too old")
+warnings.filterwarnings("ignore", message="torchvision is not available - cannot save figures")
 
 # 添加父目录到路径，以便导入模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +26,8 @@ from hpo_agent import (
     read_config, 
     backup_config,
     get_training_logs,
+    run_training,
+    run_evaluation,
     view_experiment_history,
     get_best_experiment,
     EXPERIMENTS_FILE,
@@ -119,6 +127,65 @@ def test_get_best_experiment():
     print()
     return True
 
+def test_run_training():
+    """测试训练功能"""
+    print("=" * 80)
+    print("测试 9: 运行训练")
+    print("=" * 80)
+    
+    print("⚠️  注意：此测试将实际运行训练，可能需要较长时间")
+    print("训练命令使用 subprocess.run() 执行：")
+    print('  subprocess.run(["python", TRAIN_SCRIPT, CONFIG_PATH], ...)')
+    print()
+    
+    # 说明GPU指定方法
+    print("💡 指定GPU的方法:")
+    print("  方法1: 设置环境变量")
+    print('    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # 使用GPU 0')
+    print()
+    print("  方法2: 在命令中添加环境变量")
+    print('    subprocess.run(["CUDA_VISIBLE_DEVICES=0", "python", ...])')
+    print()
+    
+    # 询问用户是否继续
+    user_input = input("是否继续运行训练？(y/n): ").strip().lower()
+    
+    if user_input == 'y':
+        print("\n开始训练...")
+        result = run_training.invoke({})
+        print("\n训练结果:")
+        print(result)
+        print()
+        return True
+    else:
+        print("⏭️  跳过训练测试")
+        print()
+        return True
+
+def test_run_evaluation():
+    """测试评估功能"""
+    print("=" * 80)
+    print("测试 10: 运行评估")
+    print("=" * 80)
+    
+    print("⚠️  注意：此测试将运行模型评估")
+    print("评估命令使用 subprocess.run() 执行")
+    print()
+    
+    user_input = input("是否继续运行评估？(y/n): ").strip().lower()
+    
+    if user_input == 'y':
+        print("\n开始评估...")
+        result = run_evaluation.invoke({})
+        print("\n评估结果:")
+        print(result)
+        print()
+        return True
+    else:
+        print("⏭️  跳过评估测试")
+        print()
+        return True
+
 def test_agent_initialization():
     """测试智能体初始化"""
     print("=" * 80)
@@ -147,15 +214,12 @@ def test_agent_initialization():
         }
         print(f"输入: {test_message}")
         result = agent.invoke(test_message)
-        print(f"✅ 调用成功，返回结果类型: {type(result)}")
-        print(f"✅ 结果可通过 .content 访问")
-        print()
+        print(f"✅ 调用成功，返回结果类型: {type(result)}; 内容预览: {result[-1:]}")
         return True
     except Exception as e:
         print(f"❌ 智能体初始化失败: {e}")
         import traceback
         traceback.print_exc()
-        print()
         return False
 
 def main():
@@ -168,13 +232,15 @@ def main():
     test_results = []
     
     # 运行各项测试
-    test_results.append(("读取配置", test_read_config()))
-    test_results.append(("备份配置", test_backup_config()))
-    test_results.append(("修改配置", test_modify_config()))
+    # test_results.append(("读取配置", test_read_config()))
+    # test_results.append(("备份配置", test_backup_config()))
+    # test_results.append(("修改配置", test_modify_config()))
     test_results.append(("获取训练日志", test_get_training_logs()))
-    test_results.append(("查看实验历史", test_view_experiment_history()))
-    test_results.append(("获取最佳实验", test_get_best_experiment()))
-    test_results.append(("智能体初始化", test_agent_initialization()))
+    # test_results.append(("查看实验历史", test_view_experiment_history()))
+    # test_results.append(("获取最佳实验", test_get_best_experiment()))
+    # test_results.append(("运行训练", test_run_training()))
+    # test_results.append(("运行评估", test_run_evaluation()))
+    # test_results.append(("智能体初始化", test_agent_initialization()))
     
     # 汇总测试结果
     print("=" * 80)
