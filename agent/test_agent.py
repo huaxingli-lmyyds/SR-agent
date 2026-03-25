@@ -11,6 +11,7 @@ import dotenv
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
 os.environ["OPENAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
 os.environ["OPENAI_API_BASE"] = os.getenv("ZHIU_API_BASE_URL")
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 #忽略报错
@@ -129,23 +130,23 @@ def test_get_best_experiment():
 
 def test_run_training():
     """测试训练功能"""
-    print("=" * 80)
-    print("测试 9: 运行训练")
-    print("=" * 80)
+    # print("=" * 80)
+    # print("测试 9: 运行训练")
+    # print("=" * 80)
     
-    print("⚠️  注意：此测试将实际运行训练，可能需要较长时间")
-    print("训练命令使用 subprocess.run() 执行：")
-    print('  subprocess.run(["python", TRAIN_SCRIPT, CONFIG_PATH], ...)')
-    print()
+    # print("⚠️  注意：此测试将实际运行训练，可能需要较长时间")
+    # print("训练命令使用 subprocess.run() 执行：")
+    # print('  subprocess.run(["python", TRAIN_SCRIPT, CONFIG_PATH], ...)')
+    # print()
     
-    # 说明GPU指定方法
-    print("💡 指定GPU的方法:")
-    print("  方法1: 设置环境变量")
-    print('    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # 使用GPU 0')
-    print()
-    print("  方法2: 在命令中添加环境变量")
-    print('    subprocess.run(["CUDA_VISIBLE_DEVICES=0", "python", ...])')
-    print()
+    # # 说明GPU指定方法
+    # print("💡 指定GPU的方法:")
+    # print("  方法1: 设置环境变量")
+    # print('    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # 使用GPU 0')
+    # print()
+    # print("  方法2: 在命令中添加环境变量")
+    # print('    subprocess.run(["CUDA_VISIBLE_DEVICES=0", "python", ...])')
+    # print()
     
     # 询问用户是否继续
     user_input = input("是否继续运行训练？(y/n): ").strip().lower()
@@ -232,10 +233,10 @@ def main():
     test_results = []
     
     # 运行各项测试
-    # test_results.append(("读取配置", test_read_config()))
+    test_results.append(("读取配置", test_read_config()))
     # test_results.append(("备份配置", test_backup_config()))
     # test_results.append(("修改配置", test_modify_config()))
-    test_results.append(("获取训练日志", test_get_training_logs()))
+    # test_results.append(("获取训练日志", test_get_training_logs()))
     # test_results.append(("查看实验历史", test_view_experiment_history()))
     # test_results.append(("获取最佳实验", test_get_best_experiment()))
     # test_results.append(("运行训练", test_run_training()))

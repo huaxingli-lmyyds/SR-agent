@@ -109,11 +109,25 @@ def run_training() -> str:
         # 记录开始时间
         start_time = datetime.now()
         
-        # 运行训练
+        # 检查 data_folder 是否设置
+        if current_config.get('data_folder') == '!PLACEHOLDER  # e.g. /path/to/Voxceleb' or not current_config.get('data_folder'):
+            # 设置默认数据目录
+            data_folder = "../datasets/voxceleb1"
+            current_config['data_folder'] = data_folder
+            print(f"⚠️  data_folder 未设置，使用默认路径: {data_folder}")
+        print(current_config.get('data_folder'))
+        
+        # 运行训练，添加 data_folder 参数
         result = subprocess.run(
-            ["python", TRAIN_SCRIPT, CONFIG_PATH],
+            ["python", TRAIN_SCRIPT, CONFIG_PATH, f"--data_folder={current_config.get('data_folder')}"],
             capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__))
         )
+        
+        # #实时输出用于测试
+        # result = subprocess.run(
+        # ["python", TRAIN_SCRIPT, CONFIG_PATH, f"--data_folder={current_config.get('data_folder')}"],
+        # cwd=os.path.dirname(os.path.abspath(__file__))
+        # )
         
         # 记录结束时间
         end_time = datetime.now()
@@ -238,6 +252,8 @@ def read_config() -> str:
     try:
         config = load_yaml_config(CONFIG_PATH)
         
+        
+        print(type(config), config)
         # 只返回关键配置部分，避免信息过载
         key_params = [
             'lr', 'batch_size', 'number_of_epochs', 'step_size',
