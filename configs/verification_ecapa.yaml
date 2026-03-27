@@ -24,8 +24,8 @@ verification_file: https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test
 # is downloaded from the speechbrain HuggingFace repository.
 # However, a local path pointing to a directory containing your checkpoints may also be specified
 # instead (see pretrainer below)
-# pretrain_path: speechbrain/spkrec-ecapa-voxceleb
-pretrain_path: /home/lixh26/agent/SR-agent/agent/results/ecapa_augment/1986/save/CKPT+2026-03-25+02-36-45+00
+pretrain_path: speechbrain/spkrec-ecapa-voxceleb
+# pretrain_path: /home/lixh26/agent/SR-agent/agent/results/ecapa_augment/1986/save/CKPT+2026-03-25+02-36-45+00
 
 # csv files
 train_data: !ref <save_folder>/train.csv

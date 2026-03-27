@@ -1,6 +1,6 @@
 from logging import config
 from logging.config import dictConfig
-from math import e
+from math import e, exp
 import os
 import re
 from tabnanny import verbose
@@ -29,7 +29,7 @@ from langchain_openai import ChatOpenAI
 CONFIG_PATH = "../configs/train_ecapa_tdnn.yaml"
 TRAIN_SCRIPT = "../recipes/voxceleb/train_speaker_embeddings.py"
 EVAL_SCRIPT = "../recipes/voxceleb/speaker_verification_cosine.py"
-SYSTEM_PROMPT_PATH = "prompts/hpo_prompt.txt"
+SYSTEM_PROMPT_PATH = "../prompts/hpo_agent_prompt.txt"
 
 # 实验记录目录和文件
 EXPERIMENTS_DIR = Path(__file__).parent / "experiments"
@@ -152,14 +152,49 @@ def modify_config(config_json: str, persist: bool = True) -> str:
     except Exception as e:
         return f"修改配置失败: {str(e)}"
 
+def create_experiment_dirs(experiment_id: str) -> dict:
+    """
+    为实验创建目录结构
+    
+    Args:
+        experiment_id: 实验ID（格式：YYYYMMDD_HHMMSS）
+    
+    Returns:
+        包含所有目录路径的字典
+    """
+    # 主实验目录
+    exp_dir = EXPERIMENTS_DIR / f"exp_{experiment_id}"
+    
+    # 子目录
+    results_dir = exp_dir / "results"
+    save_dir = results_dir / "save"
+    eval_dir = exp_dir / "evaluation"
+    
+    # 创建所有目录
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(exist_ok=True)
+    save_dir.mkdir(exist_ok=True)
+    eval_dir.mkdir(exist_ok=True)
+    
+    return {
+        'experiment_dir': exp_dir,
+        'results_dir': results_dir,
+        'save_dir': save_dir,
+        'eval_dir': eval_dir
+    }
+
+
 @tool
-def run_training(config_path: str = CONFIG_PATH) -> str:
+def run_training(config_path: str = CONFIG_PATH, experiment_id: str = None) -> str:
     """
     运行 ECAPA-TDNN 模型的训练脚本。
     训练完成后会自动保存实验记录，包括配置、训练日志和结果。
+    每次训练会在 experiments/exp_{experiment_id}/ 下创建独立的文件夹结构，
+    训练结果也保存到该实验目录下，避免不同训练之间相互干扰。
     
     Args:
         config_path: 配置文件路径，默认为全局 CONFIG_PATH
+        experiment_id: 实验ID，如果为None则自动按照时间生成（格式：YYYYMMDD_HHMMSS）
     
     Returns:
       训练输出或错误信息
@@ -167,29 +202,54 @@ def run_training(config_path: str = CONFIG_PATH) -> str:
     try:
         from datetime import datetime
         import shutil
-        import re
         import sys
         
-        # 读取当前配置
+        # 生成或使用提供的实验ID
+        start_time = datetime.now()
+        if experiment_id is None:
+            experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
+        
+        # 创建实验目录结构
+        exp_dirs = create_experiment_dirs(experiment_id)
+        print(f"📁 创建实验目录: {exp_dirs['experiment_dir']}")
+        
+        # 读取当前配置（只读取基本信息，不修改配置文件）
         current_config = load_config(config_path)
         
-        # 记录开始时间
-        start_time = datetime.now()
-        
         # 检查 data_folder 是否设置
-        if current_config.get('data_folder') == '!PLACEHOLDER' or not current_config.get('data_folder'):
+        data_folder = current_config.get('data_folder')
+        if data_folder == '!PLACEHOLDER' or not data_folder:
             # 设置默认数据目录
             data_folder = "../datasets/voxceleb1"
-            current_config['data_folder'] = data_folder
             print(f"⚠️  data_folder 未设置，使用默认路径: {data_folder}")
+        
+        # 关键修改：设置实验特定的输出目录
+        # 使用实验目录下的results子目录作为训练输出目录
+        # 这样每次训练都有独立的输出目录，不会相互干扰
+        relative_output_folder = f"experiments/exp_{experiment_id}/results"
+        absolute_output_folder = str(exp_dirs['results_dir'])
+        
+        print(f"✅ 设置训练输出目录: {absolute_output_folder}")
+        
+        # 保存原始配置文件的备份到实验目录
+        config_backup_path = exp_dirs['experiment_dir'] / "config.yaml"
+        try:
+            shutil.copy2(config_path, config_backup_path)
+            print(f"✅ 原始配置已备份到: {config_backup_path}")
+        except Exception as e:
+            print(f"⚠️ 备份配置文件失败: {e}")
         
         # 使用当前Python解释器（虚拟环境的Python）
         python_executable = sys.executable
         print(f"使用Python解释器: {python_executable}")
+        print(f"开始训练实验: {experiment_id}")
         
-        # 运行训练脚本
+        # 运行训练脚本，通过命令行参数指定输出目录和数据目录
+        # 不修改配置文件，保留原始配置中的所有实例化信息（如 !new: 标签）
         result = subprocess.run(
-            [python_executable, TRAIN_SCRIPT, config_path, f"--data_folder={current_config.get('data_folder')}"],
+            [python_executable, TRAIN_SCRIPT, config_path, 
+             f"--data_folder={data_folder}",
+             f"--output_folder={relative_output_folder}"],
             cwd=os.path.dirname(os.path.abspath(__file__))
         )
         
@@ -198,16 +258,43 @@ def run_training(config_path: str = CONFIG_PATH) -> str:
         duration = (end_time - start_time).total_seconds()
         
         if result.returncode == 0:
+        # if 1 == 1:  # 无论训练成功与否都继续执行后续代码，记录实验结果
+            # 使用实验特定的输出路径（通过命令行参数指定的）
+            output_folder = relative_output_folder
+            
             # 解析训练日志
-            train_log_path = Path(__file__).parent / "results" / "ecapa_augment" / "1986" / "train_log.txt"
+            # 日志通常在output_folder/train_log.txt
+            train_log_path = exp_dirs['results_dir'] / "train_log.txt"
             epoch_data, final_metrics = parse_training_log(train_log_path)
             
-            # 保存配置副本
-            config_backup_path = EXPERIMENTS_CONFIGS_DIR / f"config_{start_time.strftime('%Y%m%d_%H%M%S')}.yaml"
-            shutil.copy2(config_path, config_backup_path)
+            # 查找最新的checkpoint文件夹
+            checkpoint_path = None
+            save_dir = Path(__file__).parent / output_folder / "save"
+            if save_dir.exists():
+                # checkpoint是文件夹，格式: CKPT+2026-03-25+02-36-45+00
+                ckpt_dirs = list(save_dir.glob("CKPT+*"))
+                if ckpt_dirs:
+                    # 找到最新的checkpoint文件夹（按修改时间排序）
+                    checkpoint_path = sorted(ckpt_dirs, key=lambda x: x.stat().st_mtime)[-1]
+                    print(f"✅ 找到最新checkpoint文件夹: {checkpoint_path}")
             
+            # # 如果训练日志存在，复制到实验目录（已在训练前备份配置，这里不再重复）
+            # if train_log_path.exists():
+            #     train_log_backup = exp_dirs['results_dir'] / "train_log.txt"
+            #     shutil.copy2(train_log_path, train_log_backup)
+            #     print(f"✅ 训练日志已复制到: {train_log_backup}")
+            
+            # 如果checkpoint存在，记录路径
+
+            checkpoint_info = {}
+            if checkpoint_path:
+                checkpoint_info['checkpoint_path'] = str(checkpoint_path)
+                
+                
+                
             # 创建并保存实验记录
             experiment_record = create_experiment_record(
+                experiment_id=experiment_id,
                 start_time=start_time,
                 duration=duration,
                 status="success",
@@ -215,14 +302,25 @@ def run_training(config_path: str = CONFIG_PATH) -> str:
                 training_log_path=str(train_log_path),
                 epoch_data=epoch_data,
                 final_metrics=final_metrics,
-                config_backup_path=str(config_backup_path)
+                config_backup_path=str(config_backup_path),
+                experiment_dir=str(exp_dirs['experiment_dir']),
+                output_folder=str(output_folder),
+                checkpoint_info=checkpoint_info
             )
             save_experiment_record(experiment_record)
             
+            # 保存实验记录到单独的文件
+            exp_record_path = exp_dirs['experiment_dir'] / "experiment_record.json"
+            with open(exp_record_path, 'w', encoding='utf-8') as f:
+                json.dump(experiment_record, f, indent=2, ensure_ascii=False)
+            print(f"✅ 实验记录已保存到: {exp_record_path}")
+            
             # 构建返回信息
             result_summary = f"✅ 训练完成！\n"
-            result_summary += f"实验ID: {experiment_record['experiment_id']}\n"
+            result_summary += f"实验ID: {experiment_id}\n"
             result_summary += f"训练时长: {duration:.2f} 秒\n"
+            result_summary += f"实验目录: {exp_dirs['experiment_dir']}\n"
+            result_summary += f"训练输出目录: {output_folder}\n"
             
             if final_metrics:
                 result_summary += f"\n性能指标:\n"
@@ -236,34 +334,65 @@ def run_training(config_path: str = CONFIG_PATH) -> str:
             else:
                 result_summary += "\n未能解析训练日志\n"
             
-            result_summary += f"\n配置和结果已保存到 experiments/ 目录\n"
-            result_summary += f"训练日志路径: {train_log_path}\n"
+            if checkpoint_path:
+                result_summary += f"\n模型Checkpoints:\n"
+                result_summary += f"  - 最新checkpoint: {checkpoint_path.name}\n"
+                result_summary += f"  - 完整路径: {checkpoint_path}\n"
+            
+            result_summary += f"\n配置和结果已保存到 experiments/exp_{experiment_id}/\n"
             
             return result_summary
         else:
             # 训练失败，记录失败信息
+            # 处理错误信息（可能是字节串或字符串）
+            error_msg = "Unknown error"
+            if result.stderr:
+                if isinstance(result.stderr, bytes):
+                    try:
+                        error_msg = result.stderr.decode('utf-8', errors='ignore')[-1000:]
+                    except:
+                        error_msg = str(result.stderr)[-1000:]
+                else:
+                    error_msg = str(result.stderr)[-1000:]
+            
             experiment_record = create_experiment_record(
                 start_time=start_time,
                 duration=duration,
                 status="failed",
                 config=current_config,
-                error=result.stderr[-1000:]
+                experiment_dir=str(exp_dirs['experiment_dir']),
+                error=error_msg
             )
             save_experiment_record(experiment_record)
             
-            return f"❌ 训练失败 (实验ID: {experiment_record['experiment_id']})\n错误信息: {result.stderr}"
+            # 返回给用户的错误信息
+            user_error_msg = "Unknown error"
+            if result.stderr:
+                if isinstance(result.stderr, bytes):
+                    try:
+                        user_error_msg = result.stderr.decode('utf-8', errors='ignore')[-500:]
+                    except:
+                        user_error_msg = str(result.stderr)[-500:]
+                else:
+                    user_error_msg = str(result.stderr)[-500:]
+            
+            return f"❌ 训练失败 (实验ID: {experiment_id})\n错误信息: {user_error_msg}"
     except Exception as e:
-        return f"❌ 运行训练失败: {str(e)}"
+            return f"❌ 运行训练失败: {str(e)}"
 
 @tool
-def run_evaluation(eval_config_path: str = "../configs/verification_ecapa.yaml") -> str:
+def run_evaluation(eval_config_path: str = "../configs/verification_ecapa.yaml", 
+                 experiment_id: str = None,
+                 checkpoint_path: str = None) -> str:
     """
     运行 ECAPA-TDNN 模型的评估脚本，使用训练后的模型。
-    评估结果会保存到最近一次成功的实验记录中。
+    评估结果会保存到对应的实验记录中。
     从日志文件中读取EER和minDCF参数。
 
     Args:
         eval_config_path: 评估配置文件路径，默认为 "../configs/verification_ecapa.yaml"
+        experiment_id: 实验ID，如果为None则使用最新的成功实验
+        checkpoint_path: checkpoint文件路径，如果为None则从实验记录中读取
 
     Returns:
       评估结果或错误信息
@@ -272,23 +401,84 @@ def run_evaluation(eval_config_path: str = "../configs/verification_ecapa.yaml")
         from datetime import datetime
         import re
         import sys
+        import shutil
         
-        # 读取评估配置
+        # 确定目标实验
+        target_experiment = None
+        
+        if EXPERIMENTS_FILE.exists():
+            with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+            
+            # 根据experiment_id查找实验
+            if experiment_id:
+                target_experiment = next((exp for exp in history if exp['experiment_id'] == experiment_id), None)
+            else:
+                # 使用最新的成功实验
+                successful_experiments = [exp for exp in history if exp['status'] == 'success']
+                if successful_experiments:
+                    target_experiment = successful_experiments[-1]
+        
+        if not target_experiment or target_experiment['status'] != 'success':
+            return "❌ 未找到可评估的实验记录。请先运行训练。"
+        
+        # 从实验记录中获取checkpoint路径
+        if checkpoint_path is None:
+            if target_experiment.get('checkpoint_info') and target_experiment['checkpoint_info'].get('checkpoint_path'):
+                checkpoint_path = target_experiment['checkpoint_info']['checkpoint_path']
+                print(f"✅ 从实验记录中读取checkpoint: {checkpoint_path}")
+            else:
+                return "❌ 实验记录中未找到checkpoint路径。请检查训练是否成功。"
+        
+        # 检查checkpoint文件是否存在
+        if not Path(checkpoint_path).exists():
+            return f"❌ Checkpoint文件不存在: {checkpoint_path}"
+        
+        # 获取实验目录信息
+        exp_id = target_experiment['experiment_id']
+        exp_dir = Path(target_experiment.get('experiment_dir', f'./experiments/exp_{exp_id}'))
+        eval_dir = exp_dir / "evaluation"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 设置评估的独立输出目录
+        relative_eval_output_folder = f"experiments/exp_{exp_id}/evaluation/results"
+        absolute_eval_output_folder = eval_dir / "results"
+        
+        print(f"✅ 设置评估输出目录: {absolute_eval_output_folder}")
+        
+        # 读取评估配置以获取data_folder（不修改配置文件）
         eval_config = load_config(eval_config_path)
-        start_time = datetime.now()
         
-        if eval_config.get('data_folder') == '!PLACEHOLDER' or not eval_config.get('data_folder'):
-            # 设置默认数据目录
+        # 设置data_folder
+        data_folder = eval_config.get('data_folder')
+        if data_folder == '!PLACEHOLDER' or not data_folder:
             data_folder = "../datasets/voxceleb1"
-            eval_config['data_folder'] = data_folder
             print(f"⚠️  data_folder 未设置，使用默认路径: {data_folder}")
+        
+        # 备份原始评估配置文件到实验目录
+        eval_config_backup = eval_dir / "verification_config.yaml"
+        try:
+            shutil.copy2(eval_config_path, eval_config_backup)
+            print(f"✅ 评估配置已备份到: {eval_config_backup}")
+        except Exception as e:
+            print(f"⚠️ 备份评估配置失败: {e}")
+        
+        start_time = datetime.now()
         
         # 使用当前Python解释器（虚拟环境的Python）
         python_executable = sys.executable
         print(f"使用Python解释器: {python_executable}")
+        print(f"开始评估实验: {exp_id}")
+        print(f"使用checkpoint: {checkpoint_path}")
         
+        # 运行评估脚本，通过命令行参数指定输出目录、pretrain_path和数据目录
+        # pretrain_path指向训练保存的checkpoint文件夹
+        # 不修改配置文件，保留原始配置中的所有实例化信息
         result = subprocess.run(
-            [python_executable, EVAL_SCRIPT, eval_config_path, f"--data_folder={eval_config.get('data_folder')}"],
+            [python_executable, EVAL_SCRIPT, eval_config_path,
+             f"--data_folder={data_folder}",
+             f"--pretrain_path={checkpoint_path}",
+             f"--output_folder={relative_eval_output_folder}"],
             cwd=os.path.dirname(os.path.abspath(__file__))
         )
         
@@ -298,96 +488,125 @@ def run_evaluation(eval_config_path: str = "../configs/verification_ecapa.yaml")
         # 从日志文件中读取评估结果
         eer = None
         min_dcf = None
+        eval_log_path = None
         
         try:
-            # 构建配置文件的完整路径
-            full_config_path = Path(__file__).parent / eval_config_path
-            if full_config_path.exists():
-                # 重新加载配置以获取原始的seed值
-                eval_config_data = load_config(str(full_config_path))
-                seed = eval_config_data.get('seed', '1234')
-                
-                # 确保seed可以转换为字符串
-                if isinstance(seed, dict):
-                    # 如果seed是字典（如 !apply:...），使用默认值
-                    seed = '1234'
-                elif not isinstance(seed, (str, int)):
-                    # 其他非字符串类型，转换为字符串
-                    seed = str(seed)
-                else:
-                    seed = str(seed)
-                
-                # 日志路径: results/voxceleb1_2/speaker_verification_ecapa/seed/log.txt
-                log_path = Path(__file__).parent / "results" / "voxceleb1_2" / "speaker_verification_ecapa" / seed / "log.txt"
-                
-                if log_path.exists():
-                    with open(log_path, 'r', encoding='utf-8') as f:
-                        log_content = f.read()
-                    
-                    # 从日志中提取EER和minDCF
-                    # 格式: EER(%)=2.488634
-                    eer_match = re.search(r'EER\(%\)=([\d.]+)', log_content[-1000:])
-                    if eer_match:
-                        eer = float(eer_match.group(1))
-                    
-                    # 格式: minDCF=0.228039
-                    dcf_match = re.search(r'minDCF=([\d.]+)', log_content[-1000:])
-                    if dcf_match:
-                        min_dcf = float(dcf_match.group(1))
-                    
-                    print(f"✅ 从日志文件中读取到: EER={eer}, minDCF={min_dcf}")
-                else:
-                    print(f"⚠️ 日志文件不存在: {log_path}")
+            # 从配置中获取seed来确定日志路径
+            seed = eval_config.get('seed', '1234')
+            if isinstance(seed, dict):
+                seed = '1234'
+            elif not isinstance(seed, str):
+                seed = str(seed)
             else:
-                print(f"⚠️ 配置文件不存在: {full_config_path}")
+                seed = str(seed)
+            
+            # 从我们指定的评估输出目录中读取日志
+            # 路径: experiments/exp_{exp_id}/evaluation/results/speaker_verification_ecapa/{seed}/log.txt
+            log_path = absolute_eval_output_folder / "speaker_verification_ecapa" / seed / "log.txt"
+            
+            print(f"🔍 查找评估日志: {log_path}")
+            
+            if log_path.exists():
+                eval_log_path = log_path
+                with open(log_path, 'r', encoding='utf-8') as f:
+                    log_content = f.read()
+                
+                # 从日志中提取EER和minDCF
+                eer_match = re.search(r'EER\(%\)=([\d.]+)', log_content[-1000:])
+                if eer_match:
+                    eer = float(eer_match.group(1))
+                
+                dcf_match = re.search(r'minDCF=([\d.]+)', log_content[-1000:])
+                if dcf_match:
+                    min_dcf = float(dcf_match.group(1))
+                
+                print(f"✅ 从日志文件中读取到: EER={eer}, minDCF={min_dcf}")
+                
+                # # 复制评估日志到实验目录
+                # eval_log_backup = eval_dir / "evaluation_log.txt"
+                # shutil.copy2(log_path, eval_log_backup)
+                # print(f"✅ 评估日志已复制到: {eval_log_backup}")
+            else:
+                print(f"⚠️ 日志文件不存在: {log_path}")
+                # 尝试查找可能的日志文件
+                if absolute_eval_output_folder.exists():
+                    print(f"📁 评估输出目录内容:")
+                    for item in absolute_eval_output_folder.rglob("*.txt"):
+                        print(f"   - {item}")
         except Exception as e:
             print(f"⚠️ 从日志文件读取评估结果失败: {e}")
             import traceback
             traceback.print_exc()
         
         if result.returncode == 0:
-            # 更新最新的实验记录（添加评估结果）
+            # 更新实验记录（添加评估结果）
             try:
                 if EXPERIMENTS_FILE.exists():
                     with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
                         history = json.load(f)
                     
-                    if history:
-                        # 更新最后一个成功的实验记录
-                        for exp in reversed(history):
-                            if exp['status'] == 'success':
-                                exp['evaluation_results'] = {
-                                    'timestamp': end_time.isoformat(),
-                                    'duration_seconds': duration,
-                                    'eer': eer,
-                                    'min_dcf': min_dcf,
-                                    'evaluation_log_path': str(log_path) if 'log_path' in locals() else None
-                                }
-                                break
+                    # 更新对应的实验记录
+                    for exp in history:
+                        if exp['experiment_id'] == exp_id:
+                            exp['evaluation_results'] = {
+                                'timestamp': end_time.isoformat(),
+                                'duration_seconds': duration,
+                                'eer': eer,
+                                'min_dcf': min_dcf,
+                                'evaluation_log_path': str(eval_log_path) if eval_log_path else None,
+                                'checkpoint_used': checkpoint_path,
+                                'evaluation_dir': str(eval_dir)
+                            }
+                            break
+                    
+                    # 保存更新后的历史
+                    with open(EXPERIMENTS_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(history, f, indent=2, ensure_ascii=False)
+                    
+                    # 同时更新实验目录中的实验记录文件
+                    exp_record_path = exp_dir / "experiment_record.json"
+                    if exp_record_path.exists():
+                        with open(exp_record_path, 'r', encoding='utf-8') as f:
+                            exp_record = json.load(f)
                         
-                        # 保存更新后的历史
-                        with open(EXPERIMENTS_FILE, 'w', encoding='utf-8') as f:
-                            json.dump(history, f, indent=2, ensure_ascii=False)
+                        exp_record['evaluation_results'] = {
+                            'timestamp': end_time.isoformat(),
+                            'duration_seconds': duration,
+                            'eer': eer,
+                            'min_dcf': min_dcf,
+                            'evaluation_log_path': str(eval_log_path) if eval_log_path else None,
+                            'checkpoint_used': checkpoint_path,
+                            'evaluation_dir': str(eval_dir)
+                        }
+                        
+                        with open(exp_record_path, 'w', encoding='utf-8') as f:
+                            json.dump(exp_record, f, indent=2, ensure_ascii=False)
+                        print(f"✅ 实验记录已更新: {exp_record_path}")
             except Exception as e:
                 print(f"⚠️ 保存评估结果到实验记录失败: {e}")
             
             result_summary = f"✅ 评估完成！\n"
+            result_summary += f"实验ID: {exp_id}\n"
             result_summary += f"评估时长: {duration:.2f} 秒\n"
+            result_summary += f"使用的Checkpoint: {checkpoint_path}\n"
+            result_summary += f"评估结果目录: {eval_dir}\n"
             
             if eer is not None:
+                result_summary += f"\n性能指标:\n"
                 result_summary += f"  - EER (等错误率): {eer:.4f}%\n"
             if min_dcf is not None:
                 result_summary += f"  - minDCF: {min_dcf:.4f}\n"
             
             result_summary += f"\n评估结果已保存到实验记录中\n"
-            if 'log_path' in locals():
-                result_summary += f"评估日志: {log_path}\n"
+            if eval_log_path:
+                result_summary += f"评估日志: {eval_log_path}\n"
             
             return result_summary
         else:
-            return f"❌ 评估失败\n错误信息: {result.stderr}"
+            return f"❌ 评估失败\n错误信息: {result.stderr[-500:] if result.stderr else 'Unknown error'}"
     except Exception as e:
-        return f"❌ 运行评估失败: {str(e)}"
+        import traceback
+        return f"❌ 运行评估失败: {str(e)}\n{traceback.format_exc()}"
 
 
 
@@ -1199,7 +1418,7 @@ def parse_training_log(train_log_path: Path) -> tuple:
     return epoch_data, final_metrics
 
 
-def create_experiment_record(start_time: datetime, duration: float, status: str, 
+def create_experiment_record(experiment_id: str, start_time: datetime, duration: float, status: str, 
                             config: dict, **kwargs) -> dict:
     """
     创建实验记录字典（统一入口）
@@ -1214,7 +1433,8 @@ def create_experiment_record(start_time: datetime, duration: float, status: str,
     Returns:
       实验记录字典
     """
-    experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
+    if experiment_id is None:
+        experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
     
     record = {
         "experiment_id": experiment_id,
@@ -1290,12 +1510,12 @@ tools = [
     compare_experiments
 ]
 
-def load_system_prompt():
+def load_system_prompt(prompt_path=SYSTEM_PROMPT_PATH) -> str:
     """加载系统提示词"""
     try:
-        prompt_path = Path(__file__).parent / SYSTEM_PROMPT_PATH
-        if prompt_path.exists():
-            with open(prompt_path, 'r', encoding='utf-8') as f:
+        prompt_path1 = Path(prompt_path)
+        if prompt_path1.exists():
+            with open(prompt_path1, 'r', encoding='utf-8') as f:
                 return f.read()
         else:
             return "你是一个声纹识别模型超参数优化专家。"
@@ -1322,7 +1542,6 @@ def create_agent():
         
     except Exception as e:
         print(f"无法使用标准 Agent API: {e}")
-        print("尝试使用简化的实现...")
         
 
 
@@ -1346,12 +1565,21 @@ def main():
     
     
     
+    agent = create_agent()
     
-    # run_training_result = run_training.invoke({})
-    # 测试完成，能够调用train函数并且可以进行训练
+    
+    for chunk in agent.stream({
+        "messages": [{"role": "user", "content": "优化ECAPA-TDNN模型的超参数，目标是让ERR降到4%以下"}]
+    }):
+        print(chunk)
+    
+    
+    
+    # run_training_result = run_training.invoke({"experiment_id": "111"})
+    #测试完成，能够调用train函数并且可以进行训练
 
-    result = analyze_training_trends.invoke(input={"experiment_id": "20260326_092044"})
-    print(result)
+    # result = analyze_training_trends.invoke(input={"experiment_id": "20260326_092044"})
+    # print(result)
 
 
 

@@ -1,176 +1,329 @@
-# 实验存储结构说明
+# 实验管理文件结构说明
 
-## 概述
-
-本项目的实验管理系统采用集中化的存储结构，每个实验的所有相关文件都存储在一个独立的目录中，便于管理和查找。
+本文档详细说明了SR-agent中实验管理的文件组织结构，包括训练和评估的流程。
 
 ## 目录结构
 
 ```
-agent/experiments/
-├── experiments_history.json          # 全局实验历史记录
-├── 20260325_064906/                  # 实验目录（格式：YYYYMMDD_HHMMSS）
-│   ├── config.yaml                   # 配置文件备份
-│   ├── experiment_record.json        # 实验记录
-│   ├── experiment.log                # 实验日志
-│   ├── model.ckpt                    # 模型权重文件（可选）
-│   ├── scores.txt                    # 评估结果（可选）
-│   └── results/                      # 其他结果文件（可选）
-│       ├── metrics.json
-│       └── plots/
-├── 20260325_123456/
-│   ├── config.yaml
-│   ├── experiment_record.json
-│   └── experiment.log
-└── ...
+agent/
+├── experiments/                          # 实验根目录
+│   ├── experiments_history.json           # 实验历史记录（所有实验的索引）
+│   ├── configs/                         # 配置文件备份目录
+│   │   ├── config_20260326_090000.yaml  # 配置备份（按时间戳命名）
+│   │   └── ...
+│   └── exp_{YYYYMMDD_HHMMSS}/          # 单个实验目录（实验ID为时间戳）
+│       ├── experiment_record.json         # 该实验的详细记录
+│       ├── train_config.yaml             # 训练配置文件（修改后的）
+│       ├── config.yaml                   # 原始配置文件备份
+│       ├── results/                     # 训练输出目录
+│       │   ├── save/                    # 模型checkpoint目录
+│       │   │   ├── CKPT+2026-03-25+02-36-45+00.ckpt
+│       │   │   └── ...
+│       │   ├── train_log.txt             # 训练日志
+│       │   ├── CSV files/               # 数据集CSV文件
+│       │   └── ...
+│       └── evaluation/                  # 评估结果目录
+│           ├── verification_config.yaml   # 评估配置文件
+│           ├── evaluation_log.txt        # 评估日志
+│           └── ...
 ```
 
-## 文件说明
+## 核心特性
 
-### 1. experiments_history.json
-全局实验历史记录文件，包含所有实验的简要信息：
-- `experiment_id`: 实验唯一标识
-- `timestamp`: 实验创建时间
-- `description`: 实验描述
-- `status`: 实验状态（created/running/success/failed）
-- `config_file`: 配置文件路径
-- `duration_seconds`: 训练时长
-- `results`: 关键性能指标
+### 1. 独立的实验隔离
+- 每次训练都使用独立的输出目录：`experiments/exp_{experiment_id}/results/`
+- 不同实验之间完全隔离，不会相互干扰
+- 所有实验结果都保存在对应的实验目录下
 
-### 2. {experiment_id}/config.yaml
-实验使用的配置文件备份，完整保存了训练时的所有参数。
+### 2. 完整的实验记录
+- `experiments_history.json`: 所有实验的集中索引
+- `exp_{experiment_id}/experiment_record.json`: 单个实验的详细记录
+- 记录包括：配置、训练指标、评估结果、时间戳等
 
-### 3. {experiment_id}/experiment_record.json
-详细的实验记录，包含：
-- 完整的配置信息（已解析后的字典形式）
-- 训练时长
-- 性能指标（EER, accuracy, loss, error_rate等）
-- 错误信息（如果失败）
-- 训练输出摘要
+### 3. Checkpoint管理
+- 训练完成后自动查找最新的checkpoint
+- Checkpoint路径保存在实验记录中
+- 评估时自动从实验记录读取checkpoint路径
 
-### 4. {experiment_id}/experiment.log
-完整的训练日志，包括：
-- 训练过程中的所有输出
-- 错误和警告信息
-- 性能指标变化
+## 使用流程
 
-### 5. {experiment_id}/model.ckpt
-训练好的模型权重文件（可选）。
+### 训练流程
 
-### 6. {experiment_id}/scores.txt
-模型评估结果文件（可选）。
-
-### 7. {experiment_id}/results/
-其他结果文件目录，可包含：
-- `metrics.json`: 详细的性能指标
-- `plots/`: 可视化图表
-- 其他分析结果
-
-## 实验 ID 命名规则
-
-实验 ID 采用时间戳格式：`YYYYMMDD_HHMMSS`
-
-例如：`20260325_064906` 表示 2026年3月25日 06:49:06 创建的实验。
-
-## 使用示例
-
-### 1. 查找实验目录
 ```python
-from agent.utils import get_experiments_dir, get_experiment_log_path
+# 1. 运行训练
+result = run_training(config_path="../configs/train_ecapa_tdnn.yaml")
 
-exp_dir = get_experiments_dir() / "20260325_064906"
-log_path = get_experiment_log_path("20260325_064906")
+# 系统会自动：
+# - 生成实验ID（如：20260326_090000）
+# - 创建实验目录：experiments/exp_20260326_090000/
+# - 通过命令行参数指定输出目录（--output_folder），不修改配置文件
+# - 备份原始配置文件到实验目录
+# - 运行训练脚本
+# - 训练完成后：
+#   - 解析训练日志
+#   - 查找最新checkpoint
+#   - 保存实验记录到experiments_history.json
+#   - 保存实验记录到exp_{experiment_id}/experiment_record.json
 ```
 
-### 2. 读取实验记录
+### 评估流程
+
 ```python
-import json
-from pathlib import Path
+# 1. 评估最新实验
+result = run_evaluation()
 
-exp_id = "20260325_064906"
-record_path = Path("agent/experiments") / exp_id / "experiment_record.json"
+# 2. 评估指定实验
+result = run_evaluation(experiment_id="20260326_090000")
 
-with open(record_path, 'r') as f:
-    record = json.load(f)
+# 3. 使用指定checkpoint评估
+result = run_evaluation(checkpoint_path="/path/to/checkpoint.ckpt")
+
+# 系统会自动：
+# - 从实验记录读取checkpoint路径
+# - 修改评估配置，使用指定的checkpoint
+# - 保存修改后的配置到实验目录
+# - 运行评估脚本
+# - 评估完成后：
+#   - 解析评估日志提取EER和minDCF
+#   - 复制评估日志到实验目录
+#   - 更新实验记录，添加评估结果
 ```
 
-### 3. 列出所有实验
-```python
-from agent.utils import list_experiments
+## 实验记录结构
 
-# 获取所有实验
-all_experiments = list_experiments()
-
-# 只获取成功的实验
-successful_experiments = list_experiments(status="success")
-
-# 获取最近的 5 个实验
-recent_experiments = list_experiments(limit=5)
+### experiments_history.json
+```json
+[
+  {
+    "experiment_id": "20260326_090000",
+    "timestamp": "2026-03-26T09:00:00",
+    "duration_seconds": 1234.56,
+    "status": "success",
+    "config": {
+      "lr": 0.0001,
+      "batch_size": 32,
+      "number_of_epochs": 10,
+      "step_size": 5,
+      "seed": "1234"
+    },
+    "training_log_path": "experiments/exp_20260326_090000/results/train_log.txt",
+    "final_metrics": {
+      "final_epoch": 10,
+      "final_lr": 7.96e-05,
+      "final_train_loss": 0.274,
+      "final_valid_loss": 0.247,
+      "final_valid_error_rate": 0.00489,
+      "total_epochs": 10,
+      "best_epoch": 8,
+      "best_valid_loss": 0.234,
+      "best_error_rate": 0.00456
+    },
+    "evaluation_results": {
+      "timestamp": "2026-03-26T10:30:00",
+      "duration_seconds": 300.0,
+      "eer": 2.4886,
+      "min_dcf": 0.2280,
+      "evaluation_log_path": "experiments/exp_20260326_090000/evaluation/evaluation_log.txt",
+      "checkpoint_used": "experiments/exp_20260326_090000/results/save/CKPT+2026-03-25+02-36-45+00.ckpt",
+      "evaluation_dir": "experiments/exp_20260326_090000/evaluation"
+    },
+    "checkpoint_info": {
+      "checkpoint_path": "experiments/exp_20260326_090000/results/save/CKPT+2026-03-25+02-36-45+00.ckpt",
+      "checkpoint_filename": "CKPT+2026-03-25+02-36-45+00.ckpt",
+      "checkpoint_backup_path": "experiments/exp_20260326_090000/results/save/CKPT+2026-03-25+02-36-45+00.ckpt"
+    },
+    "experiment_dir": "experiments/exp_20260326_090000",
+    "output_folder": "experiments/exp_20260326_090000/results",
+    "config_backup_path": "experiments/exp_20260326_090000/config.yaml"
+  }
+]
 ```
 
-### 4. 查找最佳实验
-```python
-from agent.utils import find_best_experiment
+## 工具函数
 
-# 找到 EER 最低的实验
-best_eer = find_best_experiment(metric="eer", minimize=True)
+### run_training
+运行训练并自动管理实验记录
 
-# 找到准确率最高的实验
-best_acc = find_best_experiment(metric="accuracy", minimize=False)
-```
+**参数：**
+- `config_path`: 配置文件路径（默认：`../configs/train_ecapa_tdnn.yaml`）
+- `experiment_id`: 实验ID（可选，默认自动生成）
 
-### 5. 比较多个实验
-```python
-from agent.utils import ExperimentTracker
+**返回：**
+- 训练结果摘要，包括：
+  - 实验ID
+  - 训练时长
+  - 实验目录
+  - 性能指标
+  - Checkpoint信息
 
-tracker = ExperimentTracker()
-comparison = tracker.compare_experiments([
-    "20260325_064906",
-    "20260325_123456",
-    "20260325_180000"
-])
+### run_evaluation
+运行评估并更新实验记录
 
-print(comparison["metrics_comparison"])
-print(comparison["best_by_metric"])
-```
+**参数：**
+- `eval_config_path`: 评估配置文件路径（默认：`../configs/verification_ecapa.yaml`）
+- `experiment_id`: 实验ID（可选，默认使用最新的成功实验）
+- `checkpoint_path`: Checkpoint路径（可选，默认从实验记录读取）
 
-## 清理旧实验
+**返回：**
+- 评估结果摘要，包括：
+  - 实验ID
+  - 评估时长
+  - 使用的Checkpoint
+  - 性能指标（EER, minDCF）
 
-### 1. 删除单个实验
-```python
-from agent.utils import ExperimentTracker
+### view_experiment_history
+查看实验历史记录
 
-tracker = ExperimentTracker()
-tracker.delete_experiment("20260325_064906")
-```
+**参数：**
+- `n`: 显示最近n次实验（默认：10）
 
-### 2. 批量清理
-```python
-# 保留最近的 10 个成功的实验
-deleted = tracker.cleanup_old_experiments(keep_n=10, status_filter="success")
+**返回：**
+- 实验历史摘要
 
-# 保留所有实验中最新的 20 个
-deleted = tracker.cleanup_old_experiments(keep_n=20)
-```
+### get_experiment_details
+获取特定实验的详细信息
 
-## 优势
+**参数：**
+- `experiment_id`: 实验ID
 
-1. **结构清晰**：每个实验的所有文件集中在一个目录，便于查找和管理
-2. **易于备份**：可以单独备份某个实验的整个目录
-3. **便于分享**：复制实验目录即可分享完整实验结果
-4. **版本控制友好**：实验目录结构简单，便于 .gitignore 配置
-5. **扩展性强**：可以在实验目录下添加任意额外的结果文件
+**返回：**
+- 实验详细信息
 
-## 迁移说明
+### compare_experiments
+比较多个实验的性能
 
-如果您有旧版本的实验记录（使用分离的 `configs/` 目录），系统会自动兼容：
-- 旧实验可以继续正常读取
-- 新实验将采用新的目录结构
-- 建议逐步迁移旧实验到新结构
+**参数：**
+- `experiment_ids`: 实验ID列表（逗号分隔）
+
+**返回：**
+- 实验比较结果
+
+### get_best_experiment
+找出最佳实验
+
+**参数：**
+- `metric`: 优化指标（默认：`best_error_rate`）
+  - `best_error_rate`: 最佳验证错误率（越小越好）
+  - `final_valid_error_rate`: 最终验证错误率（越小越好）
+  - `eer`: 等错误率（越小越好）
+  - `accuracy`: 准确率（越大越好）
+
+**返回：**
+- 最佳实验的详细信息
+
+### analyze_training_trends
+分析训练趋势
+
+**参数：**
+- `experiment_id`: 实验ID（可选，默认分析最新实验）
+
+**返回：**
+- 训练趋势分析报告
+
+## 配置文件修改
+
+### 训练配置修改
+系统会自动修改以下配置项：
+- `output_folder`: 设置为 `experiments/exp_{experiment_id}/results`
+- `save_folder`: 设置为 `experiments/exp_{experiment_id}/results/save`
+
+修改后的配置保存在 `experiments/exp_{experiment_id}/train_config.yaml`
+
+### 评估配置修改
+系统会自动修改评估配置中的pretrainer路径，使用训练时保存的checkpoint。
+
+修改后的配置保存在 `experiments/exp_{experiment_id}/evaluation/verification_config.yaml`
 
 ## 注意事项
 
-1. **不要手动修改** `experiments_history.json`，应通过 `ExperimentTracker` 类操作
-2. **实验 ID 冲突**：如果同一秒内创建多个实验，需要手动调整 ID
-3. **磁盘空间**：定期清理失败的实验和旧实验以节省空间
-4. **备份重要实验**：对于重要的实验结果，建议额外备份到安全位置
+1. **目录隔离**: 每次训练使用独立的输出目录，不会相互干扰
+2. **配置备份**: 原始配置文件会备份到实验目录，不会修改原始配置
+3. **Checkpoint追踪**: Checkpoint路径保存在实验记录中，评估时自动读取
+4. **日志解析**: 自动解析训练和评估日志，提取关键指标
+5. **实验记录**: 所有实验记录保存在 `experiments_history.json` 和各自的 `experiment_record.json`
+
+## 示例
+
+### 示例1：运行训练
+```python
+from agent.hpo_agent import run_training
+
+# 运行训练
+result = run_training()
+print(result)
+
+# 输出示例：
+# ✅ 训练完成！
+# 实验ID: 20260326_090000
+# 训练时长: 1234.56 秒
+# 实验目录: /home/lixh26/agent/SR-agent/agent/experiments/exp_20260326_090000
+# 训练输出目录: experiments/exp_20260326_090000/results
+#
+# 性能指标:
+#   - 最终Epoch: 10
+#   - 最终学习率: 7.96e-05
+#   - 最终训练损失: 0.2740
+#   - 最终验证损失: 0.2470
+#   - 最终验证错误率: 0.0049
+#   - 最佳Epoch: 8
+#   - 最佳验证错误率: 0.0046
+#
+# 模型Checkpoints:
+#   - 最新checkpoint: CKPT+2026-03-25+02-36-45+00.ckpt
+#   - 完整路径: /home/lixh26/agent/SR-agent/agent/experiments/exp_20260326_090000/results/save/CKPT+2026-03-25+02-36-45+00.ckpt
+#
+# 配置和结果已保存到 experiments/exp_20260326_090000/
+```
+
+### 示例2：运行评估
+```python
+from agent.hpo_agent import run_evaluation
+
+# 评估最新实验
+result = run_evaluation()
+print(result)
+
+# 输出示例：
+# ✅ 评估完成！
+# 实验ID: 20260326_090000
+# 评估时长: 300.00 秒
+# 使用的Checkpoint: /home/lixh26/agent/SR-agent/agent/experiments/exp_20260326_090000/results/save/CKPT+2026-03-25+02-36-45+00.ckpt
+# 评估结果目录: /home/lixh26/agent/SR-agent/agent/experiments/exp_20260326_090000/evaluation
+#
+# 性能指标:
+#   - EER (等错误率): 2.4886%
+#   - minDCF: 0.2280
+#
+# 评估结果已保存到实验记录中
+# 评估日志: /home/lixh26/agent/SR-agent/agent/experiments/exp_20260326_090000/evaluation/evaluation_log.txt
+```
+
+### 示例3：查看实验历史
+```python
+from agent.hpo_agent import view_experiment_history
+
+# 查看最近10次实验
+result = view_experiment_history(n=10)
+print(result)
+```
+
+### 示例4：比较实验
+```python
+from agent.hpo_agent import compare_experiments
+
+# 比较多个实验
+result = compare_experiments("20260326_090000,20260326_100000,20260326_110000")
+print(result)
+```
+
+## 总结
+
+这个实验管理系统提供了：
+
+1. **完整的实验隔离**: 每次训练独立的输出目录
+2. **自动化记录**: 自动保存配置、日志、checkpoint路径
+3. **便捷的评估**: 自动从实验记录读取checkpoint
+4. **灵活的查询**: 支持查看历史、比较实验、查找最佳实验
+5. **趋势分析**: 自动分析训练趋势，识别过拟合等问题
+
+通过这个系统，您可以轻松管理大量的超参数优化实验，快速找到最佳配置。
