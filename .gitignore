@@ -1,10 +1,41 @@
 /datasets/
 **/.env
 
+# Agent experiments
+agent/experiments/
+agent/results/
+agent/test*.py
+
+# Test files and reports
+agent/tests/
+
+# Temporary config files
+configs/*_test.json
+configs/*_backup*
+
+# Log files
+**/*.log
+**/train_log.txt
+
+# Training outputs
+results/
+save/
+
+# Database
+*.db
+*.sqlite
+
+# Backup files
+*.bak
+*.backup
+*~
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+test*_*.py
+**/test.py
 
 # C extensions
 *.so

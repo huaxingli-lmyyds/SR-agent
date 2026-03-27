@@ -1,18 +1,26 @@
+from logging import config
+from logging.config import dictConfig
+from math import e
 import os
 import re
 from tabnanny import verbose
 import dotenv
+from regex import P
+from torch import cuda
 import yaml
 import subprocess
 import json
 from pathlib import Path
 from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
+from typing import Union, Dict, List, Optional,Any
+from datetime import datetime
 
 # load environment variables from .env file
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
 os.environ["OPENAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
 os.environ["OPENAI_API_BASE"] = os.getenv("ZHIU_API_BASE_URL")
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 from langchain_openai import ChatOpenAI
@@ -34,6 +42,61 @@ EXPERIMENTS_CONFIGS_DIR.mkdir(exist_ok=True)
 
 # create the LLM
 llm = ChatOpenAI(model="GLM-4.7", temperature=0.2, max_tokens=2000)
+
+
+@tool
+def read_config(config_path=CONFIG_PATH) -> str:
+    """
+    读取当前 ECAPA-TDNN 配置文件的内容，包括完整的模型结构信息。
+    使用 ruamel.yaml 解析，保留 YAML 标签但不实例化对象。
+
+    Returns:
+      配置文件的完整 YAML 内容（包括模型结构）或错误信息
+    """
+    try:
+        # 使用 ruamel.yaml 加载，保留标签但不实例化
+        from ruamel.yaml import YAML
+        
+        yaml_parser = YAML()
+        yaml_parser.preserve_quotes = True
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml_parser.load(f)
+        
+        # 转换为普通字典以便于显示
+        config_dict = yaml_to_dict(config)
+        
+        # 返回关键配置和模型结构
+        summary = "当前配置 (包括模型结构):\n"
+        summary += "=" * 80 + "\n\n"
+        
+        # 基础训练参数
+        basic_params = ['lr', 'batch_size', 'number_of_epochs', 'step_size', 'seed']
+        summary += "📊 基础训练参数:\n"
+        for param in basic_params:
+            if param in config_dict:
+                summary += f"  {param}: {config_dict[param]}\n"
+        summary += "\n"
+        
+        # 模型结构参数
+        model_sections = ['embedding_model', 'classifier', 'compute_cost', 'opt_class']
+        summary += "🏗️  模型结构参数:\n"
+        
+        for section in model_sections:
+            if section in config_dict:
+                value = config_dict[section]
+                if isinstance(value, dict):
+                    summary += f"\n  {section}:\n"
+                    # 格式化显示嵌套结构
+                    formatted = format_nested_dict(value, indent=4)
+                    summary += formatted
+                else:
+                    summary += f"  {section}: {value}\n"
+        
+        return summary
+    except Exception as e:
+        return f"❌ 读取配置失败: {str(e)}"
+
 
 # define the tools
 @tool
@@ -90,11 +153,14 @@ def modify_config(config_json: str, persist: bool = True) -> str:
         return f"修改配置失败: {str(e)}"
 
 @tool
-def run_training() -> str:
+def run_training(config_path: str = CONFIG_PATH) -> str:
     """
     运行 ECAPA-TDNN 模型的训练脚本。
     训练完成后会自动保存实验记录，包括配置、训练日志和结果。
-
+    
+    Args:
+        config_path: 配置文件路径，默认为全局 CONFIG_PATH
+    
     Returns:
       训练输出或错误信息
     """
@@ -102,181 +168,228 @@ def run_training() -> str:
         from datetime import datetime
         import shutil
         import re
+        import sys
         
         # 读取当前配置
-        current_config = load_yaml_config(CONFIG_PATH)
+        current_config = load_config(config_path)
         
         # 记录开始时间
         start_time = datetime.now()
         
         # 检查 data_folder 是否设置
-        if current_config.get('data_folder') == '!PLACEHOLDER  # e.g. /path/to/Voxceleb' or not current_config.get('data_folder'):
+        if current_config.get('data_folder') == '!PLACEHOLDER' or not current_config.get('data_folder'):
             # 设置默认数据目录
             data_folder = "../datasets/voxceleb1"
             current_config['data_folder'] = data_folder
             print(f"⚠️  data_folder 未设置，使用默认路径: {data_folder}")
-        print(current_config.get('data_folder'))
         
-        # 运行训练，添加 data_folder 参数
+        # 使用当前Python解释器（虚拟环境的Python）
+        python_executable = sys.executable
+        print(f"使用Python解释器: {python_executable}")
+        
+        # 运行训练脚本
         result = subprocess.run(
-            ["python", TRAIN_SCRIPT, CONFIG_PATH, f"--data_folder={current_config.get('data_folder')}"],
-            capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__))
+            [python_executable, TRAIN_SCRIPT, config_path, f"--data_folder={current_config.get('data_folder')}"],
+            cwd=os.path.dirname(os.path.abspath(__file__))
         )
-        
-        # #实时输出用于测试
-        # result = subprocess.run(
-        # ["python", TRAIN_SCRIPT, CONFIG_PATH, f"--data_folder={current_config.get('data_folder')}"],
-        # cwd=os.path.dirname(os.path.abspath(__file__))
-        # )
         
         # 记录结束时间
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
         
         if result.returncode == 0:
-            # 训练成功，提取训练结果
-            training_output = result.stdout
-            
-            # 尝试从输出中提取性能指标
-            error_rate = None
-            eer = None
-            accuracy = None
-            
-            # 查找常见的性能指标
-            error_match = re.search(r'error rate[:\s]+([\d.]+)', training_output.lower())
-            if error_match:
-                error_rate = float(error_match.group(1))
-            
-            eer_match = re.search(r'EER[:\s]+([\d.]+)', training_output)
-            if eer_match:
-                eer = float(eer_match.group(1))
-            
-            acc_match = re.search(r'accuracy[:\s]+([\d.]+)', training_output.lower())
-            if acc_match:
-                accuracy = float(acc_match.group(1))
-            
-            # 创建实验记录
-            experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
-            experiment_record = {
-                "experiment_id": experiment_id,
-                "timestamp": start_time.isoformat(),
-                "duration_seconds": duration,
-                "status": "success",
-                "config": {
-                    "lr": current_config.get("lr"),
-                    "batch_size": current_config.get("batch_size"),
-                    "number_of_epochs": current_config.get("number_of_epochs"),
-                    "step_size": current_config.get("step_size"),
-                    "seed": current_config.get("seed")
-                },
-                "results": {
-                    "error_rate": error_rate,
-                    "eer": eer,
-                    "accuracy": accuracy,
-                    "final_output": training_output[-1000:]  # 保存最后1000字符
-                },
-                "training_log_path": str(current_config.get('train_log', ''))
-            }
+            # 解析训练日志
+            train_log_path = Path(__file__).parent / "results" / "ecapa_augment" / "1986" / "train_log.txt"
+            epoch_data, final_metrics = parse_training_log(train_log_path)
             
             # 保存配置副本
-            config_backup_path = EXPERIMENTS_CONFIGS_DIR / f"config_{experiment_id}.yaml"
-            shutil.copy2(CONFIG_PATH, config_backup_path)
-            experiment_record["config_backup_path"] = str(config_backup_path)
+            config_backup_path = EXPERIMENTS_CONFIGS_DIR / f"config_{start_time.strftime('%Y%m%d_%H%M%S')}.yaml"
+            shutil.copy2(config_path, config_backup_path)
             
-            # 保存实验记录到历史文件
+            # 创建并保存实验记录
+            experiment_record = create_experiment_record(
+                start_time=start_time,
+                duration=duration,
+                status="success",
+                config=current_config,
+                training_log_path=str(train_log_path),
+                epoch_data=epoch_data,
+                final_metrics=final_metrics,
+                config_backup_path=str(config_backup_path)
+            )
             save_experiment_record(experiment_record)
             
-            return f"""✅ 训练完成！
-实验ID: {experiment_id}
-训练时长: {duration:.2f} 秒
-性能指标:
-  - 错误率: {error_rate if error_rate else 'N/A'}
-  - 等错误率 (EER): {eer if eer else 'N/A'}
-  - 准确率: {accuracy if accuracy else 'N/A'}
-  
-配置和结果已保存到 experiments/ 目录
-最后输出: {training_output[-200:]}"""
+            # 构建返回信息
+            result_summary = f"✅ 训练完成！\n"
+            result_summary += f"实验ID: {experiment_record['experiment_id']}\n"
+            result_summary += f"训练时长: {duration:.2f} 秒\n"
+            
+            if final_metrics:
+                result_summary += f"\n性能指标:\n"
+                result_summary += f"  - 最终Epoch: {final_metrics.get('final_epoch', 'N/A')}\n"
+                result_summary += f"  - 最终学习率: {final_metrics.get('final_lr', 'N/A'):.2e}\n"
+                result_summary += f"  - 最终训练损失: {final_metrics.get('final_train_loss', 'N/A'):.4f}\n"
+                result_summary += f"  - 最终验证损失: {final_metrics.get('final_valid_loss', 'N/A'):.4f}\n"
+                result_summary += f"  - 最终验证错误率: {final_metrics.get('final_valid_error_rate', 'N/A'):.4f}\n"
+                result_summary += f"  - 最佳Epoch: {final_metrics.get('best_epoch', 'N/A')}\n"
+                result_summary += f"  - 最佳验证错误率: {final_metrics.get('best_error_rate', 'N/A'):.4f}\n"
+            else:
+                result_summary += "\n未能解析训练日志\n"
+            
+            result_summary += f"\n配置和结果已保存到 experiments/ 目录\n"
+            result_summary += f"训练日志路径: {train_log_path}\n"
+            
+            return result_summary
         else:
             # 训练失败，记录失败信息
-            experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
-            experiment_record = {
-                "experiment_id": experiment_id,
-                "timestamp": start_time.isoformat(),
-                "duration_seconds": duration,
-                "status": "failed",
-                "config": {
-                    "lr": current_config.get("lr"),
-                    "batch_size": current_config.get("batch_size"),
-                    "number_of_epochs": current_config.get("number_of_epochs"),
-                    "step_size": current_config.get("step_size"),
-                    "seed": current_config.get("seed")
-                },
-                "error": result.stderr[-1000:]
-            }
+            experiment_record = create_experiment_record(
+                start_time=start_time,
+                duration=duration,
+                status="failed",
+                config=current_config,
+                error=result.stderr[-1000:]
+            )
             save_experiment_record(experiment_record)
             
-            return f"❌ 训练失败 (实验ID: {experiment_id})\n错误信息: {result.stderr}"
+            return f"❌ 训练失败 (实验ID: {experiment_record['experiment_id']})\n错误信息: {result.stderr}"
     except Exception as e:
         return f"❌ 运行训练失败: {str(e)}"
 
 @tool
-def run_evaluation() -> str:
+def run_evaluation(eval_config_path: str = "../configs/verification_ecapa.yaml") -> str:
     """
     运行 ECAPA-TDNN 模型的评估脚本，使用训练后的模型。
+    评估结果会保存到最近一次成功的实验记录中。
+    从日志文件中读取EER和minDCF参数。
+
+    Args:
+        eval_config_path: 评估配置文件路径，默认为 "../configs/verification_ecapa.yaml"
 
     Returns:
       评估结果或错误信息
     """
     try:
-        # 需要一个评估配置文件，暂时使用默认的
-        eval_config = "../recipes/voxceleb/hparams/verification_ecapa.yaml"
+        from datetime import datetime
+        import re
+        import sys
+        
+        # 读取评估配置
+        eval_config = load_config(eval_config_path)
+        start_time = datetime.now()
+        
+        if eval_config.get('data_folder') == '!PLACEHOLDER' or not eval_config.get('data_folder'):
+            # 设置默认数据目录
+            data_folder = "../datasets/voxceleb1"
+            eval_config['data_folder'] = data_folder
+            print(f"⚠️  data_folder 未设置，使用默认路径: {data_folder}")
+        
+        # 使用当前Python解释器（虚拟环境的Python）
+        python_executable = sys.executable
+        print(f"使用Python解释器: {python_executable}")
+        
         result = subprocess.run(
-            ["python", EVAL_SCRIPT, eval_config],
-            capture_output=True, text=True, cwd=os.path.dirname(os.path.abspath(__file__))
+            [python_executable, EVAL_SCRIPT, eval_config_path, f"--data_folder={eval_config.get('data_folder')}"],
+            cwd=os.path.dirname(os.path.abspath(__file__))
         )
-        if result.returncode == 0:
-            return f"评估完成: {result.stdout[-500:]}"  # 最后500字符
-        else:
-            return f"评估失败: {result.stderr}"
-    except Exception as e:
-        return f"运行评估失败: {str(e)}"
-
-@tool
-def read_config() -> str:
-    """
-    读取当前 ECAPA-TDNN 配置文件的内容。
-
-    Returns:
-      配置文件的 YAML 内容或错误信息
-    """
-    try:
-        config = load_yaml_config(CONFIG_PATH)
         
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
         
-        print(type(config), config)
-        # 只返回关键配置部分，避免信息过载
-        key_params = [
-            'lr', 'batch_size', 'number_of_epochs', 'step_size',
-            'embedding_model', 'compute_cost', 'opt_class', 'seed'
-        ]
+        # 从日志文件中读取评估结果
+        eer = None
+        min_dcf = None
         
-        summary = "当前关键配置:\n"
-        for key in key_params:
-            if key in config:
-                value = config[key]
-                # 处理嵌套字典
-                if isinstance(value, dict) and key == 'compute_cost':
-                    if 'loss_fn' in value and isinstance(value['loss_fn'], dict):
-                        loss_params = {k: v for k, v in value['loss_fn'].items() if not k.startswith('_')}
-                        summary += f"  {key}: {loss_params}\n"
-                    else:
-                        summary += f"  {key}: {value}\n"
+        try:
+            # 构建配置文件的完整路径
+            full_config_path = Path(__file__).parent / eval_config_path
+            if full_config_path.exists():
+                # 重新加载配置以获取原始的seed值
+                eval_config_data = load_config(str(full_config_path))
+                seed = eval_config_data.get('seed', '1234')
+                
+                # 确保seed可以转换为字符串
+                if isinstance(seed, dict):
+                    # 如果seed是字典（如 !apply:...），使用默认值
+                    seed = '1234'
+                elif not isinstance(seed, (str, int)):
+                    # 其他非字符串类型，转换为字符串
+                    seed = str(seed)
                 else:
-                    summary += f"  {key}: {value}\n"
+                    seed = str(seed)
+                
+                # 日志路径: results/voxceleb1_2/speaker_verification_ecapa/seed/log.txt
+                log_path = Path(__file__).parent / "results" / "voxceleb1_2" / "speaker_verification_ecapa" / seed / "log.txt"
+                
+                if log_path.exists():
+                    with open(log_path, 'r', encoding='utf-8') as f:
+                        log_content = f.read()
+                    
+                    # 从日志中提取EER和minDCF
+                    # 格式: EER(%)=2.488634
+                    eer_match = re.search(r'EER\(%\)=([\d.]+)', log_content[-1000:])
+                    if eer_match:
+                        eer = float(eer_match.group(1))
+                    
+                    # 格式: minDCF=0.228039
+                    dcf_match = re.search(r'minDCF=([\d.]+)', log_content[-1000:])
+                    if dcf_match:
+                        min_dcf = float(dcf_match.group(1))
+                    
+                    print(f"✅ 从日志文件中读取到: EER={eer}, minDCF={min_dcf}")
+                else:
+                    print(f"⚠️ 日志文件不存在: {log_path}")
+            else:
+                print(f"⚠️ 配置文件不存在: {full_config_path}")
+        except Exception as e:
+            print(f"⚠️ 从日志文件读取评估结果失败: {e}")
+            import traceback
+            traceback.print_exc()
         
-        return summary
+        if result.returncode == 0:
+            # 更新最新的实验记录（添加评估结果）
+            try:
+                if EXPERIMENTS_FILE.exists():
+                    with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
+                        history = json.load(f)
+                    
+                    if history:
+                        # 更新最后一个成功的实验记录
+                        for exp in reversed(history):
+                            if exp['status'] == 'success':
+                                exp['evaluation_results'] = {
+                                    'timestamp': end_time.isoformat(),
+                                    'duration_seconds': duration,
+                                    'eer': eer,
+                                    'min_dcf': min_dcf,
+                                    'evaluation_log_path': str(log_path) if 'log_path' in locals() else None
+                                }
+                                break
+                        
+                        # 保存更新后的历史
+                        with open(EXPERIMENTS_FILE, 'w', encoding='utf-8') as f:
+                            json.dump(history, f, indent=2, ensure_ascii=False)
+            except Exception as e:
+                print(f"⚠️ 保存评估结果到实验记录失败: {e}")
+            
+            result_summary = f"✅ 评估完成！\n"
+            result_summary += f"评估时长: {duration:.2f} 秒\n"
+            
+            if eer is not None:
+                result_summary += f"  - EER (等错误率): {eer:.4f}%\n"
+            if min_dcf is not None:
+                result_summary += f"  - minDCF: {min_dcf:.4f}\n"
+            
+            result_summary += f"\n评估结果已保存到实验记录中\n"
+            if 'log_path' in locals():
+                result_summary += f"评估日志: {log_path}\n"
+            
+            return result_summary
+        else:
+            return f"❌ 评估失败\n错误信息: {result.stderr}"
     except Exception as e:
-        return f"读取配置失败: {str(e)}"
+        return f"❌ 运行评估失败: {str(e)}"
+
+
 
 @tool
 def get_training_logs() -> str:
@@ -354,18 +467,33 @@ def view_experiment_history(n: int = 10) -> str:
             summary += f"{status_icon} 实验 ID: {exp['experiment_id']}\n"
             summary += f"   时间: {exp['timestamp']}\n"
             summary += f"   状态: {exp['status']}\n"
-            summary += f"   配置: lr={exp['config'].get('lr')}, batch_size={exp['config'].get('batch_size')}\n"
+            summary += f"   训练时长: {exp['duration_seconds']:.2f} 秒\n"
+            summary += f"   配置: lr={exp['config'].get('lr')}, batch_size={exp['config'].get('batch_size')}, epochs={exp['config'].get('number_of_epochs')}\n"
             
-            if exp['status'] == 'success' and exp.get('results'):
-                results = exp['results']
-                summary += f"   结果: "
-                if results.get('error_rate'):
-                    summary += f"错误率={results['error_rate']:.4f} "
-                if results.get('eer'):
-                    summary += f"EER={results['eer']:.4f} "
-                if results.get('accuracy'):
-                    summary += f"准确率={results['accuracy']:.4f} "
-                summary += "\n"
+            if exp['status'] == 'success':
+                # 显示训练指标
+                if exp.get('final_metrics'):
+                    metrics = exp['final_metrics']
+                    summary += f"   训练指标:\n"
+                    if 'best_error_rate' in metrics:
+                        summary += f"     - 最佳验证错误率: {metrics['best_error_rate']:.4f} (Epoch {metrics['best_epoch']})\n"
+                    if 'final_valid_error_rate' in metrics:
+                        summary += f"     - 最终验证错误率: {metrics['final_valid_error_rate']:.4f} (Epoch {metrics['final_epoch']})\n"
+                    if 'final_train_loss' in metrics:
+                        summary += f"     - 最终训练损失: {metrics['final_train_loss']:.4f}\n"
+                    if 'final_valid_loss' in metrics:
+                        summary += f"     - 最终验证损失: {metrics['final_valid_loss']:.4f}\n"
+                
+                # 显示评估指标
+                if exp.get('evaluation_results'):
+                    eval_results = exp['evaluation_results']
+                    summary += f"   评估指标:\n"
+                    if eval_results.get('eer') is not None:
+                        summary += f"     - EER: {eval_results['eer']:.4f}\n"
+                    if eval_results.get('min_dcf') is not None:
+                        summary += f"     - minDCF: {eval_results['min_dcf']:.4f}\n"
+                    if eval_results.get('accuracy') is not None:
+                        summary += f"     - 准确率: {eval_results['accuracy']:.4f}\n"
             
             summary += "\n"
         
@@ -374,12 +502,235 @@ def view_experiment_history(n: int = 10) -> str:
         return f"❌ 读取实验历史失败: {str(e)}"
 
 @tool
-def get_best_experiment(metric: str = "eer") -> str:
+def analyze_training_trends(experiment_id: str = None) -> str:
+    """
+    分析训练趋势，识别过拟合、欠拟合等问题。
+    如果不提供 experiment_id，则分析最新的实验。
+
+    参数:
+      experiment_id: 实验ID，如果为None则分析最新实验
+
+    Returns:
+      训练趋势分析报告
+    """
+    try:
+        if not EXPERIMENTS_FILE.exists():
+            return "📋 暂无实验记录。"
+        
+        with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+        
+        # 获取目标实验
+        target_exp = None
+        if experiment_id:
+            target_exp = next((exp for exp in history if exp['experiment_id'] == experiment_id), None)
+        else:
+            # 获取最新的成功实验
+            successful_experiments = [exp for exp in history if exp['status'] == 'success']
+            if successful_experiments:
+                target_exp = successful_experiments[-1]
+        
+        if not target_exp or target_exp['status'] != 'success':
+            return "📋 未找到指定的成功实验记录。"
+        
+        epoch_data = target_exp.get('epoch_data', [])
+        if not epoch_data or len(epoch_data) < 5:
+            return "📋 实验数据不足，无法进行趋势分析。"
+        
+        # 分析趋势
+        train_losses = [ep['train_loss'] for ep in epoch_data]
+        valid_losses = [ep['valid_loss'] for ep in epoch_data]
+        valid_error_rates = [ep['valid_error_rate'] for ep in epoch_data]
+        
+        summary = f"\n📈 训练趋势分析 (实验ID: {target_exp['experiment_id']})\n"
+        summary += "=" * 80 + "\n\n"
+        
+        # 1. 过拟合检测
+        # 检查验证损失是否在上升
+        valid_loss_trend = valid_losses[-5:] if len(valid_losses) >= 5 else valid_losses
+        is_valid_loss_increasing = all(valid_loss_trend[i] >= valid_loss_trend[i-1] for i in range(1, len(valid_loss_trend)))
+        
+        if is_valid_loss_increasing:
+            summary += "⚠️  可能存在过拟合：\n"
+            summary += f"   - 验证损失在最近 {len(valid_loss_trend)} 个epoch中持续上升\n"
+            summary += f"   - 建议尝试：增加正则化、减少模型复杂度、增加数据增强\n\n"
+        
+        # 2. 欠拟合检测
+        avg_train_loss = sum(train_losses[-10:]) / min(10, len(train_losses))
+        avg_valid_loss = sum(valid_losses[-10:]) / min(10, len(valid_losses))
+        
+        if avg_train_loss > 0.5 and avg_valid_loss > 0.5:
+            summary += "⚠️  可能存在欠拟合：\n"
+            summary += f"   - 训练和验证损失都较高 (train={avg_train_loss:.4f}, valid={avg_valid_loss:.4f})\n"
+            summary += f"   - 建议尝试：增加模型容量、增加训练epoch、调整学习率\n\n"
+        
+        # 3. 训练稳定性分析
+        loss_variance = sum((x - avg_train_loss)**2 for x in train_losses[-10:]) / min(10, len(train_losses))
+        
+        if loss_variance > 0.01:
+            summary += "⚠️  训练不稳定：\n"
+            summary += f"   - 训练损失方差较大 ({loss_variance:.4f})\n"
+            summary += f"   - 建议尝试：降低学习率、使用学习率调度、增加batch size\n\n"
+        else:
+            summary += "✅ 训练较为稳定\n\n"
+        
+        # 4. 学习率建议
+        final_lr = target_exp['final_metrics'].get('final_lr', 0)
+        best_epoch = target_exp['final_metrics'].get('best_epoch', 0)
+        total_epochs = len(epoch_data)
+        
+        summary += f"📊 关键指标：\n"
+        summary += f"   - 最佳epoch: {best_epoch} / {total_epochs}\n"
+        summary += f"   - 最终学习率: {final_lr:.2e}\n"
+        summary += f"   - 最佳验证错误率: {min(valid_error_rates):.4f}\n"
+        
+        # 根据最佳epoch位置提供建议
+        if best_epoch < total_epochs * 0.3:
+            summary += f"\n💡 建议：最佳epoch出现较早，考虑：\n"
+            summary += f"   - 增加正则化防止过拟合\n"
+            summary += f"   - 使用学习率衰减\n"
+        elif best_epoch > total_epochs * 0.8:
+            summary += f"\n💡 建议：最佳epoch出现较晚，考虑：\n"
+            summary += f"   - 增加训练epoch\n"
+            summary += f"   - 提高学习率加速训练\n"
+        
+        return summary
+    except Exception as e:
+        return f"❌ 分析训练趋势失败: {str(e)}"
+
+
+@tool
+def get_experiment_details(experiment_id: str) -> str:
+    """
+    获取特定实验的详细信息。
+
+    参数:
+      experiment_id: 实验ID
+
+    Returns:
+      实验详细信息
+    """
+    try:
+        if not EXPERIMENTS_FILE.exists():
+            return "📋 暂无实验记录。"
+        
+        with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+        
+        exp = next((e for e in history if e['experiment_id'] == experiment_id), None)
+        
+        if not exp:
+            return f"📋 未找到实验ID为 {experiment_id} 的记录。"
+        
+        summary = f"\n📋 实验详细信息 (ID: {exp['experiment_id']})\n"
+        summary += "=" * 80 + "\n\n"
+        summary += f"时间: {exp['timestamp']}\n"
+        summary += f"状态: {exp['status']}\n"
+        summary += f"训练时长: {exp['duration_seconds']:.2f} 秒\n\n"
+        
+        summary += "配置:\n"
+        for key, value in exp['config'].items():
+            summary += f"  {key}: {value}\n"
+        
+        if exp['status'] == 'success':
+            if exp.get('final_metrics'):
+                summary += "\n训练指标:\n"
+                metrics = exp['final_metrics']
+                for key, value in metrics.items():
+                    summary += f"  {key}: {value}\n"
+            
+            if exp.get('evaluation_results'):
+                summary += "\n评估指标:\n"
+                eval_results = exp['evaluation_results']
+                for key, value in eval_results.items():
+                    if key != 'output':
+                        summary += f"  {key}: {value}\n"
+        
+        summary += f"\n配置备份: {exp.get('config_backup_path', 'N/A')}\n"
+        summary += f"训练日志: {exp.get('training_log_path', 'N/A')}\n"
+        
+        return summary
+    except Exception as e:
+        return f"❌ 获取实验详情失败: {str(e)}"
+
+
+@tool
+def compare_experiments(experiment_ids: str) -> str:
+    """
+    比较多个实验的性能。
+
+    参数:
+      experiment_ids: 实验ID列表，用逗号分隔，例如 "20260326_001,20260326_002"
+
+    Returns:
+      实验比较结果
+    """
+    try:
+        if not EXPERIMENTS_FILE.exists():
+            return "📋 暂无实验记录。"
+        
+        ids = [id.strip() for id in experiment_ids.split(',')]
+        
+        with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
+            history = json.load(f)
+        
+        experiments = [exp for exp in history if exp['experiment_id'] in ids]
+        
+        if len(experiments) < 2:
+            return f"📋 找到 {len(experiments)} 个实验，至少需要2个进行比较。"
+        
+        summary = f"\n📊 实验比较 ({len(experiments)} 个实验)\n"
+        summary += "=" * 80 + "\n\n"
+        
+        # 比较表格
+        summary += f"{'实验ID':<20} {'学习率':<12} {'Batch':<8} {'Epochs':<8} {'最佳错误率':<12} {'EER':<10}\n"
+        summary += "-" * 80 + "\n"
+        
+        for exp in experiments:
+            exp_id = exp['experiment_id']
+            lr = exp['config'].get('lr', 'N/A')
+            batch_size = exp['config'].get('batch_size', 'N/A')
+            epochs = exp['config'].get('number_of_epochs', 'N/A')
+            
+            best_error_rate = 'N/A'
+            if exp.get('final_metrics') and 'best_error_rate' in exp['final_metrics']:
+                best_error_rate = f"{exp['final_metrics']['best_error_rate']:.4f}"
+            
+            eer = 'N/A'
+            if exp.get('evaluation_results') and 'eer' in exp['evaluation_results']:
+                eer = f"{exp['evaluation_results']['eer']:.4f}"
+            
+            summary += f"{exp_id:<20} {lr:<12} {batch_size:<8} {epochs:<8} {best_error_rate:<12} {eer:<10}\n"
+        
+        # 找出最佳配置
+        successful_exps = [exp for exp in experiments if exp['status'] == 'success']
+        if successful_exps:
+            best_exp = min(successful_exps, 
+                          key=lambda x: x['final_metrics'].get('best_error_rate', float('inf'))
+                          if x.get('final_metrics') else float('inf'))
+            
+            summary += "\n🏆 最佳配置（按最佳验证错误率）：\n"
+            summary += f"  实验ID: {best_exp['experiment_id']}\n"
+            summary += f"  学习率: {best_exp['config'].get('lr')}\n"
+            summary += f"  批次大小: {best_exp['config'].get('batch_size')}\n"
+            summary += f"  最佳错误率: {best_exp['final_metrics'].get('best_error_rate', 'N/A')}\n"
+        
+        return summary
+    except Exception as e:
+        return f"❌ 比较实验失败: {str(e)}"
+
+
+@tool
+def get_best_experiment(metric: str = "best_error_rate") -> str:
     """
     找出最佳实验（根据指定指标）。
 
     参数:
-      metric: 优化指标，可选 'eer' (等错误率，越小越好) 或 'accuracy' (准确率，越大越好)，默认 'eer'
+      metric: 优化指标，可选:
+        - 'best_error_rate' (最佳验证错误率，越小越好，默认)
+        - 'final_valid_error_rate' (最终验证错误率，越小越好)
+        - 'eer' (等错误率，越小越好)
+        - 'accuracy' (准确率，越大越好)
 
     Returns:
       最佳实验的详细信息
@@ -398,22 +749,53 @@ def get_best_experiment(metric: str = "eer") -> str:
             return "📋 暂无成功的实验记录。"
         
         # 根据指标找到最佳实验
-        if metric == "eer":
-            # EER 越小越好
-            best_exp = min(successful_experiments, 
-                         key=lambda x: x['results'].get('eer', float('inf')) if x['results'].get('eer') is not None else float('inf'))
-            metric_name = "等错误率 (EER)"
-        elif metric == "accuracy":
-            # 准确率越大越好
-            best_exp = max(successful_experiments, 
-                         key=lambda x: x['results'].get('accuracy', 0) if x['results'].get('accuracy') is not None else 0)
-            metric_name = "准确率"
-        else:
-            return f"❌ 不支持的指标: {metric}。请使用 'eer' 或 'accuracy'。"
+        best_exp = None
+        metric_name = ""
+        metric_value = None
         
-        if best_exp['results'].get(metric) is None:
+        if metric == "best_error_rate":
+            # 最佳验证错误率（越小越好）
+            best_exp = min(successful_experiments, 
+                         key=lambda x: x['final_metrics'].get('best_error_rate', float('inf')) 
+                         if x.get('final_metrics') and 'best_error_rate' in x['final_metrics'] else float('inf'))
+            metric_name = "最佳验证错误率"
+            if best_exp and best_exp.get('final_metrics'):
+                metric_value = best_exp['final_metrics'].get('best_error_rate')
+        
+        elif metric == "final_valid_error_rate":
+            # 最终验证错误率（越小越好）
+            best_exp = min(successful_experiments, 
+                         key=lambda x: x['final_metrics'].get('final_valid_error_rate', float('inf'))
+                         if x.get('final_metrics') and 'final_valid_error_rate' in x['final_metrics'] else float('inf'))
+            metric_name = "最终验证错误率"
+            if best_exp and best_exp.get('final_metrics'):
+                metric_value = best_exp['final_metrics'].get('final_valid_error_rate')
+        
+        elif metric == "eer":
+            # EER 越小越好（来自评估结果）
+            best_exp = min(successful_experiments, 
+                         key=lambda x: x['evaluation_results'].get('eer', float('inf'))
+                         if x.get('evaluation_results') and 'eer' in x['evaluation_results'] else float('inf'))
+            metric_name = "等错误率 (EER)"
+            if best_exp and best_exp.get('evaluation_results'):
+                metric_value = best_exp['evaluation_results'].get('eer')
+        
+        elif metric == "accuracy":
+            # 准确率越大越好（来自评估结果）
+            best_exp = max(successful_experiments, 
+                         key=lambda x: x['evaluation_results'].get('accuracy', 0)
+                         if x.get('evaluation_results') and 'accuracy' in x['evaluation_results'] else 0)
+            metric_name = "准确率"
+            if best_exp and best_exp.get('evaluation_results'):
+                metric_value = best_exp['evaluation_results'].get('accuracy')
+        
+        else:
+            return f"❌ 不支持的指标: {metric}。请使用 'best_error_rate', 'final_valid_error_rate', 'eer' 或 'accuracy'。"
+        
+        if best_exp is None or metric_value is None:
             return f"📋 没有找到包含 {metric} 指标的实验记录。"
         
+        # 构建返回摘要
         summary = f"\n🏆 最佳实验 (按 {metric_name}):\n"
         summary += "=" * 80 + "\n\n"
         summary += f"实验 ID: {best_exp['experiment_id']}\n"
@@ -422,27 +804,38 @@ def get_best_experiment(metric: str = "eer") -> str:
         summary += f"\n配置:\n"
         for key, value in best_exp['config'].items():
             summary += f"  {key}: {value}\n"
-        summary += f"\n性能指标:\n"
-        summary += f"  {metric_name}: {best_exp['results'][metric]:.4f}\n"
-        if best_exp['results'].get('error_rate'):
-            summary += f"  错误率: {best_exp['results']['error_rate']:.4f}\n"
-        if best_exp['results'].get('eer') and metric != 'eer':
-            summary += f"  EER: {best_exp['results']['eer']:.4f}\n"
-        if best_exp['results'].get('accuracy') and metric != 'accuracy':
-            summary += f"  准确率: {best_exp['results']['accuracy']:.4f}\n"
-        summary += f"\n配置文件: {best_exp.get('config_backup_path', 'N/A')}\n"
+        
+        # 显示训练指标
+        if best_exp.get('final_metrics'):
+            summary += f"\n训练指标:\n"
+            metrics = best_exp['final_metrics']
+            if 'best_error_rate' in metrics:
+                summary += f"  最佳验证错误率: {metrics['best_error_rate']:.4f} (Epoch {metrics.get('best_epoch', 'N/A')})\n"
+            if 'final_valid_error_rate' in metrics:
+                summary += f"  最终验证错误率: {metrics['final_valid_error_rate']:.4f} (Epoch {metrics.get('final_epoch', 'N/A')})\n"
+            if 'final_train_loss' in metrics:
+                summary += f"  最终训练损失: {metrics['final_train_loss']:.4f}\n"
+            if 'final_valid_loss' in metrics:
+                summary += f"  最终验证损失: {metrics['final_valid_loss']:.4f}\n"
+        
+        # 显示评估指标
+        if best_exp.get('evaluation_results'):
+            summary += f"\n评估指标:\n"
+            eval_results = best_exp['evaluation_results']
+            if eval_results.get('eer') is not None:
+                summary += f"  EER: {eval_results['eer']:.4f}\n"
+            if eval_results.get('min_dcf') is not None:
+                summary += f"  minDCF: {eval_results['min_dcf']:.4f}\n"
+            if eval_results.get('accuracy') is not None:
+                summary += f"  准确率: {eval_results['accuracy']:.4f}\n"
+        
+        summary += f"\n配置备份: {best_exp.get('config_backup_path', 'N/A')}\n"
+        summary += f"训练日志: {best_exp.get('training_log_path', 'N/A')}\n"
         
         return summary
     except Exception as e:
         return f"❌ 查找最佳实验失败: {str(e)}"
 
-def load_yaml_config(config_path):
-    """加载 YAML 配置文件"""
-    try:
-        return parse_yaml_simpler(config_path)
-    except Exception as e:
-        print(f"⚠️ 加载 YAML 配置失败: {e}")
-        return {}
     
     
 def load_yaml_config_hyperpyyaml(config_path):
@@ -468,57 +861,382 @@ def load_yaml_config_hyperpyyaml(config_path):
         return config
     except ImportError:
         print("⚠️ hyperpyyaml 未安装，使用备用解析方法")
-        return parse_yaml_simpler(config_path)
+        return load_config(config_path)
     except Exception as e:
         print(f"⚠️ hyperpyyaml 加载失败: {e}")
         print("尝试使用备用解析方法...")
-        return parse_yaml_simpler(config_path)
+        return load_config(config_path)
 
 
-def parse_yaml_simpler(config_path):
-    """简单解析 YAML 文件，提取关键值"""
-    import re
+def yaml_to_dict(data, config=None):
+    """
+    将 ruamel.yaml 解析的数据转换为标准 Python 字典，
+    保留所有结构信息但不实例化对象。
+    同时处理所有 <key> 形式的引用，替换为实际值。
     
-    config = {}
-    with open(config_path, 'r', encoding='utf-8') as f:
-        lines = f.readlines()
+    参数:
+      data: ruamel.yaml 解析的数据（可能是 CommentedMap 等类型）
+      config: 完整的配置字典，用于解析引用
     
-    # 简单的键值对解析
-    for line in lines:
-        line = line.strip()
-        # 跳过注释和空行
-        if not line or line.startswith('#'):
-            continue
+    Returns:
+      标准的 Python 字典/列表
+    """
+    # 处理 TaggedScalar 类型
+    if hasattr(data, 'value') and hasattr(data, 'tag'):
+        # 提取标签和值
+        tag = str(data.tag) if hasattr(data, 'tag') else ''
+        value = data.value
         
-        # 跳过包含特殊标签的行
-        if '!apply:' in line or '!ref' in line or '!new:' in line or '!name:' in line:
-            continue
-        
-        # 简单的键: 值匹配
-        if ':' in line and not line.startswith('-'):
-            parts = line.split(':', 1)
-            if len(parts) == 2:
-                key = parts[0].strip()
-                value = parts[1].strip()
-                
-                # 尝试解析不同类型的值
-                if value:
-                    # 布尔值
-                    if value.lower() in ['true', 'false']:
-                        config[key] = value.lower() == 'true'
-                    # 整数
-                    elif value.isdigit():
-                        config[key] = int(value)
-                    # 浮点数
-                    elif re.match(r'^\d+\.\d+$', value):
-                        config[key] = float(value)
-                    # 字符串
+        # 如果有config，尝试解析引用
+        if config is not None:
+            # 处理 <key> 形式的引用
+            if isinstance(value, str) and value.startswith("<") and value.endswith(">"):
+                ref_key = value[1:-1].strip()
+                if ref_key in config:
+                    return parse_yaml_tags(config[ref_key], config)
+                else:
+                    # 引用不存在，返回空字符串
+                    return ""
+            # 处理包含 <key> 的字符串
+            elif isinstance(value, str) and "<" in value and ">" in value:
+                result = value
+                import re
+                matches = re.findall(r'<([^>]+)>', value)
+                for match in matches:
+                    if match in config:
+                        resolved = parse_yaml_tags(config[match], config)
+                        result = result.replace(f"<{match}>", str(resolved))
                     else:
-                        config[key] = value
+                        # 引用不存在，移除这个占位符
+                        result = result.replace(f"<{match}>", "")
+                return result
+            # 处理 !ref, !apply: 等特殊标签
+            elif isinstance(value, str) and (value.startswith("!ref <") or value.startswith("!apply:") or value.startswith("!new:")):
+                # 保留原始字符串（不带标签）
+                return value
+            else:
+                return value
+        else:
+            # 没有config，只提取值
+            return value
     
-    return config
+    elif isinstance(data, dict):
+        result = {}
+        for key, value in data.items():
+            result[key] = yaml_to_dict(value, config)
+        return result
+    
+    elif isinstance(data, list):
+        return [yaml_to_dict(item, config) for item in data]
+    
+    else:
+        # 对于基本类型（字符串、数字、布尔值等），如果有config则解析引用
+        if config is not None and isinstance(data, str):
+            # 处理 <key> 形式的引用
+            if data.startswith("<") and data.endswith(">"):
+                ref_key = data[1:-1].strip()
+                if ref_key in config:
+                    return parse_yaml_tags(config[ref_key], config)
+                else:
+                    return ""
+            # 处理包含 <key> 的字符串
+            elif "<" in data and ">" in data:
+                result = data
+                import re
+                matches = re.findall(r'<([^>]+)>', data)
+                for match in matches:
+                    if match in config:
+                        resolved = parse_yaml_tags(config[match], config)
+                        result = result.replace(f"<{match}>", str(resolved))
+                    else:
+                        result = result.replace(f"<{match}>", "")
+                return result
+            else:
+                return data
+        else:
+            return data
 
-def save_experiment_record(experiment_record):
+
+def format_nested_dict(data, indent=0):
+    """
+    格式化显示嵌套字典，用于美观地展示配置信息。
+    
+    参数:
+      data: 要格式化的字典数据
+      indent: 缩进空格数
+    
+    Returns:
+      格式化的字符串
+    """
+    result = []
+    prefix = " " * indent
+    
+    for key, value in data.items():
+        if isinstance(value, dict):
+            result.append(f"{prefix}{key}:")
+            # 递归格式化嵌套字典
+            nested = format_nested_dict(value, indent + 2)
+            result.append(nested)
+        elif isinstance(value, list):
+            # 格式化列表
+            if value and isinstance(value[0], dict):
+                # 列表中包含字典
+                result.append(f"{prefix}{key}:")
+                for item in value:
+                    if isinstance(item, dict):
+                        nested = format_nested_dict(item, indent + 2)
+                        result.append(nested)
+                    else:
+                        result.append(f"{prefix}  - {item}")
+            else:
+                # 简单列表，在一行显示
+                result.append(f"{prefix}{key}: {value}")
+        else:
+            # 简单键值对
+            result.append(f"{prefix}{key}: {value}")
+    
+    return "\n".join(result)
+
+
+def load_config(config_path) -> Dict:
+        """
+        加载配置文件并转换为标准字典
+        解析所有 <key> 形式的引用，替换为实际值
+        
+        参数:
+            config_path: 配置文件路径
+        
+        Returns:
+            配置数据（标准字典）
+        """
+        try:
+            from ruamel.yaml import YAML
+            
+            yaml_parser = YAML()
+            yaml_parser.preserve_quotes = True
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml_parser.load(f)
+            
+            if config is None:
+                config = {}
+            
+            # 先转换为标准字典
+            config_dict = yaml_to_dict(config)
+            
+            # 再次传入config_dict来解析引用
+            config_dict = yaml_to_dict(config_dict, config_dict)
+            
+            return config_dict
+        
+        except Exception as e:
+            raise RuntimeError(f"加载配置文件失败: {e}") from e
+
+def resolve_yaml_references(config_path: Union[str, Path]) -> Dict:
+    """
+    解析配置中的所有 YAML 引用（!ref, !new:, !apply: 等）
+    
+    参数:
+        config_path: 配置文件路径
+    
+    Returns:
+        解析后的配置字典
+    """
+    from ruamel.yaml import YAML
+    
+    yaml_parser = YAML()
+    yaml_parser.preserve_quotes = True
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml_parser.load(f)
+    
+    if config is None:
+        return {}
+    
+    # 转换为标准字典
+    config_dict = yaml_to_dict(config)
+    
+    resolved_config = {}
+    
+    for key, value in config_dict.items():
+        # 解析每个值
+        resolved_value = parse_yaml_tags(value, config_dict)
+        resolved_config[key] = resolved_value
+    
+    return resolved_config
+
+
+def parse_yaml_tags(value: Any, config: Dict) -> Any:
+    """
+    解析 YAML 中的特殊标签（!ref, !new:, !apply: 等）
+    
+    参数:
+        value: 要解析的值
+        config: 完整的配置字典
+    
+    Returns:
+        解析后的值
+    """
+    # 处理 !ref <key> 引用（TaggedScalar 已经被转换）
+    if isinstance(value, str) and value.startswith("!ref <") and value.endswith(">"):
+        ref_key = value[6:-1].strip()  # 移除 "!ref <" 和 ">"
+        
+        # 递归解析嵌套引用
+        if ref_key in config:
+            resolved = parse_yaml_tags(config[ref_key], config)
+            return resolved
+        else:
+            return value
+    
+    # 处理 <key> 形式的引用（简化版引用语法）
+    elif isinstance(value, str) and value.startswith("<") and value.endswith(">"):
+        ref_key = value[1:-1].strip()  # 移除 "<" 和 ">"
+        
+        # 递归解析嵌套引用
+        if ref_key in config:
+            resolved = parse_yaml_tags(config[ref_key], config)
+            return resolved
+        else:
+            return value
+    
+    # 处理 !apply:function [args] 或 !new:class {params}
+    elif isinstance(value, str) and (value.startswith("!apply:") or value.startswith("!new:")):
+        # 保留原始字符串，不实例化，只保留参数结构
+        return value
+    
+    # 处理 !PLACEHOLDER
+    elif isinstance(value, str) and value == "!PLACEHOLDER":
+        return "!PLACEHOLDER"
+    
+    # 处理包含 <key> 的字符串（如 "results/ecapa_augment/<seed>"）
+    elif isinstance(value, str) and "<" in value and ">" in value:
+        # 简单的字符串替换
+        result = value
+        import re
+        # 查找所有 <key> 模式
+        matches = re.findall(r'<([^>]+)>', value)
+        for match in matches:
+            if match in config:
+                resolved = parse_yaml_tags(config[match], config)
+                result = result.replace(f"<{match}>", str(resolved))
+        return result
+    
+    # 处理 TaggedScalar 类型
+    elif hasattr(value, 'value'):
+        return parse_yaml_tags(value.value, config)
+    
+    # 处理字典
+    elif isinstance(value, dict):
+        resolved_dict = {}
+        for key, val in value.items():
+            resolved_dict[key] = parse_yaml_tags(val, config)
+        return resolved_dict
+    
+    # 处理列表
+    elif isinstance(value, list):
+        return [parse_yaml_tags(item, config) for item in value]
+    
+    # 其他类型直接返回
+    else:
+        return value
+
+
+
+def parse_training_log(train_log_path: Path) -> tuple:
+    """
+    解析训练日志文件，提取每个epoch的数据
+    
+    参数:
+      train_log_path: 训练日志文件路径
+      
+    Returns:
+      (epoch_data, final_metrics) 元组
+    """
+    epoch_data = []
+    final_metrics = {}
+    
+    if not train_log_path.exists():
+        return epoch_data, final_metrics
+    
+    try:
+        with open(train_log_path, 'r', encoding='utf-8') as f:
+            log_content = f.read()
+        
+        # 格式: epoch: 10, lr: 7.96e-05 - train loss: 2.74e-01 - valid loss: 2.47e-01, valid ErrorRate: 4.89e-03
+        log_pattern = re.compile(r'epoch:\s*(\d+),\s*lr:\s*([\d.e+-]+)\s*-\s*train loss:\s*([\d.e+-]+)\s*-\s*valid loss:\s*([\d.e+-]+),\s*valid ErrorRate:\s*([\d.e+-]+)')
+        
+        for line in log_content.split('\n'):
+            match = log_pattern.search(line)
+            if match:
+                epoch_data.append({
+                    'epoch': int(match.group(1)),
+                    'lr': float(match.group(2)),
+                    'train_loss': float(match.group(3)),
+                    'valid_loss': float(match.group(4)),
+                    'valid_error_rate': float(match.group(5))
+                })
+        
+        # 提取最终指标
+        if epoch_data:
+            final_epoch = epoch_data[-1]
+            final_metrics = {
+                'final_epoch': final_epoch['epoch'],
+                'final_lr': final_epoch['lr'],
+                'final_train_loss': final_epoch['train_loss'],
+                'final_valid_loss': final_epoch['valid_loss'],
+                'final_valid_error_rate': final_epoch['valid_error_rate'],
+                'total_epochs': len(epoch_data)
+            }
+            
+            # 找出最佳epoch
+            best_epoch = min(epoch_data, key=lambda x: x['valid_error_rate'])
+            final_metrics['best_epoch'] = best_epoch['epoch']
+            final_metrics['best_valid_loss'] = best_epoch['valid_loss']
+            final_metrics['best_error_rate'] = best_epoch['valid_error_rate']
+    except Exception as e:
+        print(f"⚠️ 解析训练日志失败: {e}")
+    
+    return epoch_data, final_metrics
+
+
+def create_experiment_record(start_time: datetime, duration: float, status: str, 
+                            config: dict, **kwargs) -> dict:
+    """
+    创建实验记录字典（统一入口）
+    
+    参数:
+      start_time: 实验开始时间
+      duration: 实验持续时间（秒）
+      status: 实验状态 ('success' 或 'failed')
+      config: 配置参数字典
+      **kwargs: 其他要添加的字段（如 final_metrics, error 等）
+    
+    Returns:
+      实验记录字典
+    """
+    experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
+    
+    record = {
+        "experiment_id": experiment_id,
+        "timestamp": start_time.isoformat(),
+        "duration_seconds": duration,
+        "status": status,
+        "config": {
+            "lr": config.get("lr"),
+            "batch_size": config.get("batch_size"),
+            "number_of_epochs": config.get("number_of_epochs"),
+            "step_size": config.get("step_size"),
+            "seed": config.get("seed")
+        }
+    }
+    
+    # 添加额外字段
+    record.update(kwargs)
+    
+    return record
+
+
+def save_experiment_record(experiment_record) -> None:
     """
     保存实验记录到历史文件。
 
@@ -526,22 +1244,36 @@ def save_experiment_record(experiment_record):
       experiment_record: 包含实验信息的字典
     """
     try:
-        # 读取现有历史
         history = []
-        if EXPERIMENTS_FILE.exists():
-            with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
-                history = json.load(f)
         
-        # 添加新实验
+        # 读取现有的实验历史
+        if EXPERIMENTS_FILE.exists():
+            try:
+                with open(EXPERIMENTS_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:  # 只有文件不为空时才解析
+                        history = json.loads(content)
+                    else:
+                        print(f"ℹ️  实验历史文件为空，创建新记录")
+            except json.JSONDecodeError as e:
+                print(f"⚠️  实验历史文件格式错误，将创建新记录: {e}")
+                history = []
+            except Exception as e:
+                print(f"⚠️  读取实验历史文件失败: {e}")
+                history = []
+        
+        # 添加新实验记录
         history.append(experiment_record)
         
-        # 保存回文件
+        # 保存到文件
         with open(EXPERIMENTS_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=2, ensure_ascii=False)
         
-        print(f"✅ 实验记录已保存: {experiment_record['experiment_id']}")
+        print(f"✅ 实验记录已保存: {experiment_record.get('experiment_id', 'Unknown')}")
     except Exception as e:
         print(f"⚠️ 保存实验记录失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 # list of tools
 tools = [
@@ -552,7 +1284,10 @@ tools = [
     get_training_logs, 
     backup_config,
     view_experiment_history,
-    get_best_experiment
+    get_best_experiment,
+    analyze_training_trends,
+    get_experiment_details,
+    compare_experiments
 ]
 
 def load_system_prompt():
@@ -589,168 +1324,36 @@ def create_agent():
         print(f"无法使用标准 Agent API: {e}")
         print("尝试使用简化的实现...")
         
-        # 简化版本：直接调用工具
-        return SimpleAgent(system_prompt, tools, llm)
 
-
-class SimpleAgent:
-    """简化的智能体实现"""
-    def __init__(self, system_prompt, tools, llm):
-        self.system_prompt = system_prompt
-        self.tools = {tool.name: tool for tool in tools}
-        self.llm = llm
-        self.tool_descriptions = "\n".join([
-            f"{tool.name}: {tool.description}" for tool in tools
-        ])
-    
-    def invoke(self, inputs):
-        """执行智能体任务"""
-        user_input = inputs.get("input", "")
-        
-        # 构建提示词
-        prompt = f"""{self.system_prompt}
-
-可用工具:
-{self.tool_descriptions}
-
-用户请求: {user_input}
-
-请选择合适的工具来完成任务。如果需要修改配置，请提供JSON格式的参数。
-"""
-        
-        # 调用 LLM
-        response = self.llm.invoke(prompt)
-        
-        # 解析响应并执行工具
-        result = self._parse_and_execute(response.content, user_input)
-        
-        return {"output": result}
-    
-    def _parse_and_execute(self, response, original_input):
-        """解析LLM响应并执行工具"""
-        # 简单的关键词匹配
-        if "读取配置" in original_input or "read_config" in original_input.lower():
-            return self.tools["read_config"].invoke({})
-        elif "备份" in original_input or "backup" in original_input.lower():
-            return self.tools["backup_config"].invoke({})
-        elif "实验历史" in original_input or "history" in original_input.lower():
-            return self.tools["view_experiment_history"].invoke({})
-        elif "最佳实验" in original_input or "best" in original_input.lower():
-            # 检查是否指定了指标
-            if "eer" in original_input.lower():
-                return self.tools["get_best_experiment"].invoke({"metric": "eer"})
-            elif "accuracy" in original_input.lower() or "准确率" in original_input:
-                return self.tools["get_best_experiment"].invoke({"metric": "accuracy"})
-            else:
-                return self.tools["get_best_experiment"].invoke({})
-        elif "学习率" in original_input or "lr" in original_input.lower():
-            # 尝试提取学习率值
-            import re
-            lr_match = re.search(r'(\d+\.?\d*)', original_input)
-            if lr_match:
-                lr_value = float(lr_match.group(1))
-                return self.tools["modify_config"].invoke({
-                    "config_json": '{"lr": ' + str(lr_value) + '}',
-                    "persist": True
-                })
-        elif "批次" in original_input or "batch" in original_input.lower():
-            import re
-            batch_match = re.search(r'(\d+)', original_input)
-            if batch_match:
-                batch_value = int(batch_match.group(1))
-                return self.tools["modify_config"].invoke({
-                    "config_json": '{"batch_size": ' + str(batch_value) + '}',
-                    "persist": True
-                })
-        
-        # 默认返回 LLM 响应
-        return f"智能体响应: {response}\n\n提示: 尝试使用明确的指令，如'读取配置'、'查看实验历史'或'将学习率调整为0.001'"
 
 def main():
-    """主程序入口"""
-    print("=" * 80)
-    print("ECAPA-TDNN 超参数优化智能体系统")
-    print("=" * 80)
-    print()
+    # """主程序入口"""
+    # print("=" * 80)
+    # print("ECAPA-TDNN 超参数优化智能体系统")
+    # print("=" * 80)
+    # print()
+    # agent = create_agent()
     
-    # 创建智能体
-    print("正在初始化智能体...")
-    agent_executor = create_agent()
-    print("智能体初始化完成！")
-    print()
     
-    # 显示使用说明
-    print("使用说明:")
-    print("- 输入自然语言指令，例如:")
-    print("  '将学习率调整为 0.01'")
-    print("  '分析当前配置并给出优化建议'")
-    print("  '训练模型并评估性能'")
-    print("- 输入 'quit' 或 'exit' 退出程序")
-    print("- 输入 'help' 查看更多示例")
-    print()
-    print("=" * 80)
-    print()
     
-    # 交互式循环
-    while True:
-        try:
-            user_input = input("请输入指令: ").strip()
-            
-            if not user_input:
-                continue
-                
-            if user_input.lower() in ['quit', 'exit', '退出']:
-                print("感谢使用，再见！")
-                break
-                
-            if user_input.lower() == 'help':
-                print("\n常用指令示例:")
-                print("  基础操作:")
-                print("  1. 读取当前配置")
-                print("  2. 备份当前配置")
-                print()
-                print("  配置修改:")
-                print("  3. 将学习率调整为 0.001")
-                print("  4. 将批次大小调整为 64")
-                print()
-                print("  训练与评估:")
-                print("  5. 训练模型")
-                print("  6. 评估模型性能")
-                print("  7. 查看训练日志")
-                print()
-                print("  实验管理:")
-                print("  8. 查看实验历史")
-                print("  9. 查看最佳实验 (按EER)")
-                print("  10. 查看最佳实验 (按准确率)")
-                print()
-                print("  高级功能:")
-                print("  11. 优化超参数以提升性能")
-                print("  12. 分析当前配置并给出改进建议")
-                print()
-                continue
-            
-            print(f"\n正在处理: {user_input}")
-            print("-" * 80)
-            
-            # 执行智能体（LangChain 1.0 新方式：使用 messages 格式）
-            result = agent_executor.invoke({
-                "messages": [
-                    {"role": "user", "content": user_input}
-                ]
-            })
-            
-            print("-" * 80)
-            print(f"\n✅ 执行结果:")
-            print(result.content)
-            print()
-            
-        except KeyboardInterrupt:
-            print("\n\n程序被中断")
-            continue
-        except Exception as e:
-            print(f"\n发生错误: {e}")
-            print()
-            continue
+    
+    # print("load_config...")
+    # result = load_config(config_path=CONFIG_PATH)
+    # print(type(result), result)
+    # re = format_nested_dict(result)
+    # print(type(re), re)
+    # 测试成功，加载配置完全正确，并且能够解析引用
+    
+    
+    
+    
+    # run_training_result = run_training.invoke({})
+    # 测试完成，能够调用train函数并且可以进行训练
+
+    result = analyze_training_trends.invoke(input={"experiment_id": "20260326_092044"})
+    print(result)
+
+
 
 if __name__ == "__main__":
     main()
