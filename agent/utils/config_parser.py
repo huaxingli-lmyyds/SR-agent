@@ -129,6 +129,17 @@ class ConfigParser:
         
         self._config_cache = None
         self._data_folder = None  # 用于在解析前设置 data_folder
+
+    @property
+    def data_folder(self) -> Optional[str]:
+        """获取 data_folder 覆盖值"""
+        return self._data_folder
+
+    @data_folder.setter
+    def data_folder(self, value: Optional[str]):
+        """设置 data_folder 覆盖值，并清理缓存以便重新解析"""
+        self._data_folder = value
+        self._config_cache = None
     
     def load_config(self, convert_to_dict: bool = True, 
                    resolve_references: bool = True) -> Union[Dict, Any]:
@@ -299,8 +310,12 @@ class ConfigParser:
                 result["errors"].append(f"缺少必需字段: {field}")
                 result["valid"] = False
             elif not isinstance(config[field], expected_type):
+                if isinstance(expected_type, tuple):
+                    expected_type_name = " 或 ".join(t.__name__ for t in expected_type)
+                else:
+                    expected_type_name = expected_type.__name__
                 result["errors"].append(
-                    f"字段 {field} 类型错误: 期望 {expected_type.__name__}, "
+                    f"字段 {field} 类型错误: 期望 {expected_type_name}, "
                     f"实际 {type(config[field]).__name__}"
                 )
                 result["valid"] = False
@@ -557,13 +572,38 @@ def compare_configs(config1: Union[str, Path, Dict],
     Returns:
         比较结果字典
     """
+    if isinstance(config1, dict) and isinstance(config2, dict):
+        result = {
+            "added": [],
+            "removed": [],
+            "modified": {},
+            "unchanged": []
+        }
+
+        def _compare_dicts(d1, d2, prefix=""):
+            all_keys = set(d1.keys()) | set(d2.keys())
+            for key in all_keys:
+                full_key = f"{prefix}.{key}" if prefix else key
+                if key not in d1:
+                    result["added"].append(full_key)
+                elif key not in d2:
+                    result["removed"].append(full_key)
+                elif isinstance(d1[key], dict) and isinstance(d2[key], dict):
+                    _compare_dicts(d1[key], d2[key], full_key)
+                elif d1[key] != d2[key]:
+                    result["modified"][full_key] = {"old": d1[key], "new": d2[key]}
+                else:
+                    result["unchanged"].append(full_key)
+
+        _compare_dicts(config1, config2)
+        return result
+
     parser1 = ConfigParser(config1) if not isinstance(config1, dict) else None
     parser2 = ConfigParser(config2) if not isinstance(config2, dict) else None
     
     if parser1:
         return parser1.compare_configs(config2)
     else:
-        parser2.compare_configs(config1)
         # 交换结果中的 old 和 new
         result = parser2.compare_configs(config1)
         return {

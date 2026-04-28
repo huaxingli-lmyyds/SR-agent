@@ -14,15 +14,21 @@ from .config_tools import (
 from .training_tools import (
     TrainModel,
     EvaluateModel,
-    AnalyzeResults,
+    AnalyzeResults
+)
+
+from .experiment_history_tools import (
+    GetExperimentResults,
+    ListExperiments,
     CompareExperiments
 )
 
 from .evaluation_tools import (
-    RunEvaluation,
-    GetEvaluationResults,
-    CompareEvaluations,
-    ListEvaluations
+    RunEvaluation
+)
+
+from .data_processing_tools import (
+    PrepareVoxCelebData
 )
 
 __all__ = [
@@ -37,11 +43,15 @@ __all__ = [
     'TrainModel',
     'EvaluateModel',
     'AnalyzeResults',
+    
+    # experiment_history_tools
+    'GetExperimentResults',
+    'ListExperiments', 
     'CompareExperiments',
     
     # evaluation_tools
     'RunEvaluation',
-    'GetEvaluationResults',
-    'CompareEvaluations',
-    'ListEvaluations',
+
+    # data_processing_tools
+    'PrepareVoxCelebData',
 ]

@@ -45,7 +45,6 @@ def get_configs_dir() -> Path:
     """
     return get_project_root() / "configs"
 
-
 def get_datasets_dir() -> Path:
     """
     获取数据集目录
@@ -551,17 +550,18 @@ def get_path_info(path: Union[str, Path]) -> dict:
         dict: 包含路径信息的字典
     """
     path = Path(path).resolve()
-    stat = path.stat()
+    exists = path.exists()
+    stat = path.stat() if exists else None
     
     info = {
         "path": str(path),
         "name": path.name,
-        "exists": path.exists(),
+        "exists": exists,
         "is_file": path.is_file(),
         "is_dir": path.is_dir(),
         "is_absolute": path.is_absolute(),
-        "size": stat.st_size if path.is_file() else 0,
-        "mtime": datetime.fromtimestamp(stat.st_mtime) if path.exists() else None,
+        "size": stat.st_size if stat and path.is_file() else 0,
+        "mtime": datetime.fromtimestamp(stat.st_mtime) if stat else None,
         "extension": path.suffix if path.is_file() else None,
     }
     

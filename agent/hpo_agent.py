@@ -15,6 +15,10 @@ from langchain_core.tools import tool
 from langchain_core.prompts import PromptTemplate
 from typing import Union, Dict, List, Optional,Any
 from datetime import datetime
+from langchain.agents.middleware import before_model, after_model
+
+
+
 
 # load environment variables from .env file
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
@@ -275,7 +279,7 @@ def run_training(config_path: str = CONFIG_PATH, experiment_id: str = None) -> s
                 ckpt_dirs = list(save_dir.glob("CKPT+*"))
                 if ckpt_dirs:
                     # 找到最新的checkpoint文件夹（按修改时间排序）
-                    checkpoint_path = sorted(ckpt_dirs, key=lambda x: x.stat().st_mtime)[-1]
+                    checkpoint_path = sorted(ckpt_dirs, key=lambda x: x.stat().st_mtime)[0]
                     print(f"✅ 找到最新checkpoint文件夹: {checkpoint_path}")
             
             # # 如果训练日志存在，复制到实验目录（已在训练前备份配置，这里不再重复）
@@ -502,7 +506,7 @@ def run_evaluation(eval_config_path: str = "../configs/verification_ecapa.yaml",
             
             # 从我们指定的评估输出目录中读取日志
             # 路径: experiments/exp_{exp_id}/evaluation/results/speaker_verification_ecapa/{seed}/log.txt
-            log_path = absolute_eval_output_folder / "speaker_verification_ecapa" / seed / "log.txt"
+            log_path = absolute_eval_output_folder / "log.txt"
             
             print(f"🔍 查找评估日志: {log_path}")
             
@@ -1569,7 +1573,7 @@ def main():
     
     
     for chunk in agent.stream({
-        "messages": [{"role": "user", "content": "优化ECAPA-TDNN模型的超参数，目标是让ERR降到4%以下"}]
+        "messages": [{"role": "user", "content": "优化ECAPA-TDNN模型的超参数，目标是让ERR降到2%以下,请确保每次只修改一到两个参数避免系统过度调整，并且在每次修改后进行训练和评估以验证效果。上次实验进行到一半终止了，experiment_id为20260331_141737，请你先调用run_evaluation进行评估再继续训练，然后再进行优化。"}]
     }):
         print(chunk)
     

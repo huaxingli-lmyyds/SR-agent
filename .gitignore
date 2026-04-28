@@ -5,6 +5,7 @@
 agent/experiments/
 agent/results/
 agent/test*.py
+agent/experiment.zip
 
 # Test files and reports
 agent/tests/

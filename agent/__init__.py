@@ -26,9 +26,6 @@ from .tools import (
     
     # 评估工具
     RunEvaluation,
-    GetEvaluationResults,
-    CompareEvaluations,
-    ListEvaluations,
 )
 
 # 导入实用函数
@@ -77,9 +74,6 @@ __all__ = [
     'AnalyzeResults',
     'CompareExperiments',
     'RunEvaluation',
-    'GetEvaluationResults',
-    'CompareEvaluations',
-    'ListEvaluations',
     # 路径工具
     'get_project_root',
     'get_agent_dir',

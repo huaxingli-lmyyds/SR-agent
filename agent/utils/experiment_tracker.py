@@ -91,12 +91,19 @@ class ExperimentTracker:
             "timestamp": datetime.now().isoformat(),
             "description": description,
             "status": "created",
-            "config_file": config_path,
-            "data_folder": data_folder,
-            "config_backup": str(config_backup),
-            "config": config_serializable,
-            "results": None,
             "duration_seconds": 0,
+            "config": config_serializable,
+            "training": {
+                "config_path": config_path,
+                "config_backup_path": str(config_backup),
+                "data_folder": data_folder,
+                "log_path": None,
+                "output_folder": config_serializable.get("output_folder"),
+                "metrics": None,
+                "model_paths": []
+            },
+            "evaluation": None,
+            "results": None,
             "error": None
         }
         
@@ -114,7 +121,9 @@ class ExperimentTracker:
                          results: Optional[Dict] = None,
                          status: Optional[str] = None,
                          error: Optional[str] = None,
-                         duration: Optional[float] = None) -> bool:
+                         duration: Optional[float] = None,
+                         training: Optional[Dict] = None,
+                         evaluation: Optional[Dict] = None) -> bool:
         """
         更新实验信息
         
@@ -142,6 +151,12 @@ class ExperimentTracker:
             record["error"] = error
         if duration is not None:
             record["duration_seconds"] = duration
+        if training is not None:
+            current_training = record.get("training") or {}
+            current_training.update(training)
+            record["training"] = current_training
+        if evaluation is not None:
+            record["evaluation"] = evaluation
         
         # 保存更新后的记录
         record_path = self.experiments_dir / experiment_id / "experiment_record.json"

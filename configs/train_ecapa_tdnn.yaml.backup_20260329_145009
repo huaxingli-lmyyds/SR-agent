@@ -40,12 +40,12 @@ skip_prep: false
 ckpt_interval_minutes: 15 # save checkpoint every N min
 
 # Training parameters
-number_of_epochs: 12
-batch_size: 24
-lr: 0.001
+number_of_epochs: 50
+batch_size: 96
+lr: 0.0002
 base_lr: 0.00000001
 max_lr: !ref <lr>
-step_size: 65000
+step_size: 100000
 sample_rate: 16000
 sentence_len: 3.0 # seconds
 shuffle: true
@@ -75,12 +75,17 @@ compute_features: !new:speechbrain.lobes.features.Fbank
 
 embedding_model: !new:speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
   input_size: !ref <n_mels>
-  channels: [1024, 1024, 1024, 1024, 3072]
+  channels:
+  - 1024
+  - 1024
+  - 1024
+  - 1024
+  - 3072
   kernel_sizes: [5, 3, 3, 3, 1]
   dilations: [1, 2, 3, 4, 1]
   groups: [1, 1, 1, 1, 1]
-  attention_channels: 128
-  lin_neurons: 192
+  attention_channels: 256
+  lin_neurons: 256
 
 classifier: !new:speechbrain.lobes.models.ECAPA_TDNN.Classifier
   input_size: 192
@@ -166,7 +171,7 @@ compute_cost: !new:speechbrain.nnet.losses.LogSoftmaxWrapper
 
 opt_class: !name:torch.optim.Adam
   lr: !ref <lr>
-  weight_decay: 1e-05
+  weight_decay: 5e-06
 
 lr_annealing: !new:speechbrain.nnet.schedulers.CyclicLRScheduler
   base_lr: !ref <base_lr>

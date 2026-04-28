@@ -5,12 +5,11 @@
 """
 
 from langchain_core.tools import tool
-from typing import Optional, Dict, List
+from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
-import subprocess
-import re
 from datetime import datetime
 import json
+import re
 
 # 导入 utils 模块
 from agent.utils import (
@@ -18,20 +17,94 @@ from agent.utils import (
     get_experiments_dir,
     ensure_dir,
     get_experiment_log_path,
-    create_experiment,
-    list_experiments,
-    find_best_experiment,
+    yaml_to_dict,
+    get_project_root,
+    ExperimentTracker,
     ExperimentLogger
 )
 
 # 全局路径
 CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
-TRAIN_SCRIPT = str(Path(__file__).parent.parent.parent / "recipes" / "voxceleb" / "train_speaker_embeddings.py")
+
+
+def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
+    candidates: List[Path] = []
+
+    if output_folder:
+        out_dir = Path(output_folder)
+        if out_dir.exists():
+            candidates.extend(out_dir.glob("*.ckpt"))
+            candidates.extend(out_dir.glob("*.pt"))
+
+    if exp_dir.exists():
+        candidates.extend(exp_dir.glob("*.ckpt"))
+        candidates.extend(exp_dir.glob("*.pt"))
+
+    # Deduplicate and sort by mtime desc
+    uniq = {p.resolve(): p for p in candidates}
+    sorted_paths = sorted(uniq.values(), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [str(p) for p in sorted_paths]
+
+
+def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
+    if not path_value:
+        return None
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return get_project_root() / path
+
+
+def _parse_training_log(train_log_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    epoch_data: List[Dict[str, Any]] = []
+    final_metrics: Dict[str, Any] = {}
+
+    if not train_log_path.exists():
+        return epoch_data, final_metrics
+
+    pattern = re.compile(
+        r"epoch:\s*(\d+),\s*lr:\s*([\d.e+-]+)\s*-\s*"
+        r"train loss:\s*([\d.e+-]+)\s*-\s*"
+        r"valid loss:\s*([\d.e+-]+),\s*valid ErrorRate:\s*([\d.e+-]+)"
+    )
+
+    with open(train_log_path, "r", encoding="utf-8") as f:
+        for line in f:
+            match = pattern.search(line)
+            if not match:
+                continue
+            epoch_data.append(
+                {
+                    "epoch": int(match.group(1)),
+                    "lr": float(match.group(2)),
+                    "train_loss": float(match.group(3)),
+                    "valid_loss": float(match.group(4)),
+                    "valid_error_rate": float(match.group(5)),
+                }
+            )
+
+    if epoch_data:
+        final_epoch = epoch_data[-1]
+        best_epoch = min(epoch_data, key=lambda item: item["valid_error_rate"])
+        final_metrics = {
+            "final_epoch": final_epoch["epoch"],
+            "final_lr": final_epoch["lr"],
+            "final_train_loss": final_epoch["train_loss"],
+            "final_valid_loss": final_epoch["valid_loss"],
+            "final_valid_error_rate": final_epoch["valid_error_rate"],
+            "total_epochs": len(epoch_data),
+            "best_epoch": best_epoch["epoch"],
+            "best_valid_loss": best_epoch["valid_loss"],
+            "best_error_rate": best_epoch["valid_error_rate"],
+        }
+
+    return epoch_data, final_metrics
 
 
 @tool
 def TrainModel(config_path: Optional[str] = None, 
-               data_folder: Optional[str] = None) -> str:
+               data_folder: Optional[str] = None,
+               description: Optional[str] = None) -> str:
     """
     运行 ECAPA-TDNN 模型的训练脚本。
     训练完成后会自动保存实验记录，包括配置、训练日志和结果。
@@ -39,6 +112,7 @@ def TrainModel(config_path: Optional[str] = None,
     参数:
         config_path: 配置文件路径，如果为 None 则使用默认配置
         data_folder: 数据文件夹路径，如果为 None 则使用配置文件中的设置
+        description: 实验描述（可选）
     
     Returns:
         str: 训练输出或错误信息
@@ -61,41 +135,27 @@ def TrainModel(config_path: Optional[str] = None,
             df = str(config_data.get('data_folder'))
         else:
             df = "../datasets/voxceleb1"
+
+        if not df or df == "!PLACEHOLDER":
+            df = "../datasets/voxceleb1"
         
         # 记录开始时间
         start_time = datetime.now()
-        experiment_id = start_time.strftime("%Y%m%d_%H%M%S")
-        
-        # 创建实验记录
-        exp_record = create_experiment(
-            experiment_id=experiment_id,
-            config_file=config_path_str,
+        tracker = ExperimentTracker()
+        experiment_id = tracker.create_experiment(
+            config=yaml_to_dict(config_data),
+            config_path=config_path_str,
             data_folder=df,
-            timestamp=start_time
+            description=description or ""
         )
-        
+
         # 准备实验目录
         exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
         
-        # 备份配置
-        config_backup = exp_dir / "config.yaml"
-        shutil.copy2(config_path_str, config_backup)
-        
-        print(f"\n{'='*80}")
-        print(f"🚀 开始训练 - 实验 ID: {experiment_id}")
-        print(f"{'='*80}")
-        print(f"配置文件: {config_path_str}")
-        print(f"数据文件夹: {df}")
-        print(f"实验目录: {exp_dir}")
-        print(f"开始时间: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*80}\n")
-        
-        # 运行训练
-        result = subprocess.run(
-            ["python", TRAIN_SCRIPT, config_path_str, f"--data_folder={df}"],
-            capture_output=True, text=True, 
-            cwd=str(Path(__file__).parent.parent.parent)
-        )
+        # 运行训练（非控制台调用）
+        from recipes.train_pipeline import train_pipeline
+        overrides = [f"data_folder: {df}"]
+        train_result = train_pipeline(config_path_str, overrides=overrides)
         
         # 记录结束时间
         end_time = datetime.now()
@@ -109,100 +169,60 @@ def TrainModel(config_path: Optional[str] = None,
             start_time=start_time,
             end_time=end_time,
             duration=duration,
-            stdout=result.stdout,
-            stderr=result.stderr
+            stdout="",
+            stderr=""
         )
-        
-        if result.returncode == 0:
-            # 训练成功，提取训练结果
-            training_output = result.stdout
-            
-            # 尝试从输出中提取性能指标
-            error_rate = None
-            eer = None
-            accuracy = None
-            loss = None
-            
-            # 查找常见的性能指标
-            error_match = re.search(r'error rate[:\s]+([\d.]+)', training_output.lower())
-            if error_match:
-                error_rate = float(error_match.group(1))
-            
-            eer_match = re.search(r'EER[:\s]+([\d.]+)', training_output)
-            if eer_match:
-                eer = float(eer_match.group(1))
-            
-            acc_match = re.search(r'accuracy[:\s]+([\d.]+)', training_output.lower())
-            if acc_match:
-                accuracy = float(acc_match.group(1))
-            
-            loss_match = re.search(r'loss[:\s]+([\d.]+)', training_output.lower())
-            if loss_match:
-                loss = float(loss_match.group(1))
-            
-            # 更新实验记录
-            exp_record.update({
-                'duration_seconds': duration,
-                'status': 'success',
-                'config_backup': str(config_backup),
-                'log_file': str(logger.log_path),
-                'results': {
-                    'error_rate': error_rate,
-                    'eer': eer,
-                    'accuracy': accuracy,
-                    'loss': loss,
-                    'final_output': training_output[-1000:]
-                }
-            })
-            
-            # 保存实验记录
-            record_path = exp_dir / "experiment_record.json"
-            with open(record_path, 'w', encoding='utf-8') as f:
-                json.dump(exp_record, f, indent=2, ensure_ascii=False)
-            
-            return f"""✅ 训练完成！
-实验 ID: {experiment_id}
-训练时长: {duration:.2f} 秒
 
-📊 性能指标:
-  - 错误率: {error_rate if error_rate else 'N/A'}
-  - 等错误率 (EER): {eer if eer else 'N/A'}
-  - 准确率: {accuracy if accuracy else 'N/A'}
-  - 损失: {loss if loss else 'N/A'}
+        eer = train_result.get("eer") if isinstance(train_result, dict) else None
+        output_folder = config_data.get("output_folder")
+        output_folder_path = _resolve_path(str(output_folder)) if output_folder else None
+        model_paths = _find_model_paths(str(output_folder_path) if output_folder_path else None, exp_dir)
+        train_log_path = _resolve_path(str(config_data.get("train_log")))
+        if train_log_path is None and output_folder_path is not None:
+            train_log_path = output_folder_path / "train_log.txt"
 
-📁 文件位置:
-  - 实验目录: {exp_dir}
-  - 配置备份: {config_backup}
-  - 训练日志: {logger.log_path}
-  - 实验记录: {record_path}
+        epoch_data, final_metrics = (
+            _parse_training_log(train_log_path) if train_log_path else ([], {})
+        )
 
-最后输出:
-{training_output[-200:]}"""
-        else:
-            # 训练失败
-            exp_record.update({
-                'duration_seconds': duration,
-                'status': 'failed',
-                'config_backup': str(config_backup),
-                'log_file': str(logger.log_path),
-                'error': result.stderr[-1000:]
-            })
-            
-            # 保存失败记录
-            record_path = exp_dir / "experiment_record.json"
-            with open(record_path, 'w', encoding='utf-8') as f:
-                json.dump(exp_record, f, indent=2, ensure_ascii=False)
-            
-            return f"""❌ 训练失败 (实验 ID: {experiment_id})
-训练时长: {duration:.2f} 秒
+        training_metrics = {"eer": eer}
+        if final_metrics:
+            training_metrics.update(final_metrics)
 
-错误信息:
-{result.stderr[-500:]}
+        tracker.update_experiment(
+            experiment_id=experiment_id,
+            status="success",
+            duration=duration,
+            results={"eer": eer},
+            training={
+                "log_path": str(logger.log_path),
+                "output_folder": str(output_folder_path) if output_folder_path else None,
+                "metrics": training_metrics,
+                "model_paths": model_paths,
+                "train_log_path": str(train_log_path) if train_log_path else None,
+                "epoch_data": epoch_data,
+                "final_metrics": final_metrics,
+            }
+        )
 
-📁 文件位置:
-  - 实验目录: {exp_dir}
-  - 训练日志: {logger.log_path}
-"""
+        record_path = exp_dir / "experiment_record.json"
+
+        record = tracker.get_experiment(experiment_id) or {}
+        config_backup = record.get("training", {}).get("config_backup_path")
+
+        return f"""✅ 训练完成！
+        实验 ID: {experiment_id}
+        训练时长: {duration:.2f} 秒
+
+        📊 性能指标:
+            - 等错误率 (EER): {eer if eer is not None else 'N/A'}
+
+        📁 文件位置:
+            - 实验目录: {exp_dir}
+            - 配置备份: {config_backup if config_backup else 'N/A'}
+            - 训练日志: {logger.log_path}
+            - 实验记录: {record_path}
+        """
     except Exception as e:
         import traceback
         return f"❌ 运行训练失败: {str(e)}\n{traceback.format_exc()}"
@@ -234,52 +254,54 @@ def EvaluateModel(experiment_id: Optional[str] = None) -> str:
             target_dir = exps[0]
             experiment_id = target_dir.name
         
-        # 读取实验记录
-        record_path = target_dir / "experiment_record.json"
-        if not record_path.exists():
-            return f"⚠️  实验记录文件不存在: {record_path}"
-        
-        with open(record_path, 'r', encoding='utf-8') as f:
-            record = json.load(f)
-        
+        tracker = ExperimentTracker()
+        record = tracker.get_experiment(experiment_id)
+        if not record:
+            return f"⚠️  实验记录文件不存在: {target_dir / 'experiment_record.json'}"
+
         status = record.get('status', 'unknown')
+        if status != "success":
+            return f"⚠️  实验未成功完成，无法评估 (状态: {status})"
+
+        training_info = record.get("training", {})
+        model_paths = training_info.get("model_paths") or []
+        output_folder = training_info.get("output_folder")
+        if not model_paths:
+            model_paths = _find_model_paths(output_folder, target_dir)
+
+        model_path = model_paths[0] if model_paths else None
+        data_folder = training_info.get("data_folder")
+
+        if not model_path:
+            return "⚠️  未找到模型参数文件，无法评估"
+
+        from agent.tools.evaluation_tools import RunEvaluation
+        RunEvaluation.invoke({
+            "model_path": model_path,
+            "data_folder": data_folder,
+            "experiment_id": experiment_id
+        })
+
+        updated = tracker.get_experiment(experiment_id) or {}
+        evaluation = updated.get("evaluation")
+        if not evaluation:
+            return "⚠️  评估未写入实验记录"
+
+        eval_results = evaluation.get("results", {})
+        record_path = target_dir / "experiment_record.json"
+
         summary = f"\n📊 模型评估 - 实验 ID: {experiment_id}\n"
         summary += "=" * 80 + "\n\n"
-        summary += f"状态: {status}\n"
-        
-        if status != "success":
-            summary += "⚠️  实验未成功完成，无法评估\n"
-            return summary
-        
-        summary += "✅ 训练成功完成\n\n"
-        
-        if record.get('results'):
-            results = record['results']
+        summary += f"评估状态: {evaluation.get('status', 'unknown')}\n"
+
+        if eval_results:
             summary += "性能指标:\n"
-            if results.get('error_rate'):
-                summary += f"  错误率: {results['error_rate']:.4f}\n"
-            if results.get('eer'):
-                summary += f"  EER: {results['eer']:.4f}\n"
-            if results.get('accuracy'):
-                summary += f"  准确率: {results['accuracy']:.4f}\n"
-            if results.get('loss'):
-                summary += f"  损失: {results['loss']:.4f}\n"
-        
-        # 训练时长
-        duration = record.get('duration_seconds', 0)
-        hours = int(duration // 3600)
-        minutes = int((duration % 3600) // 60)
-        seconds = int(duration % 60)
-        summary += f"\n训练时长: {hours}h {minutes}m {seconds}s\n"
-        
-        # 尝试查找模型文件
-        model_files = list(target_dir.glob("*.ckpt")) + list(target_dir.glob("*.pt"))
-        if model_files:
-            summary += f"\n📁 模型文件:\n"
-            for model_file in model_files:
-                size_mb = model_file.stat().st_size / (1024 * 1024)
-                summary += f"  - {model_file.name} ({size_mb:.2f} MB)\n"
-        
+            for key, value in eval_results.items():
+                summary += f"  {key}: {value}\n"
+
+        summary += f"\n📁 文件位置:\n"
+        summary += f"  - 实验记录: {record_path}\n"
+
         return summary
     
     except Exception as e:
@@ -354,82 +376,9 @@ def AnalyzeResults(experiment_id: Optional[str] = None) -> str:
         return f"❌ 分析结果失败: {str(e)}"
 
 
-@tool
-def CompareExperiments(experiment_ids: Optional[List[str]] = None, 
-                     metric: str = "eer") -> str:
-    """
-    比较多个实验的结果。
-    
-    参数:
-        experiment_ids: 实验 ID 列表，如果为 None 则比较最近的 5 个实验
-        metric: 比较的指标，默认 'eer'，可选 'accuracy', 'error_rate', 'loss'
-    
-    Returns:
-        str: 比较结果
-    """
-    try:
-        from agent.utils import compare_experiments
-        
-        exp_dir = get_experiments_dir()
-        
-        if not experiment_ids:
-            # 获取最近的 5 个实验
-            exps = sorted(exp_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
-            if not exps:
-                return "📋 暂无实验记录"
-            experiment_ids = [exp.name for exp in exps]
-        
-        # 读取所有实验记录
-        records = []
-        for exp_id in experiment_ids:
-            record_path = exp_dir / exp_id / "experiment_record.json"
-            if record_path.exists():
-                with open(record_path, 'r', encoding='utf-8') as f:
-                    records.append(json.load(f))
-        
-        if not records:
-            return "❌ 没有找到有效的实验记录"
-        
-        summary = f"\n📊 实验比较 - 基于指标: {metric}\n"
-        summary += "=" * 80 + "\n\n"
-        
-        # 按指标排序
-        valid_records = [r for r in records if r.get('results') and r['results'].get(metric) is not None]
-        
-        if not valid_records:
-            return f"⚠️  没有实验包含指标 '{metric}'"
-        
-        # 根据指标类型决定排序方向（越小越好：error_rate, eer, loss；越大越好：accuracy）
-        reverse = metric == 'accuracy'
-        sorted_records = sorted(valid_records, 
-                              key=lambda x: x['results'][metric], 
-                              reverse=reverse)
-        
-        for i, record in enumerate(sorted_records, 1):
-            exp_id = record['experiment_id']
-            value = record['results'][metric]
-            status = record.get('status', 'unknown')
-            duration = record.get('duration_seconds', 0)
-            
-            summary += f"{i}. 实验 {exp_id}\n"
-            summary += f"   {metric}: {value:.6f}\n"
-            summary += f"   状态: {status}\n"
-            summary += f"   时长: {duration:.2f}s\n\n"
-        
-        # 找出最佳实验
-        best_exp = sorted_records[0]
-        summary += f"✅ 最佳实验: {best_exp['experiment_id']} ({metric}: {best_exp['results'][metric]:.6f})\n"
-        
-        return summary
-    
-    except Exception as e:
-        return f"❌ 比较实验失败: {str(e)}"
-
-
 # 导出所有工具
 __all__ = [
     'TrainModel',
     'EvaluateModel',
     'AnalyzeResults',
-    'CompareExperiments',
 ]

@@ -44,6 +44,7 @@ from .experiment_tracker import (
 from .logger import (
     Logger,
     ExperimentLogger,
+    AgentLogProvider,
     get_logger,
     get_experiment_logger,
     setup_logging
@@ -99,6 +100,7 @@ __all__ = [
     # logger
     'Logger',
     'ExperimentLogger',
+    'AgentLogProvider',
     'get_logger',
     'get_experiment_logger',
     'setup_logging',

@@ -9,10 +9,20 @@ from .react_agent import (
     create_react_agent,
     OptimizationResult
 )
+from .data_processing_agent import (
+    DataProcessingAgent,
+    DataProcessingHPOAgent,
+    DataProcessingResult,
+    create_data_processing_agent,
+)
 
 __all__ = [
     'LangChainHPOAgent',
     'ReActHPOAgent',
     'create_react_agent',
-    'OptimizationResult'
+    'OptimizationResult',
+    'DataProcessingAgent',
+    'DataProcessingHPOAgent',
+    'DataProcessingResult',
+    'create_data_processing_agent',
 ]

@@ -9,7 +9,7 @@ __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
 
 # Folders and train_log file
 data_folder: !PLACEHOLDER #e.g., /localscratch/voxceleb1
-output_folder: !ref results/voxceleb1_2/speaker_verification_ecapa/<seed>
+output_folder: results/voxceleb1_2/speaker_verification_ecapa/<seed>
 save_folder: !ref <output_folder>/save/
 
 # Use the following links for the official voxceleb splits:
@@ -25,14 +25,13 @@ verification_file: https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test
 # However, a local path pointing to a directory containing your checkpoints may also be specified
 # instead (see pretrainer below)
 pretrain_path: speechbrain/spkrec-ecapa-voxceleb
-# pretrain_path: /home/lixh26/agent/SR-agent/agent/results/ecapa_augment/1986/save/CKPT+2026-03-25+02-36-45+00
 
 # csv files
 train_data: !ref <save_folder>/train.csv
 enrol_data: !ref <save_folder>/enrol.csv
 test_data: !ref <save_folder>/test.csv
 split_ratio: [90, 10]
-skip_prep: True
+skip_prep: False
 
 batch_size: 8
 score_norm: s-norm  # z-norm t-norm s-norm (uncomment to enable it)

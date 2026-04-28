@@ -6,12 +6,13 @@
 from pathlib import Path
 from typing import Union, Optional, List, Dict, Any
 from datetime import datetime, timedelta
+from collections import deque
 import logging
 import json
 import os
 
-
 class Logger:
+
     """日志记录器类"""
     
     def __init__(self, 
@@ -21,7 +22,9 @@ class Logger:
                  console: bool = True,
                  file: bool = True,
                  max_bytes: int = 10 * 1024 * 1024,  # 10MB
-                 backup_count: int = 5):
+                 backup_count: int = 5,
+                 enable_agent_log_provider: bool = True,
+                 agent_log_buffer_size: int = 1000):
         """
         初始化日志记录器
         
@@ -33,9 +36,12 @@ class Logger:
             file: 是否输出到文件
             max_bytes: 单个日志文件最大字节数
             backup_count: 保留的备份文件数量
+            enable_agent_log_provider: 是否启用智能体日志提供器
+            agent_log_buffer_size: 智能体可读取的日志缓冲区大小
         """
         self.log_path = Path(log_path)
         self.name = name
+        self.agent_log_provider = AgentLogProvider(max_entries=agent_log_buffer_size) if enable_agent_log_provider else None
         
         # 确保日志目录存在
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,6 +49,7 @@ class Logger:
         # 创建日志记录器
         self.logger = logging.getLogger(name)
         self.logger.setLevel(getattr(logging, level.upper()))
+        self.logger.propagate = False
         
         # 避免重复添加处理器
         if self.logger.handlers:
@@ -94,10 +101,45 @@ class Logger:
     
     def _log(self, level: int, message: str, extra: Optional[Dict] = None, exc_info: bool = False):
         """内部日志记录方法"""
+        timestamp = datetime.now()
+        level_name = logging.getLevelName(level)
+
+        if self.agent_log_provider:
+            self.agent_log_provider.add_log(
+                {
+                    'timestamp': timestamp,
+                    'name': self.name,
+                    'level': level_name,
+                    'message': message,
+                    'extra': extra
+                }
+            )
+
         if extra:
             extra_str = json.dumps(extra, ensure_ascii=False)
             message = f"{message} | Extra: {extra_str}"
         self.logger.log(level, message, exc_info=exc_info)
+        for handler in self.logger.handlers:
+            if hasattr(handler, "flush"):
+                handler.flush()
+
+    def get_agent_logs(self,
+                       start_time: Optional[datetime] = None,
+                       end_time: Optional[datetime] = None,
+                       level: Optional[str] = None,
+                       limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """获取智能体可读的内存日志（无需读取文件）"""
+        if not self.agent_log_provider:
+            return []
+        return self.agent_log_provider.query_logs(start_time, end_time, level, limit)
+
+    def build_agent_log_context(self,
+                                limit: int = 50,
+                                include_extra: bool = True) -> str:
+        """构建可直接注入智能体提示词的日志上下文文本"""
+        if not self.agent_log_provider:
+            return "[无可用日志上下文]"
+        return self.agent_log_provider.build_context(limit=limit, include_extra=include_extra)
     
     def get_logs(self, 
                  start_time: Optional[datetime] = None,
@@ -171,6 +213,7 @@ class Logger:
                 return None
             
             timestamp_str, name, level, message = parts
+            message = message.rstrip()
             
             # 解析时间戳
             timestamp = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
@@ -179,6 +222,7 @@ class Logger:
             extra = None
             if ' | Extra: ' in message:
                 message, extra_str = message.split(' | Extra: ', 1)
+                extra_str = extra_str.strip()
                 try:
                     extra = json.loads(extra_str)
                 except json.JSONDecodeError:
@@ -198,6 +242,9 @@ class Logger:
         """清空日志文件"""
         if self.log_path.exists():
             self.log_path.write_text('', encoding='utf-8')
+
+        if self.agent_log_provider:
+            self.agent_log_provider.clear()
         
         # 删除备份文件
         for i in range(1, 10):
@@ -322,6 +369,29 @@ class ExperimentLogger(Logger):
         )
         
         self.experiment_id = experiment_id
+
+    def log_training(self,
+                     config_file: str,
+                     data_folder: str,
+                     start_time: datetime,
+                     end_time: datetime,
+                     duration: float,
+                     stdout: str = "",
+                     stderr: str = ""):
+        """记录训练或评估运行信息"""
+        payload = {
+            "experiment_id": self.experiment_id,
+            "config_file": config_file,
+            "data_folder": data_folder,
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "duration_seconds": duration,
+        }
+        if stdout:
+            payload["stdout"] = stdout
+        if stderr:
+            payload["stderr"] = stderr
+        self.info("运行记录", extra=payload)
     
     def log_config(self, config: Dict):
         """记录配置信息"""
@@ -349,6 +419,61 @@ class ExperimentLogger(Logger):
     def log_error(self, error: str, exc_info: bool = False):
         """记录错误"""
         self.error(error, extra={"experiment_id": self.experiment_id}, exc_info=exc_info)
+
+
+class AgentLogProvider:
+    """为智能体提供实时可读日志的内存缓冲器"""
+
+    def __init__(self, max_entries: int = 1000):
+        self.max_entries = max_entries
+        self._logs = deque(maxlen=max_entries)
+
+    def add_log(self, log_entry: Dict[str, Any]):
+        """追加日志到内存缓冲区"""
+        self._logs.append(log_entry)
+
+    def clear(self):
+        """清空内存缓冲区"""
+        self._logs.clear()
+
+    def query_logs(self,
+                   start_time: Optional[datetime] = None,
+                   end_time: Optional[datetime] = None,
+                   level: Optional[str] = None,
+                   limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """按条件查询日志"""
+        logs = list(self._logs)
+
+        if start_time:
+            logs = [log for log in logs if log['timestamp'] >= start_time]
+        if end_time:
+            logs = [log for log in logs if log['timestamp'] <= end_time]
+        if level:
+            level_upper = level.upper()
+            logs = [log for log in logs if log['level'] == level_upper]
+
+        if limit:
+            logs = logs[-limit:]
+
+        return logs
+
+    def build_context(self, limit: int = 50, include_extra: bool = True) -> str:
+        """构建紧凑的日志上下文，供智能体读取"""
+        logs = self.query_logs(limit=limit)
+        if not logs:
+            return "[暂无日志]"
+
+        lines = []
+        for log in logs:
+            line = (
+                f"{log['timestamp'].strftime('%Y-%m-%d %H:%M:%S')} "
+                f"[{log['level']}] {log['name']}: {log['message']}"
+            )
+            if include_extra and log.get('extra') is not None:
+                line = f"{line} | Extra: {json.dumps(log['extra'], ensure_ascii=False)}"
+            lines.append(line)
+
+        return "\n".join(lines)
 
 
 # 便捷函数
