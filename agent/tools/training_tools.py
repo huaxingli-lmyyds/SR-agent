@@ -20,8 +20,8 @@ from agent.utils import (
     yaml_to_dict,
     get_project_root,
     ExperimentTracker,
-    ExperimentLogger
 )
+from agent.utils.runner import run_training
 
 # 全局路径
 CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
@@ -118,65 +118,59 @@ def TrainModel(config_path: Optional[str] = None,
         str: 训练输出或错误信息
     """
     try:
-        import shutil
-        
-        # 确定配置文件路径
+        # 参数校验
         config_path_str = config_path if config_path else CONFIG_PATH
-        
+        if not Path(config_path_str).exists():
+            return f"config_path not found: {config_path_str}"
+
         # 使用 ConfigParser 读取配置（支持 YAML 引用解析）
         from agent.utils import ConfigParser
         parser = ConfigParser(config_path_str)
         config_data = parser.load_config(resolve_references=True)
-        
+
         # 确定数据文件夹
         if data_folder:
             df = data_folder
-        elif config_data.get('data_folder'):
-            df = str(config_data.get('data_folder'))
+        elif config_data.get("data_folder"):
+            df = str(config_data.get("data_folder"))
         else:
             df = "../datasets/voxceleb1"
 
         if not df or df == "!PLACEHOLDER":
             df = "../datasets/voxceleb1"
-        
-        # 记录开始时间
+
+        # experiment_tracker 创建记录
         start_time = datetime.now()
         tracker = ExperimentTracker()
         experiment_id = tracker.create_experiment(
             config=yaml_to_dict(config_data),
             config_path=config_path_str,
             data_folder=df,
-            description=description or ""
+            description=description or "",
         )
 
-        # 准备实验目录
         exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
-        
-        # 运行训练（非控制台调用）
-        from recipes.train_pipeline import train_pipeline
+
+        # runner.run_training()
         overrides = [f"data_folder: {df}"]
-        train_result = train_pipeline(config_path_str, overrides=overrides)
-        
-        # 记录结束时间
+        train_result = run_training(config_path_str, overrides)
+
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
-        
-        # 使用实验记录器保存日志
-        logger = ExperimentLogger(experiment_id)
-        logger.log_training(
-            config_file=config_path_str,
-            data_folder=df,
-            start_time=start_time,
-            end_time=end_time,
-            duration=duration,
-            stdout="",
-            stderr=""
-        )
+
+        status = "success"
+        error_msg = None
+        if isinstance(train_result, dict) and train_result.get("status") == "failed":
+            status = "failed"
+            error_msg = train_result.get("error")
 
         eer = train_result.get("eer") if isinstance(train_result, dict) else None
         output_folder = config_data.get("output_folder")
         output_folder_path = _resolve_path(str(output_folder)) if output_folder else None
-        model_paths = _find_model_paths(str(output_folder_path) if output_folder_path else None, exp_dir)
+        model_paths = _find_model_paths(
+            str(output_folder_path) if output_folder_path else None,
+            exp_dir,
+        )
         train_log_path = _resolve_path(str(config_data.get("train_log")))
         if train_log_path is None and output_folder_path is not None:
             train_log_path = output_folder_path / "train_log.txt"
@@ -189,43 +183,44 @@ def TrainModel(config_path: Optional[str] = None,
         if final_metrics:
             training_metrics.update(final_metrics)
 
+        # experiment_tracker 更新记录
         tracker.update_experiment(
             experiment_id=experiment_id,
-            status="success",
+            status=status,
             duration=duration,
+            error=error_msg,
             results={"eer": eer},
             training={
-                "log_path": str(logger.log_path),
                 "output_folder": str(output_folder_path) if output_folder_path else None,
                 "metrics": training_metrics,
                 "model_paths": model_paths,
                 "train_log_path": str(train_log_path) if train_log_path else None,
                 "epoch_data": epoch_data,
                 "final_metrics": final_metrics,
-            }
+            },
         )
 
-        record_path = exp_dir / "experiment_record.json"
+        log_tail = ""
+        if train_log_path and Path(train_log_path).exists():
+            with open(train_log_path, "r", encoding="utf-8", errors="ignore") as fin:
+                lines = fin.readlines()
+                log_tail = "".join(lines[-20:])
+        else:
+            log_tail = "(train_log not found)"
 
-        record = tracker.get_experiment(experiment_id) or {}
-        config_backup = record.get("training", {}).get("config_backup_path")
+        result_lines = [
+            f"Experiment ID: {experiment_id}",
+            f"EER: {eer if eer is not None else 'N/A'}",
+            f"Experiment dir: {exp_dir}",
+            "Training log (last 20 lines):",
+            log_tail.rstrip() or "(empty)",
+        ]
+        if status == "failed" and error_msg:
+            result_lines.append(f"Error: {error_msg}")
 
-        return f"""✅ 训练完成！
-        实验 ID: {experiment_id}
-        训练时长: {duration:.2f} 秒
-
-        📊 性能指标:
-            - 等错误率 (EER): {eer if eer is not None else 'N/A'}
-
-        📁 文件位置:
-            - 实验目录: {exp_dir}
-            - 配置备份: {config_backup if config_backup else 'N/A'}
-            - 训练日志: {logger.log_path}
-            - 实验记录: {record_path}
-        """
+        return "\n".join(result_lines)
     except Exception as e:
-        import traceback
-        return f"❌ 运行训练失败: {str(e)}\n{traceback.format_exc()}"
+        return f"run training failed: {str(e)}"
 
 
 @tool

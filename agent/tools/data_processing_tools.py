@@ -11,6 +11,7 @@ import os
 import json
 
 from agent.utils import ConfigParser, get_config_file
+from agent.utils import runner
 
 CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
 
@@ -106,9 +107,6 @@ def PrepareVoxCelebData(
         str: 数据准备结果与统计摘要
     """
     try:
-        from speechbrain.utils.data_utils import download_file
-        from recipes.voxceleb.voxceleb_prepare import prepare_voxceleb
-
         cfg_path = config_path if config_path else CONFIG_PATH
         parser = ConfigParser(cfg_path)
         config_data = parser.load_config(resolve_references=True)
@@ -144,24 +142,25 @@ def PrepareVoxCelebData(
         if split_speaker_val is None:
             split_speaker_val = False
 
-        sf_path = Path(sf)
-        os.makedirs(sf_path, exist_ok=True)
-        verification_local = sf_path / os.path.basename(str(vf))
-        download_file(str(vf), str(verification_local))
-
-        prepare_voxceleb(
+        prep_result = runner.run_data_prep(
             data_folder=df,
-            save_folder=str(sf_path),
-            verification_pairs_file=str(verification_local),
-            splits=splits_val,
+            save_folder=sf,
+            verification_file=str(vf),
             split_ratio=split_ratio_val,
-            seg_dur=sentence_len_val,
-            amp_th=amp_th_val,
-            source=source_val,
-            split_speaker=split_speaker_val,
-            random_segment=random_segment_val,
+            sentence_len=sentence_len_val,
+            splits=splits_val,
             skip_prep=skip_prep_val,
+            source=source_val,
+            random_segment=random_segment_val,
+            amp_th=amp_th_val,
+            split_speaker=split_speaker_val,
         )
+
+        if prep_result.get("status") != "success":
+            return f"❌ 数据准备失败: {prep_result.get('error')}"
+
+        sf_path = Path(prep_result.get("save_folder") or sf)
+        verification_local = prep_result.get("verification_local")
 
         train_csv = sf_path / "train.csv"
         dev_csv = sf_path / "dev.csv"

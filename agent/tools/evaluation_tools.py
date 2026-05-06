@@ -106,6 +106,9 @@ def RunEvaluation(model_path: Optional[str] = None,
             data_folder=data_folder,
         )
 
+        if eval_result.get("status") == "failed":
+            return f"❌ 运行评估失败: {eval_result.get('error')}"
+
         eer = eval_result.get("eer")
         min_dcf = eval_result.get("min_dcf")
         output_folder = eval_result.get("output_folder")
