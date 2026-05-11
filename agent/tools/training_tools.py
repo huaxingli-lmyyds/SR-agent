@@ -28,10 +28,28 @@ CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
 
 def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
     candidates: List[Path] = []
+    ckpt_scores: Dict[Path, float] = {}
 
     if output_folder:
         out_dir = Path(output_folder)
         if out_dir.exists():
+            save_dir = out_dir / "save"
+            if save_dir.exists():
+                candidates.extend(save_dir.glob("*.ckpt"))
+                candidates.extend(save_dir.glob("*.pt"))
+                for ckpt_dir in save_dir.glob("CKPT+*"):
+                    meta_path = ckpt_dir / "CKPT.yaml"
+                    if not meta_path.exists():
+                        continue
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as meta_file:
+                            for line in meta_file:
+                                if line.strip().startswith("ErrorRate:"):
+                                    _, value = line.split(":", 1)
+                                    ckpt_scores[ckpt_dir] = float(value.strip())
+                                    break
+                    except (OSError, ValueError):
+                        continue
             candidates.extend(out_dir.glob("*.ckpt"))
             candidates.extend(out_dir.glob("*.pt"))
 
@@ -39,10 +57,20 @@ def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
         candidates.extend(exp_dir.glob("*.ckpt"))
         candidates.extend(exp_dir.glob("*.pt"))
 
-    # Deduplicate and sort by mtime desc
+    # Deduplicate
     uniq = {p.resolve(): p for p in candidates}
-    sorted_paths = sorted(uniq.values(), key=lambda p: p.stat().st_mtime, reverse=True)
-    return [str(p) for p in sorted_paths]
+    if not uniq:
+        return []
+
+    if ckpt_scores:
+        best_ckpt_dir = min(ckpt_scores, key=ckpt_scores.get)
+        best_ckpt_files = list(best_ckpt_dir.glob("*.ckpt"))
+        if best_ckpt_files:
+            best_ckpt = max(best_ckpt_files, key=lambda p: p.stat().st_mtime)
+            return [str(best_ckpt)]
+
+    best_path = min(uniq.values(), key=lambda p: p.stat().st_mtime)
+    return [str(best_path)]
 
 
 def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
