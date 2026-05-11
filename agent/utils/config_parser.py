@@ -126,7 +126,8 @@ class ConfigParser:
             self.config_path = Path(config_path)
         else:
             self.config_path = get_config_file("train_ecapa_tdnn.yaml")
-        
+
+        self._config_cache_raw = None
         self._config_cache = None
         self._data_folder = None  # 用于在解析前设置 data_folder
 
@@ -164,26 +165,38 @@ class ConfigParser:
             
             if config is None:
                 config = {}
-            
+
+            # 缓存未转换、未解析的原始配置
+            self._config_cache_raw = config
+
+            # 如果设置了 data_folder，先更新配置
+            if self._data_folder is not None and isinstance(config, dict):
+                config['data_folder'] = self._data_folder
+
             if convert_to_dict:
-                config = yaml_to_dict(config)
-                
+                config_dict = yaml_to_dict(config)
+
                 # 如果设置了 data_folder，先更新配置
                 if self._data_folder is not None:
-                    config['data_folder'] = self._data_folder
-                
-                # 解析 YAML 引用
+                    config_dict['data_folder'] = self._data_folder
+
+                # 解析 YAML 引用时，缓存解析后的字典
                 if resolve_references:
-                    config = resolve_yaml_references(config)
-                
-                self._config_cache = config
-            
+                    resolved = resolve_yaml_references(config_dict)
+                    self._config_cache = resolved
+                    return resolved
+
+                # 缓存未解析引用的字典配置
+                self._config_cache = config_dict
+                return config_dict
+
+            self._config_cache = None
             return config
         
         except Exception as e:
             raise RuntimeError(f"加载配置文件失败: {e}") from e
     
-    def save_config(self, config: Dict, create_backup: bool = True) -> Path:
+    def save_config(self, config: Optional[Dict] = None, create_backup: bool = True) -> Path:
         """
         保存配置到文件
         
@@ -205,11 +218,19 @@ class ConfigParser:
             # 保存配置
             yaml_parser = YAML()
             yaml_parser.preserve_quotes = True
-            
+
+            if config is None:
+                if self._config_cache_raw is None:
+                    self.load_config(convert_to_dict=False, resolve_references=False)
+                config_to_save = self._config_cache_raw
+            else:
+                config_to_save = config
+
             with open(self.config_path, 'w', encoding='utf-8') as f:
-                yaml_parser.dump(config, f)
+                yaml_parser.dump(config_to_save, f)
             
             # 清除缓存
+            self._config_cache_raw = None
             self._config_cache = None
             
             return backup_path
@@ -247,7 +268,7 @@ class ConfigParser:
         return value
     
     def update_config(self, updates: Dict, persist: bool = True, 
-                     create_backup: bool = True) -> None:
+                     create_backup: bool = False) -> None:
         """
         更新配置
         
@@ -256,8 +277,11 @@ class ConfigParser:
             persist: 是否立即保存到文件
             create_backup: 是否在保存前创建备份
         """
+        if self._config_cache_raw is None:
+            self.load_config(convert_to_dict=False, resolve_references=False)
+
         if self._config_cache is None:
-            self.load_config()
+            self.load_config(convert_to_dict=True, resolve_references=False)
         
         def _deep_update(orig, upd):
             """深度更新字典"""
@@ -267,10 +291,21 @@ class ConfigParser:
                 else:
                     orig[k] = v
         
+        def _deep_update_raw(orig, upd):
+            """深度更新原始配置对象"""
+            for k, v in upd.items():
+                if k in orig and isinstance(orig[k], dict) and isinstance(v, dict):
+                    _deep_update_raw(orig[k], v)
+                else:
+                    orig[k] = v
+
+        if isinstance(self._config_cache_raw, dict):
+            _deep_update_raw(self._config_cache_raw, updates)
+
         _deep_update(self._config_cache, updates)
-        
+
         if persist:
-            self.save_config(self._config_cache, create_backup)
+            self.save_config(None, create_backup)
     
     def validate_config(self, config: Optional[Dict] = None) -> Dict[str, Any]:
         """

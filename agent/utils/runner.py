@@ -4,8 +4,9 @@ Central SpeechBrain runner utilities.
 
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union
 from pathlib import Path
+import re
 import os
 
 try:
@@ -32,16 +33,46 @@ except Exception as exc:
 
 def _load_hyperpyyaml_config(
     config_path: str,
-    overrides: Optional[List[str]] = None,
+    overrides: Optional[Union[List[str], Dict[str, Any]]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     try:
         from hyperpyyaml import load_hyperpyyaml
 
+        normalized_overrides: Union[List[str], Dict[str, Any]]
+        if isinstance(overrides, dict):
+            normalized_overrides = overrides
+        elif isinstance(overrides, list):
+            normalized_overrides = overrides
+        else:
+            normalized_overrides = []
+
         with open(config_path, encoding="utf-8") as fin:
-            params = load_hyperpyyaml(fin, overrides or [])
+            params = load_hyperpyyaml(fin, normalized_overrides)
         return params, None
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"
+
+
+def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
+    if not train_log_path.exists():
+        return None
+
+    pattern = re.compile(
+        r"valid ErrorRate:\s*([\d.eE+-]+)"
+    )
+    best = None
+    with train_log_path.open("r", encoding="utf-8", errors="ignore") as fin:
+        for line in fin:
+            match = pattern.search(line)
+            if not match:
+                continue
+            try:
+                value = float(match.group(1))
+            except ValueError:
+                continue
+            if best is None or value < best:
+                best = value
+    return best
 
 
 def run_data_prep(
@@ -249,7 +280,7 @@ def run_evaluation(
         }
 
 
-def run_training(config_path: str, overrides: List[str]) -> Dict[str, Any]:
+def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) -> Dict[str, Any]:
     """
     Run SpeechBrain training pipeline.
 
@@ -284,13 +315,18 @@ def run_training(config_path: str, overrides: List[str]) -> Dict[str, Any]:
                 "error": f"Config not found: {config_path}",
             }
 
-        overrides = list(overrides or [])
+        if isinstance(overrides, dict):
+            normalized_overrides: Union[List[str], Dict[str, Any]] = overrides
+        elif isinstance(overrides, list):
+            normalized_overrides = overrides
+        else:
+            normalized_overrides = []
         run_opts: Dict[str, Any] = {}
 
         torch.backends.cudnn.benchmark = True
         sb.utils.distributed.ddp_init_group(run_opts)
 
-        hparams, err = _load_hyperpyyaml_config(config_path, overrides)
+        hparams, err = _load_hyperpyyaml_config(config_path, normalized_overrides)
         if err:
             return {"status": "failed", "eer": None, "error": err}
 
@@ -324,7 +360,7 @@ def run_training(config_path: str, overrides: List[str]) -> Dict[str, Any]:
         sb.core.create_experiment_directory(
             experiment_directory=hparams["output_folder"],
             hyperparams_to_save=config_path,
-            overrides=overrides,
+            overrides=normalized_overrides,
         )
 
         speaker_brain = recipe.SpeakerBrain(
@@ -343,12 +379,13 @@ def run_training(config_path: str, overrides: List[str]) -> Dict[str, Any]:
             valid_loader_kwargs=hparams["dataloader_options"],
         )
 
-        eer = None
-        if hasattr(speaker_brain, "error_metrics"):
-            try:
-                eer = speaker_brain.error_metrics.summarize("average")
-            except Exception:
-                eer = None
+        train_log_path = hparams.get("train_log")
+        if train_log_path:
+            log_path = Path(str(train_log_path))
+        else:
+            log_path = Path(hparams["output_folder"]) / "train_log.txt"
+
+        eer = _extract_best_valid_error_rate(log_path)
 
         return {"status": "success", "eer": eer, "error": None}
     except Exception as exc:

@@ -13,8 +13,6 @@ import shutil
 from .path_tool import (
     get_experiments_dir,
     ensure_dir,
-    get_experiment_log_path,
-    get_experiment_configs_dir,
     list_directories
 )
 
@@ -43,8 +41,10 @@ class ExperimentTracker:
         # 计数器，用于在同一秒内创建多个实验时保证 ID 唯一
         self._counter = 0
     
-    def create_experiment(self, config: Dict, config_path: str, 
-                         data_folder: str, description: str = "") -> str:
+    def create_experiment(self, config_path: str,
+                         data_folder: str,
+                         output_folder: Optional[str] = None,
+                         description: str = "") -> str:
         """
         创建新实验
         
@@ -69,22 +69,6 @@ class ExperimentTracker:
         config_backup = exp_dir / "config.yaml"
         shutil.copy2(config_path, config_backup)
         
-        # 使用 ConfigParser 加载配置以解析占位符
-        from . import ConfigParser
-        parser = ConfigParser(config_path)
-        
-        # 临时设置 data_folder 以确保占位符被正确解析
-        parser.data_folder = data_folder
-        
-        config_resolved = parser.load_config()
-        
-        # 确保 data_folder 使用传入的参数
-        config_resolved['data_folder'] = data_folder
-        
-        # 转换配置为可序列化的格式
-        from .path_tool import yaml_to_dict
-        config_serializable = yaml_to_dict(config_resolved)
-        
         # 创建实验记录
         experiment_record = {
             "experiment_id": experiment_id,
@@ -92,13 +76,12 @@ class ExperimentTracker:
             "description": description,
             "status": "created",
             "duration_seconds": 0,
-            "config": config_serializable,
+            "config_path": config_path,
             "training": {
-                "config_path": config_path,
                 "config_backup_path": str(config_backup),
                 "data_folder": data_folder,
-                "log_path": None,
-                "output_folder": config_serializable.get("output_folder"),
+                "output_folder": output_folder,
+                "train_log_path": None,
                 "metrics": None,
                 "model_paths": []
             },
@@ -500,11 +483,13 @@ class ExperimentTracker:
 
 
 # 便捷函数
-def create_experiment(config: Dict, config_path: str, 
-                    data_folder: str, description: str = "") -> str:
+def create_experiment(config_path: str,
+                    data_folder: str,
+                    output_folder: Optional[str] = None,
+                    description: str = "") -> str:
     """快速创建实验的便捷函数"""
     tracker = ExperimentTracker()
-    return tracker.create_experiment(config, config_path, data_folder, description)
+    return tracker.create_experiment(config_path, data_folder, output_folder, description)
 
 
 def list_experiments(status: Optional[str] = None, 

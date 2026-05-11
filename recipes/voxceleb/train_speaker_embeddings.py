@@ -181,6 +181,7 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
 
     # CLI:
+    #用来解析命令行语句的
     hparams_file, run_opts, overrides = sb.parse_arguments(sys.argv[1:])
 
     # Initialize ddp (useful only for multi-GPU DDP training)

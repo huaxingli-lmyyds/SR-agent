@@ -17,7 +17,6 @@ from agent.utils import (
     get_experiments_dir,
     ensure_dir,
     get_experiment_log_path,
-    yaml_to_dict,
     get_project_root,
     ExperimentTracker,
 )
@@ -102,9 +101,10 @@ def _parse_training_log(train_log_path: Path) -> Tuple[List[Dict[str, Any]], Dic
 
 
 @tool
-def TrainModel(config_path: Optional[str] = None, 
+def TrainModel(config_path: Optional[str] = None,
                data_folder: Optional[str] = None,
-               description: Optional[str] = None) -> str:
+               description: Optional[str] = None,
+               experiment_id: Optional[str] = None) -> str:
     """
     运行 ECAPA-TDNN 模型的训练脚本。
     训练完成后会自动保存实验记录，包括配置、训练日志和结果。
@@ -113,6 +113,7 @@ def TrainModel(config_path: Optional[str] = None,
         config_path: 配置文件路径，如果为 None 则使用默认配置
         data_folder: 数据文件夹路径，如果为 None 则使用配置文件中的设置
         description: 实验描述（可选）
+        experiment_id: 实验 ID（可选，存在时继续训练，不存在时报错）
     
     Returns:
         str: 训练输出或错误信息
@@ -120,6 +121,35 @@ def TrainModel(config_path: Optional[str] = None,
     try:
         # 参数校验
         config_path_str = config_path if config_path else CONFIG_PATH
+
+        # experiment_tracker 创建记录或复用已有记录
+        start_time = datetime.now()
+        tracker = ExperimentTracker()
+        record = None
+        config_note = None
+        if experiment_id:
+            record = tracker.get_experiment(experiment_id)
+            if record is None:
+                return f"experiment_id not found: {experiment_id}"
+
+            training_info = record.get("training", {})
+            backup_path = training_info.get("config_backup_path")
+            record_config_path = record.get("config_path")
+            if backup_path and Path(backup_path).exists():
+                if config_path and Path(config_path).resolve() != Path(backup_path).resolve():
+                    config_note = (
+                        "resume uses config_backup_path from experiment record; "
+                        "provided config_path ignored"
+                    )
+                config_path_str = backup_path
+            elif record_config_path and Path(record_config_path).exists():
+                if config_path and Path(config_path).resolve() != Path(record_config_path).resolve():
+                    config_note = (
+                        "resume uses config_path from experiment record; "
+                        "provided config_path ignored"
+                    )
+                config_path_str = record_config_path
+
         if not Path(config_path_str).exists():
             return f"config_path not found: {config_path_str}"
 
@@ -134,25 +164,30 @@ def TrainModel(config_path: Optional[str] = None,
         elif config_data.get("data_folder"):
             df = str(config_data.get("data_folder"))
         else:
-            df = "../datasets/voxceleb1"
+            df = "./datasets/voxceleb1"
 
         if not df or df == "!PLACEHOLDER":
-            df = "../datasets/voxceleb1"
+            df = "./datasets/voxceleb1"
 
-        # experiment_tracker 创建记录
-        start_time = datetime.now()
-        tracker = ExperimentTracker()
-        experiment_id = tracker.create_experiment(
-            config=yaml_to_dict(config_data),
-            config_path=config_path_str,
-            data_folder=df,
-            description=description or "",
-        )
+        output_folder = config_data.get("output_folder")
+        if record:
+            training_info = record.get("training", {})
+            if training_info.get("output_folder"):
+                output_folder = training_info.get("output_folder")
+            if training_info.get("data_folder"):
+                df = training_info.get("data_folder")
+        else:
+            experiment_id = tracker.create_experiment(
+                config_path=config_path_str,
+                data_folder=df,
+                output_folder=str(output_folder) if output_folder else None,
+                description=description or "",
+            )
 
         exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
 
         # runner.run_training()
-        overrides = [f"data_folder: {df}"]
+        overrides = {"data_folder": df}
         train_result = run_training(config_path_str, overrides)
 
         end_time = datetime.now()
@@ -192,6 +227,7 @@ def TrainModel(config_path: Optional[str] = None,
             results={"eer": eer},
             training={
                 "output_folder": str(output_folder_path) if output_folder_path else None,
+                "data_folder": df,
                 "metrics": training_metrics,
                 "model_paths": model_paths,
                 "train_log_path": str(train_log_path) if train_log_path else None,
@@ -215,6 +251,8 @@ def TrainModel(config_path: Optional[str] = None,
             "Training log (last 20 lines):",
             log_tail.rstrip() or "(empty)",
         ]
+        if config_note:
+            result_lines.append(f"Note: {config_note}")
         if status == "failed" and error_msg:
             result_lines.append(f"Error: {error_msg}")
 

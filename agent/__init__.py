@@ -53,8 +53,6 @@ from .utils import (
     find_best_experiment,
     get_experiment_stats,
     
-    # 日志记录
-    ExperimentLogger,
 )
 
 __version__ = "1.0.0"
@@ -94,6 +92,4 @@ __all__ = [
     'list_experiments',
     'find_best_experiment',
     'get_experiment_stats',
-    # 日志记录
-    'ExperimentLogger'
 ]

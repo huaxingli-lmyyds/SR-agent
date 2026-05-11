@@ -14,7 +14,6 @@ import re
 from agent.utils import (
     get_config_file,
     get_project_root,
-    ExperimentLogger,
     ExperimentTracker,
     extract_scores_data,
     compute_metrics_from_scores
@@ -126,17 +125,6 @@ def RunEvaluation(model_path: Optional[str] = None,
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
         
-        # 保存评估日志
-        logger = ExperimentLogger(experiment_id, "evaluation")
-        logger.log_training(
-            config_file=ver_config,
-            data_folder=data_folder,
-            start_time=start_time,
-            end_time=end_time,
-            duration=duration,
-            stdout="",
-            stderr=""
-        )
         # 尝试从 scores.txt 中读取结果
         scores_data = None
         scores_file = Path(scores_path) if scores_path else None
@@ -159,7 +147,6 @@ def RunEvaluation(model_path: Optional[str] = None,
                 "timestamp": start_time.isoformat(),
                 "duration_seconds": duration,
                 "status": "success",
-                "log_path": str(logger.log_path),
                 "evaluation_log_path": str(eval_log_path) if eval_log_path else None,
                 "output_folder": str(output_folder_path) if output_folder_path else output_folder,
                 "model_path": model_path,
@@ -186,8 +173,8 @@ def RunEvaluation(model_path: Optional[str] = None,
         summary += f"""
 
 📁 文件位置:
-  - 评估日志: {logger.log_path}
-  - 分数文件: {scores_file if scores_file and scores_file.exists() else 'N/A'}"""
+    - 评估日志: {eval_log_path if eval_log_path else 'N/A'}
+    - 分数文件: {scores_file if scores_file and scores_file.exists() else 'N/A'}"""
 
         if eer is not None:
             summary += f"\n\n💡 EER 越低越好，最佳目标是 < 5%"

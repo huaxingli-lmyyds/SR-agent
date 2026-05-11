@@ -3,6 +3,7 @@
 
 # Agent experiments
 agent/experiments/
+agent/experiments_hpo_version1/
 agent/results/
 agent/test*.py
 agent/experiment.zip

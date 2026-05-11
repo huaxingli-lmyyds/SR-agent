@@ -43,11 +43,12 @@ from .experiment_tracker import (
 
 from .logger import (
     Logger,
-    ExperimentLogger,
-    AgentLogProvider,
     get_logger,
-    get_experiment_logger,
-    setup_logging
+    AgentLogger,
+)
+
+from .agent_middleware import (
+    build_agent_logging_middleware,
 )
 
 from .metrics import (
@@ -99,11 +100,9 @@ __all__ = [
     
     # logger
     'Logger',
-    'ExperimentLogger',
-    'AgentLogProvider',
     'get_logger',
-    'get_experiment_logger',
-    'setup_logging',
+    'AgentLogger',
+    'build_agent_logging_middleware',
     
     # metrics
     'MetricsExtractor',

@@ -110,7 +110,7 @@ def GetExperimentResults(experiment_id: Optional[str] = None) -> str:
         summary += "\n训练信息:\n"
         summary += f"  配置文件: {training.get('config_path', 'N/A')}\n"
         summary += f"  数据文件夹: {training.get('data_folder', 'N/A')}\n"
-        summary += f"  日志路径: {training.get('log_path', 'N/A')}\n"
+        summary += f"  日志路径: {training.get('train_log_path', 'N/A')}\n"
         summary += f"  输出目录: {training.get('output_folder', 'N/A')}\n"
         summary += f"  模型路径: {', '.join(training.get('model_paths', [])) or 'N/A'}\n"
 
@@ -123,7 +123,7 @@ def GetExperimentResults(experiment_id: Optional[str] = None) -> str:
         if evaluation:
             summary += "\n评估信息:\n"
             summary += f"  评估状态: {evaluation.get('status', 'unknown')}\n"
-            summary += f"  评估日志: {evaluation.get('log_path', 'N/A')}\n"
+            summary += f"  评估日志: {evaluation.get('evaluation_log_path', 'N/A')}\n"
             summary += f"  模型路径: {evaluation.get('model_path', 'N/A')}\n"
             eval_metrics = evaluation.get('results') or {}
             if eval_metrics:

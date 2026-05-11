@@ -7,12 +7,17 @@ import os
 import json
 import re
 from typing import Dict, List, Optional, Any
-from pathlib import Path
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import dotenv
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
+
+from agent.utils import ExperimentTracker, get_agent_dir
+from agent.utils.logger import AgentLogger
+from agent.memory import MemoryStore, MemoryUpdate, build_history_entry
 
 # 加载环境变量
 dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
@@ -40,7 +45,9 @@ class LangChainHPOAgent:
         temperature: float = 0.2,
         max_iterations: int = 10,
         verbose: bool = True,
-        config_path: str = "../configs/train_ecapa_tdnn.yaml"
+        config_path: str = "../configs/train_ecapa_tdnn.yaml",
+        memory_key: Optional[str] = None,
+        memory_path: Optional[str] = None
     ):
         """
         初始化 LangChain v1.0 智能体
@@ -51,12 +58,19 @@ class LangChainHPOAgent:
             max_iterations: 最大迭代次数（通过中间件实现）
             verbose: 是否显示详细输出
             config_path: 配置文件路径
+            memory_key: 记忆存储的模型标识（可选）
+            memory_path: 记忆文件路径（可选）
         """
         self.model_name = model_name
         self.temperature = temperature
         self.max_iterations = max_iterations
         self.verbose = verbose
         self.config_path = config_path
+        self.agent_logger = AgentLogger(get_agent_dir() / "logs" / "agent.log")
+        self.memory_key = memory_key or Path(config_path).stem or "default_model"
+        self.memory_store = MemoryStore(
+            file_path=Path(memory_path) if memory_path else None
+        )
         
         # 初始化 LLM
         self.llm = ChatOpenAI(
@@ -74,44 +88,106 @@ class LangChainHPOAgent:
         self.agent = create_agent(
             model=self.llm,
             tools=self.tools,
-            prompt=self.system_prompt
+            system_prompt=self.system_prompt,
+            middleware=self.agent_logger.build_middleware(),
         )
+
+    def _persist_memory(
+        self,
+        objective: str,
+        best_config: Dict[str, Any],
+        summary: str,
+        total_steps: int
+    ) -> None:
+        """Persist optimization summary without interrupting execution."""
+        try:
+            metric_keys = {"eer", "accuracy", "loss", "min_dcf", "precision", "recall", "f1"}
+            best_metrics = {k: v for k, v in best_config.items() if k in metric_keys}
+            best_params = {k: v for k, v in best_config.items() if k not in metric_keys}
+            history_entry = build_history_entry(
+                objective=objective,
+                best_config=best_params,
+                best_metrics=best_metrics,
+                summary=summary,
+                total_steps=total_steps,
+            )
+            metadata = {
+                "last_updated": history_entry["timestamp"],
+                "config_path": self.config_path,
+                "last_objective": objective,
+                "last_best_config": best_params,
+                "last_best_metrics": history_entry["best_metrics"],
+                "last_summary": summary,
+                "last_total_steps": total_steps,
+            }
+            update = MemoryUpdate(
+                model_key=self.memory_key,
+                metadata=metadata,
+                history_entry=history_entry,
+            )
+            self.memory_store.update_model(update)
+        except Exception as exc:
+            self.agent_logger.append(f"memory_update_failed error={exc}")
     
     def _create_system_prompt(self) -> str:
         """创建系统提示词"""
-        return """你是一个声纹识别模型超参数优化专家，专门负责优化 ECAPA-TDNN 模型的性能。
+        prompt_path = get_agent_dir() / "prompts" / "hpo_system_prompt.txt"
+        try:
+            return prompt_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return "You are an ECAPA-TDNN hyperparameter optimization agent." 
 
-        你的任务：
-        1. 分析当前模型配置
-        2. 识别关键超参数（学习率、批次大小、训练轮数等）
-        3. 根据实验结果调整超参数
-        4. 使用提供的工具完成优化任务
+    def _get_history_context(self, metric: str = "eer") -> str:
+        """从实验历史中提取基线信息。"""
+        tracker = ExperimentTracker()
+        best_list = tracker.find_best_experiment(metric=metric, minimize=True, top_n=1)
+        if not best_list:
+            return "历史实验: 暂无可用记录。"
 
-        优化目标：
-        - 最小化等错误率 (EER)
-        - 提高准确率
-        - 平衡训练时间和性能
+        best = best_list[0]
+        exp_id = best.get("experiment_id", "N/A")
+        results = best.get("results", {})
+        config = best.get("config", {})
 
-        关键超参数范围：
-        - 学习率 (lr): [0.0001, 0.01]
-        - 批次大小 (batch_size): [16, 128]
-        - 训练轮数 (number_of_epochs): [5, 20]
+        key_fields = ["lr", "batch_size", "number_of_epochs"]
+        config_summary = {k: config.get(k) for k in key_fields if k in config}
+        return (
+            "历史最佳实验基线:\n"
+            f"- 实验ID: {exp_id}\n"
+            f"- {metric}: {results.get(metric, 'N/A')}\n"
+            f"- 配置: {config_summary}\n"
+        )
 
-        工作流程：
-        1. 首先使用 ReadConfig 读取并分析当前配置
-        2. 使用 ListConfigParameters 了解所有可调参数
-        3. 使用 UpdateConfig 调整超参数（参数格式为 JSON 字符串）
-        4. 使用 TrainModel 训练模型
-        5. 使用 EvaluateModel 评估性能
-        6. 使用 AnalyzeResults 分析结果
-        7. 迭代优化直到达到目标
+    def _get_memory_context(self, max_chars: int = 800) -> str:
+        """从记忆存储中提取精简上下文。"""
+        try:
+            memory = self.memory_store.get_model(self.memory_key)
+            if not memory:
+                return "记忆摘要: 暂无记录。"
 
-        重要提示：
-        - UpdateConfig 需要传入 JSON 字符串，例如 '{"lr": 0.0005, "batch_size": 64}'
-        - 所有工具调用参数都必须是字符串类型
-        - 请在最后提供最佳配置的总结
+            last_config = memory.get("last_best_config", {})
+            last_metrics = memory.get("last_best_metrics", {})
+            last_objective = memory.get("last_objective", "N/A")
+            last_summary = memory.get("last_summary", "")
 
-        请使用 Final Answer 提供最佳配置和优化结果。"""
+            summary_lines = [
+                "记忆摘要:",
+                f"- 最近目标: {last_objective}",
+                f"- 最佳参数: {last_config}",
+                f"- 最佳指标: {last_metrics}",
+            ]
+
+            if last_summary:
+                summary_lines.append(f"- 总结: {last_summary}")
+
+            text = "\n".join(summary_lines)
+            if len(text) > max_chars:
+                text = text[: max_chars - 3].rstrip() + "..."
+
+            return text
+        except Exception as exc:
+            self.agent_logger.append(f"memory_read_failed error={exc}")
+            return "记忆摘要: 读取失败。"
     
     def _load_tools(self):
         """加载已用 @tool 修饰的工具"""
@@ -170,8 +246,11 @@ class LangChainHPOAgent:
             OptimizationResult 实例
         """
         # 构建优化目标
+        history_context = self._get_history_context(metric="eer")
+        memory_context = self._get_memory_context(max_chars=800)
+
         if custom_objective:
-            objective = custom_objective
+            objective = f"{history_context}\n{memory_context}\n{custom_objective}"
         else:
             objective = f"""
         优化 ECAPA-TDNN 模型的超参数以提升性能。
@@ -180,6 +259,10 @@ class LangChainHPOAgent:
         - 将等错误率 (EER) 降低到 {target_eer} 以下
         - 提高模型准确率
         - 平衡训练时间和性能
+
+        {history_context}
+
+        {memory_context}
 
         请开始优化，使用可用工具完成实验，并在最后提供最佳配置。
         """
@@ -193,6 +276,8 @@ class LangChainHPOAgent:
             print(f"可用工具数: {len(self.tools)}")
             print("=" * 80)
             print()
+
+        self.agent_logger.append(f"objective={objective.strip()}")
         
         # 执行智能体（直接 invoke，无需 AgentExecutor）
         try:
@@ -225,6 +310,13 @@ class LangChainHPOAgent:
                 best_config=best_config,
                 execution_summary=summary
             )
+
+            self._persist_memory(
+                objective=objective,
+                best_config=best_config,
+                summary=summary,
+                total_steps=optimization_result.total_steps,
+            )
             
             if self.verbose:
                 print("\n" + "=" * 80)
@@ -236,6 +328,8 @@ class LangChainHPOAgent:
                 print(f"\n最终答案:")
                 print(final_answer)
                 print("=" * 80)
+
+            self.agent_logger.append("agent_run_end success")
             
             return optimization_result
         
@@ -244,6 +338,7 @@ class LangChainHPOAgent:
                 print(f"\n❌ 执行失败: {str(e)}")
                 import traceback
                 traceback.print_exc()
+            self.agent_logger.append(f"agent_run_end error={str(e)}")
             raise
     
     def _extract_best_config(
@@ -375,6 +470,13 @@ class LangChainHPOAgent:
             best_config=best_config,
             execution_summary=summary
         )
+
+        self._persist_memory(
+            objective=objective,
+            best_config=best_config,
+            summary=summary,
+            total_steps=optimization_result.total_steps,
+        )
         
         return optimization_result
     
@@ -386,7 +488,9 @@ class LangChainHPOAgent:
             "max_iterations": self.max_iterations,
             "verbose": self.verbose,
             "num_tools": len(self.tools),
-            "tool_names": [tool.name for tool in self.tools]
+            "tool_names": [tool.name for tool in self.tools],
+            "memory_key": self.memory_key,
+            "memory_path": str(self.memory_store.file_path)
         }
 
 
