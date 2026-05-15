@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from pathlib import Path
 import re
 import os
+import shutil
 
 try:
     from recipes.voxceleb import train_speaker_embeddings as _TRAIN_RECIPE_MODULE
@@ -73,6 +74,38 @@ def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
             if best is None or value < best:
                 best = value
     return best
+
+
+def _get_prep_cache_dir(tag: str) -> Path:
+    base_dir = Path(__file__).resolve().parent.parent / "prep_cache"
+    cache_dir = base_dir / tag
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _required_prep_files(splits: List[str], verification_file: str) -> List[str]:
+    files = ["opt_voxceleb_prepare.pkl"]
+    if "train" in splits:
+        files.append("train.csv")
+    if "dev" in splits:
+        files.append("dev.csv")
+    if "test" in splits:
+        files.extend(["test.csv", "enrol.csv"])
+    files.append(os.path.basename(verification_file))
+    return files
+
+
+def _link_from_cache(cache_dir: Path, save_dir: Path, files: List[str]) -> None:
+    save_dir.mkdir(parents=True, exist_ok=True)
+    for name in files:
+        src = cache_dir / name
+        dst = save_dir / name
+        if dst.exists() or not src.exists():
+            continue
+        try:
+            os.symlink(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
 
 
 def run_data_prep(
@@ -201,10 +234,32 @@ def run_evaluation(
                 "scores_path": None,
             }
 
+        splits = ["train", "dev", "test"]
+        cache_dir = _get_prep_cache_dir("eval")
+        cache_result = run_data_prep(
+            data_folder=params["data_folder"],
+            save_folder=str(cache_dir),
+            verification_file=params["verification_file"],
+            split_ratio=params["split_ratio"],
+            sentence_len=3.0,
+            splits=splits,
+            skip_prep=False,
+            source=params.get("voxceleb_source"),
+            random_segment=False,
+            amp_th=params.get("amp_th", 5e-4),
+            split_speaker=params.get("split_speaker", False),
+        )
+
+        if cache_result.get("status") == "success":
+            required_files = _required_prep_files(splits, params["verification_file"])
+            _link_from_cache(Path(cache_result["save_folder"]), Path(params["save_folder"]), required_files)
+            params["skip_prep"] = True
+
         veri_file_path = os.path.join(
             params["save_folder"], os.path.basename(params["verification_file"])
         )
-        verification_module.download_file(params["verification_file"], veri_file_path)
+        if not Path(veri_file_path).exists():
+            verification_module.download_file(params["verification_file"], veri_file_path)
 
         sb.core.create_experiment_directory(
             experiment_directory=params["output_folder"],
@@ -212,16 +267,17 @@ def run_evaluation(
             overrides=overrides,
         )
 
-        prepare_module.prepare_voxceleb(
-            data_folder=params["data_folder"],
-            save_folder=params["save_folder"],
-            verification_pairs_file=veri_file_path,
-            splits=["train", "dev", "test"],
-            split_ratio=params["split_ratio"],
-            seg_dur=3.0,
-            skip_prep=params["skip_prep"],
-            source=(params.get("voxceleb_source")),
-        )
+        if not params.get("skip_prep", False):
+            prepare_module.prepare_voxceleb(
+                data_folder=params["data_folder"],
+                save_folder=params["save_folder"],
+                verification_pairs_file=veri_file_path,
+                splits=splits,
+                split_ratio=params["split_ratio"],
+                seg_dur=3.0,
+                skip_prep=params["skip_prep"],
+                source=(params.get("voxceleb_source")),
+            )
 
         verification_module.params = params
         verification_module.run_opts = run_opts
@@ -335,20 +391,43 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             data_folder = "../datasets/voxceleb1"
             hparams["data_folder"] = data_folder
 
+        splits = ["train", "dev"]
+        cache_dir = _get_prep_cache_dir("train")
+        cache_result = run_data_prep(
+            data_folder=hparams["data_folder"],
+            save_folder=str(cache_dir),
+            verification_file=hparams["verification_file"],
+            split_ratio=hparams["split_ratio"],
+            sentence_len=hparams["sentence_len"],
+            splits=splits,
+            skip_prep=False,
+            source=hparams.get("voxceleb_source"),
+            random_segment=hparams.get("random_chunk", False),
+            amp_th=hparams.get("amp_th", 5e-4),
+            split_speaker=hparams.get("split_speaker", False),
+        )
+
+        if cache_result.get("status") == "success":
+            required_files = _required_prep_files(splits, hparams["verification_file"])
+            _link_from_cache(Path(cache_result["save_folder"]), Path(hparams["save_folder"]), required_files)
+            hparams["skip_prep"] = True
+
         veri_file_path = os.path.join(
             hparams["save_folder"], os.path.basename(hparams["verification_file"])
         )
-        recipe.download_file(hparams["verification_file"], veri_file_path)
+        if not Path(veri_file_path).exists():
+            recipe.download_file(hparams["verification_file"], veri_file_path)
 
-        prepare_module.prepare_voxceleb(
-            data_folder=hparams["data_folder"],
-            save_folder=hparams["save_folder"],
-            verification_pairs_file=veri_file_path,
-            splits=["train", "dev"],
-            split_ratio=hparams["split_ratio"],
-            seg_dur=hparams["sentence_len"],
-            skip_prep=hparams["skip_prep"],
-        )
+        if not hparams.get("skip_prep", False):
+            prepare_module.prepare_voxceleb(
+                data_folder=hparams["data_folder"],
+                save_folder=hparams["save_folder"],
+                verification_pairs_file=veri_file_path,
+                splits=splits,
+                split_ratio=hparams["split_ratio"],
+                seg_dur=hparams["sentence_len"],
+                skip_prep=hparams["skip_prep"],
+            )
 
         if "prepare_noise_data" in hparams:
             sb.utils.distributed.run_on_main(hparams["prepare_noise_data"])

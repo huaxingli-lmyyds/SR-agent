@@ -98,8 +98,8 @@ def RunEvaluation(model_path: Optional[str] = None,
         start_time = datetime.now()
 
         # 运行评估（非控制台调用）
-        from recipes.eval_pipeline import eval_pipeline
-        eval_result = eval_pipeline(
+        from agent.utils import runner
+        eval_result = runner.run_evaluation(
             config_path=ver_config,
             model_path=model_path,
             data_folder=data_folder,
