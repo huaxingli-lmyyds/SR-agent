@@ -13,6 +13,8 @@ import re
 # 导入 utils 模块
 from agent.utils import (
     get_config_file,
+    get_experiments_dir,
+    ensure_dir,
     get_project_root,
     ExperimentTracker,
     extract_scores_data,
@@ -87,6 +89,9 @@ def RunEvaluation(model_path: Optional[str] = None,
         if not record:
             return f"❌ 实验不存在: {experiment_id}"
 
+        exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
+        eval_output_folder = exp_dir / "evaluation"
+
         training_info = record.get("training", {})
         if data_folder is None:
             data_folder = training_info.get("data_folder")
@@ -103,6 +108,7 @@ def RunEvaluation(model_path: Optional[str] = None,
             config_path=ver_config,
             model_path=model_path,
             data_folder=data_folder,
+            overrides=[f"output_folder: {eval_output_folder}"],
         )
 
         if eval_result.get("status") == "failed":
@@ -113,7 +119,7 @@ def RunEvaluation(model_path: Optional[str] = None,
         output_folder = eval_result.get("output_folder")
         scores_path = eval_result.get("scores_path")
 
-        output_folder_path = _resolve_path(output_folder)
+        output_folder_path = eval_output_folder
         eval_log_path = output_folder_path / "log.txt" if output_folder_path else None
         log_metrics = _parse_evaluation_log(eval_log_path) if eval_log_path else {}
         if log_metrics.get("eer") is not None:

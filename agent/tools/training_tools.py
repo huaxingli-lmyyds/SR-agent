@@ -82,6 +82,31 @@ def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
     return get_project_root() / path
 
 
+def _find_output_folder(
+    exp_dir: Path,
+    output_folder_path: Optional[Path],
+    config_output_folder: Optional[str],
+) -> Optional[Path]:
+    candidates: List[Path] = []
+
+    if output_folder_path is not None:
+        candidates.append(output_folder_path)
+
+    if config_output_folder:
+        resolved = _resolve_path(str(config_output_folder))
+        if resolved is not None:
+            candidates.append(resolved)
+
+    candidates.append(exp_dir / "output")
+    candidates.append(exp_dir / "results")
+
+    for candidate in candidates:
+        if (candidate / "train_log.txt").exists() or (candidate / "save").exists():
+            return candidate
+
+    return output_folder_path
+
+
 def _parse_training_log(train_log_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     epoch_data: List[Dict[str, Any]] = []
     final_metrics: Dict[str, Any] = {}
@@ -214,8 +239,16 @@ def TrainModel(config_path: Optional[str] = None,
 
         exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
 
+        output_folder_path = _resolve_path(str(output_folder)) if output_folder else None
+        if output_folder_path is None or exp_dir not in output_folder_path.parents:
+            output_folder_path = exp_dir / "output"
+            output_folder = str(output_folder_path)
+
         # runner.run_training()
-        overrides = {"data_folder": df}
+        overrides = {
+            "data_folder": df,
+            "output_folder": str(output_folder_path),
+        }
         train_result = run_training(config_path_str, overrides)
 
         end_time = datetime.now()
@@ -227,22 +260,27 @@ def TrainModel(config_path: Optional[str] = None,
             status = "failed"
             error_msg = train_result.get("error")
 
-        eer = train_result.get("eer") if isinstance(train_result, dict) else None
-        output_folder = config_data.get("output_folder")
-        output_folder_path = _resolve_path(str(output_folder)) if output_folder else None
+        valid_error_rate = train_result.get("eer") if isinstance(train_result, dict) else None
+        output_folder_path = _find_output_folder(
+            exp_dir,
+            output_folder_path,
+            config_data.get("output_folder"),
+        )
+        output_folder = str(output_folder_path) if output_folder_path else None
+
         model_paths = _find_model_paths(
             str(output_folder_path) if output_folder_path else None,
             exp_dir,
         )
-        train_log_path = _resolve_path(str(config_data.get("train_log")))
-        if train_log_path is None and output_folder_path is not None:
-            train_log_path = output_folder_path / "train_log.txt"
+        train_log_path = (
+            output_folder_path / "train_log.txt" if output_folder_path else None
+        )
 
         epoch_data, final_metrics = (
             _parse_training_log(train_log_path) if train_log_path else ([], {})
         )
 
-        training_metrics = {"eer": eer}
+        training_metrics = {"valid_error_rate": valid_error_rate}
         if final_metrics:
             training_metrics.update(final_metrics)
 
@@ -252,7 +290,7 @@ def TrainModel(config_path: Optional[str] = None,
             status=status,
             duration=duration,
             error=error_msg,
-            results={"eer": eer},
+            results={"valid_error_rate": valid_error_rate},
             training={
                 "output_folder": str(output_folder_path) if output_folder_path else None,
                 "data_folder": df,
@@ -274,7 +312,7 @@ def TrainModel(config_path: Optional[str] = None,
 
         result_lines = [
             f"Experiment ID: {experiment_id}",
-            f"EER: {eer if eer is not None else 'N/A'}",
+            f"Valid ErrorRate: {valid_error_rate if valid_error_rate is not None else 'N/A'}",
             f"Experiment dir: {exp_dir}",
             "Training log (last 20 lines):",
             log_tail.rstrip() or "(empty)",

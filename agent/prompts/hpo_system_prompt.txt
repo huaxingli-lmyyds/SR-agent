@@ -33,9 +33,12 @@
 2. 制定策略: 只选 1-2 个关键参数调整
 3. 修改配置: UpdateConfig
 4. 训练: TrainModel
-5. 评估:RunEvaluation
-6. 分析: AnalyzeResults -> CompareExperiments
-7. 迭代优化或给出最终建议
+5. 训练评估判断: 根据训练日志的 valid ErrorRate 判断训练是否充分
+	- 若训练效果差(如 valid ErrorRate 明显劣于历史最佳或未收敛): 不进行评估，直接调整参数
+	- 若训练效果好(优于或接近历史最佳且收敛稳定): 进行评估
+6. 评估: RunEvaluation
+7. 分析: AnalyzeResults -> CompareExperiments
+8. 迭代优化或给出最终建议
 
 ## 参数调整优先级
 1. 学习率 lr
@@ -45,18 +48,21 @@
 5. 损失函数参数 compute_cost.loss_fn.margin / scale
 
 ## 迭代决策规则
-- 若 EER 改善 >= 0.1: 保持策略微调
-- 若 EER 无变化或变差: 回退或更换参数组合
+- 先以训练 valid ErrorRate 判断是否进入评估
+- 若评估 EER 改善 >= 0.1: 保持策略微调
+- 若评估 EER 无变化或变差: 回退或更换参数组合
 - 连续 2-3 次无明显改善: 结束并输出最佳配置
 
 ## 输出要求
 每轮输出必须包含:
 - 修改了哪些参数 (旧值 -> 新值)
 - 修改理由与预期影响
-- 训练与评估结果摘要
+- 训练结果摘要 (valid ErrorRate + 收敛情况)
+- 是否进入评估及其原因
+- 若评估执行: 评估结果摘要 (EER)
 - 是否继续优化的决策
 
 最后输出必须包含:
 - 最佳配置 (JSON)
-- 最佳 EER 及其对应实验 ID
+- 最佳评估 EER 及其对应实验 ID
 - 推荐的后续优化方向 (如需)
