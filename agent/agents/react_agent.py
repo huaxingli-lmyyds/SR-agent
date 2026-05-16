@@ -97,19 +97,23 @@ class LangChainHPOAgent:
         objective: str,
         best_config: Dict[str, Any],
         summary: str,
-        total_steps: int
+        total_steps: int,
+        intermediate_steps: Optional[List[Any]] = None,
     ) -> None:
         """Persist optimization summary without interrupting execution."""
         try:
             metric_keys = {"eer", "accuracy", "loss", "min_dcf", "precision", "recall", "f1"}
             best_metrics = {k: v for k, v in best_config.items() if k in metric_keys}
             best_params = {k: v for k, v in best_config.items() if k not in metric_keys}
+            changes, outcomes = self._extract_change_history(intermediate_steps or [])
             history_entry = build_history_entry(
                 objective=objective,
                 best_config=best_params,
                 best_metrics=best_metrics,
                 summary=summary,
                 total_steps=total_steps,
+                changes=changes,
+                outcomes=outcomes,
             )
             metadata = {
                 "last_updated": history_entry["timestamp"],
@@ -119,6 +123,8 @@ class LangChainHPOAgent:
                 "last_best_metrics": history_entry["best_metrics"],
                 "last_summary": summary,
                 "last_total_steps": total_steps,
+                "last_changes": changes,
+                "last_outcomes": outcomes,
             }
             update = MemoryUpdate(
                 model_key=self.memory_key,
@@ -169,6 +175,8 @@ class LangChainHPOAgent:
             last_metrics = memory.get("last_best_metrics", {})
             last_objective = memory.get("last_objective", "N/A")
             last_summary = memory.get("last_summary", "")
+            last_changes = memory.get("last_changes", [])
+            last_outcomes = memory.get("last_outcomes", {})
 
             summary_lines = [
                 "记忆摘要:",
@@ -176,6 +184,12 @@ class LangChainHPOAgent:
                 f"- 最佳参数: {last_config}",
                 f"- 最佳指标: {last_metrics}",
             ]
+
+            if last_changes:
+                summary_lines.append(f"- 最近改动: {last_changes[-1]}")
+
+            if last_outcomes:
+                summary_lines.append(f"- 最近结果: {last_outcomes}")
 
             if last_summary:
                 summary_lines.append(f"- 总结: {last_summary}")
@@ -359,25 +373,42 @@ class LangChainHPOAgent:
             except json.JSONDecodeError:
                 pass
         
-        # 从训练步骤中提取
+        # 从训练/评估步骤中提取
         train_steps = []
         for step in intermediate_steps:
             if isinstance(step, tuple) and len(step) > 0:
                 tool_call = step[0]
-                if hasattr(tool_call, 'tool') and 'train' in str(tool_call.tool).lower():
+                tool_name = str(getattr(tool_call, "tool", ""))
+                if "train" in tool_name.lower() or "evaluate" in tool_name.lower():
                     train_steps.append(step)
         
         best_eer = float('inf')
         for step in train_steps:
             obs = step[1] if len(step) > 1 else ""
             obs_text = str(obs)
+
+            exp_id_match = re.search(r"Experiment ID:\s*([\w\-]+)", obs_text)
+            if exp_id_match:
+                best_config["experiment_id"] = exp_id_match.group(1)
             
             eer_match = re.search(r'EER[:\s]+([\d.]+)', obs_text)
+            valid_match = re.search(r'Valid ErrorRate[:\s]+([\d.eE+-]+)', obs_text)
+            metric_val = None
+            metric_key = None
             if eer_match:
-                eer = float(eer_match.group(1))
-                if eer < best_eer:
-                    best_eer = eer
-                    
+                metric_val = float(eer_match.group(1))
+                metric_key = "eer"
+            elif valid_match:
+                metric_val = float(valid_match.group(1))
+                metric_key = "valid_error_rate"
+
+            if metric_val is not None:
+                if metric_val < best_eer:
+                    best_eer = metric_val
+
+                    if metric_key:
+                        best_config[metric_key] = metric_val
+
                     lr_match = re.search(r'lr[:\s]+([\d.]+)', obs_text)
                     batch_match = re.search(r'batch[:\s]+(\d+)', obs_text)
                     
@@ -385,9 +416,42 @@ class LangChainHPOAgent:
                         best_config['lr'] = float(lr_match.group(1))
                     if batch_match:
                         best_config['batch_size'] = int(batch_match.group(1))
-                    best_config['eer'] = eer
         
         return best_config
+
+    def _extract_change_history(
+        self, intermediate_steps: List[Any]
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        changes: List[Dict[str, Any]] = []
+        outcomes: Dict[str, Any] = {}
+
+        for step in intermediate_steps:
+            if not isinstance(step, tuple) or len(step) < 1:
+                continue
+            tool_call = step[0]
+            observation = step[1] if len(step) > 1 else ""
+            tool_name = str(getattr(tool_call, "tool", ""))
+            tool_input = getattr(tool_call, "tool_input", None)
+
+            if "UpdateConfig" in tool_name:
+                change_entry = {"tool": tool_name, "input": tool_input}
+                changes.append(change_entry)
+
+            obs_text = str(observation)
+            if "TrainModel" in tool_name or "train" in tool_name.lower():
+                match = re.search(r"Valid ErrorRate:\s*([\d.eE+-]+)", obs_text)
+                if match:
+                    outcomes["train_valid_error_rate"] = float(match.group(1))
+            if "RunEvaluation" in tool_name or "EvaluateModel" in tool_name:
+                match = re.search(r"EER[:\s]+([\d.]+)", obs_text)
+                if match:
+                    outcomes["eval_eer"] = float(match.group(1))
+
+            exp_id_match = re.search(r"Experiment ID:\s*([\w\-]+)", obs_text)
+            if exp_id_match:
+                outcomes["experiment_id"] = exp_id_match.group(1)
+
+        return changes, outcomes
     
     def _generate_summary(
         self,
@@ -476,6 +540,8 @@ class LangChainHPOAgent:
             best_config=best_config,
             summary=summary,
             total_steps=optimization_result.total_steps,
+                intermediate_steps=intermediate_steps,
+            intermediate_steps=intermediate_steps,
         )
         
         return optimization_result

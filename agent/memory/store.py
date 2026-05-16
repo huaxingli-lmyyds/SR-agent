@@ -80,6 +80,8 @@ def build_history_entry(
     best_metrics: Optional[Dict[str, Any]],
     summary: str,
     total_steps: int,
+    changes: Optional[list[Dict[str, Any]]] = None,
+    outcomes: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a history entry payload."""
     return {
@@ -89,4 +91,6 @@ def build_history_entry(
         "best_metrics": best_metrics or {},
         "summary": summary,
         "total_steps": total_steps,
+        "changes": changes or [],
+        "outcomes": outcomes or {},
     }
