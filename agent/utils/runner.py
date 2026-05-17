@@ -172,7 +172,7 @@ def run_evaluation(
     config_path: str,
     model_path: Optional[str] = None,
     data_folder: Optional[str] = None,
-    overrides: Optional[List[str]] = None,
+    overrides: Optional[Union[List[str], Dict[str, Any]]] = None,
     run_opts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     try:
@@ -212,14 +212,23 @@ def run_evaluation(
                 "scores_path": None,
             }
 
-        overrides = list(overrides or [])
+        if isinstance(overrides, dict):
+            overrides = dict(overrides)
+        else:
+            overrides = list(overrides or [])
         run_opts = dict(run_opts or {})
 
         if data_folder:
-            overrides.append(f"data_folder: {data_folder}")
+            if isinstance(overrides, dict):
+                overrides["data_folder"] = data_folder
+            else:
+                overrides.append(f"data_folder: {data_folder}")
         if model_path:
-            overrides.append(f"pretrainer.paths.embedding_model: {model_path}")
-
+            if isinstance(overrides, dict):
+                overrides["pretrain_path"] = model_path
+            else:
+                overrides.append(f"pretrain_path: {model_path}")
+                
         if "device" not in run_opts:
             run_opts["device"] = "cuda" if torch.cuda.is_available() else "cpu"
 

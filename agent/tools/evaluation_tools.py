@@ -17,6 +17,7 @@ from agent.utils import (
     ensure_dir,
     get_project_root,
     ExperimentTracker,
+    MetricsCalculator,
     extract_scores_data,
     compute_metrics_from_scores
 )
@@ -96,6 +97,16 @@ def RunEvaluation(model_path: Optional[str] = None,
         if data_folder is None:
             data_folder = training_info.get("data_folder")
 
+        if model_path is None:
+            record_model_paths = training_info.get("model_paths") or []
+            record_model_path = training_info.get("model_path")
+            if isinstance(record_model_paths, str):
+                model_path = record_model_paths
+            elif record_model_paths:
+                model_path = record_model_paths[0]
+            elif record_model_path:
+                model_path = record_model_path
+
         if not data_folder or data_folder == "!PLACEHOLDER":
             data_folder = "../datasets/voxceleb1"
 
@@ -108,7 +119,7 @@ def RunEvaluation(model_path: Optional[str] = None,
             config_path=ver_config,
             model_path=model_path,
             data_folder=data_folder,
-            overrides=[f"output_folder: {eval_output_folder}"],
+            overrides={"output_folder": str(eval_output_folder)},
         )
 
         if eval_result.get("status") == "failed":
@@ -143,8 +154,10 @@ def RunEvaluation(model_path: Optional[str] = None,
         }
 
         if scores_data and not scores_data.get("error"):
-            metrics = compute_metrics_from_scores(scores_data['positive_scores'],
-                                                 scores_data['negative_scores'])
+            metrics = MetricsCalculator.compute_all_metrics(
+                scores_data.get("genuine_scores", []),
+                scores_data.get("impostor_scores", []),
+            )
             results_payload.update(metrics)
 
         tracker.update_experiment(
@@ -183,7 +196,7 @@ def RunEvaluation(model_path: Optional[str] = None,
     - 分数文件: {scores_file if scores_file and scores_file.exists() else 'N/A'}"""
 
         if eer is not None:
-            summary += f"\n\n💡 EER 越低越好，最佳目标是 < 5%"
+            summary += f"\n\n💡 EER 越低越好，最佳目标是 < 2%"
 
         return summary
     except Exception as e:
