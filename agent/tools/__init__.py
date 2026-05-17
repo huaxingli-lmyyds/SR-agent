@@ -31,6 +31,11 @@ from .data_processing_tools import (
     PrepareVoxCelebData
 )
 
+from .training_diagnostics_tools import (
+    AnalyzeTrainingCurves,
+    DiagnoseFitStatus,
+)
+
 __all__ = [
     # config_tools
     'ReadConfig',
@@ -54,4 +59,8 @@ __all__ = [
 
     # data_processing_tools
     'PrepareVoxCelebData',
+
+    # training_diagnostics_tools
+    'AnalyzeTrainingCurves',
+    'DiagnoseFitStatus',
 ]

@@ -112,7 +112,7 @@ def GetExperimentResults(experiment_id: Optional[str] = None) -> str:
         summary += f"  数据文件夹: {training.get('data_folder', 'N/A')}\n"
         summary += f"  日志路径: {training.get('train_log_path', 'N/A')}\n"
         summary += f"  输出目录: {training.get('output_folder', 'N/A')}\n"
-        summary += f"  模型路径: {', '.join(training.get('model_paths', [])) or 'N/A'}\n"
+        summary += f"  模型路径: {training.get('model_paths', []) or 'N/A'}\n"
 
         train_metrics = (training.get('metrics') or {})
         if train_metrics:
@@ -155,6 +155,17 @@ def ListExperiments(n: int = 10) -> str:
         recent_exps = tracker.list_experiments(limit=n)
         if not recent_exps:
             return "📋 暂无实验记录"
+
+        def _sort_key(exp):
+            ts = exp.get("timestamp")
+            if not ts:
+                return datetime.min
+            try:
+                return datetime.fromisoformat(ts)
+            except Exception:
+                return ts
+
+        recent_exps = sorted(recent_exps, key=_sort_key)
 
         summary = f"\n📋 最近的 {len(recent_exps)} 个实验:\n"
         summary += "=" * 80 + "\n\n"
