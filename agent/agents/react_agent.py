@@ -225,6 +225,10 @@ class LangChainHPOAgent:
         from agent.tools.evaluation_tools import (
             RunEvaluation
         )
+        from agent.tools.training_diagnostics_tools import (
+            AnalyzeTrainingCurves,
+            DiagnoseFitStatus,
+        )
         
         # 直接返回已修饰的工具实例
         return [
@@ -236,6 +240,8 @@ class LangChainHPOAgent:
             TrainModel,
             EvaluateModel,
             AnalyzeResults,
+            AnalyzeTrainingCurves,
+            DiagnoseFitStatus,
             CompareExperiments,
             RunEvaluation,
             GetExperimentResults,
@@ -540,7 +546,6 @@ class LangChainHPOAgent:
             best_config=best_config,
             summary=summary,
             total_steps=optimization_result.total_steps,
-                intermediate_steps=intermediate_steps,
             intermediate_steps=intermediate_steps,
         )
         

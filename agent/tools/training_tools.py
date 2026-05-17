@@ -200,20 +200,11 @@ def TrainModel(config_path: Optional[str] = None,
             training_info = record.get("training", {})
             backup_path = training_info.get("config_backup_path")
             record_config_path = record.get("config_path")
-            if backup_path and Path(backup_path).exists():
-                if config_path and Path(config_path).resolve() != Path(backup_path).resolve():
-                    config_note = (
-                        "resume uses config_backup_path from experiment record; "
-                        "provided config_path ignored"
-                    )
-                config_path_str = backup_path
-            elif record_config_path and Path(record_config_path).exists():
-                if config_path and Path(config_path).resolve() != Path(record_config_path).resolve():
-                    config_note = (
-                        "resume uses config_path from experiment record; "
-                        "provided config_path ignored"
-                    )
-                config_path_str = record_config_path
+            if not config_path:
+                if backup_path and Path(backup_path).exists():
+                    config_path_str = backup_path
+                elif record_config_path and Path(record_config_path).exists():
+                    config_path_str = record_config_path
 
         if not Path(config_path_str).exists():
             return f"config_path not found: {config_path_str}"
