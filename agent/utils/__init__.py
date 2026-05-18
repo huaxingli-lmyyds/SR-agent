@@ -62,6 +62,10 @@ from .metrics import (
     compare_experiments
 )
 
+from .reward import (
+    compute_reward,
+)
+
 __all__ = [
     # path_tool
     'get_project_root',
@@ -113,4 +117,5 @@ __all__ = [
     'extract_scores_data',
     'compute_metrics_from_scores',
     'compare_experiments',
+    'compute_reward',
 ]

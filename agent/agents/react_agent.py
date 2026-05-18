@@ -16,6 +16,7 @@ from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 
 from agent.utils import ExperimentTracker, get_agent_dir
+from agent.utils.reward import compute_reward
 from agent.utils.logger import AgentLogger
 from agent.memory import MemoryStore, MemoryUpdate, build_history_entry
 
@@ -157,10 +158,17 @@ class LangChainHPOAgent:
 
         key_fields = ["lr", "batch_size", "number_of_epochs"]
         config_summary = {k: config.get(k) for k in key_fields if k in config}
+        reward, _ = compute_reward({
+            "eer": results.get("eer"),
+            "min_dcf": results.get("min_dcf"),
+            "params_million": results.get("params_million"),
+            "inference_ms": results.get("inference_ms"),
+        })
         return (
             "历史最佳实验基线:\n"
             f"- 实验ID: {exp_id}\n"
             f"- {metric}: {results.get(metric, 'N/A')}\n"
+            f"- 奖励分数: {reward if reward is not None else 'N/A'}\n"
             f"- 配置: {config_summary}\n"
         )
 
@@ -229,6 +237,9 @@ class LangChainHPOAgent:
             AnalyzeTrainingCurves,
             DiagnoseFitStatus,
         )
+        from agent.tools.reward_tools import (
+            ScoreExperiment,
+        )
         
         # 直接返回已修饰的工具实例
         return [
@@ -242,6 +253,7 @@ class LangChainHPOAgent:
             AnalyzeResults,
             AnalyzeTrainingCurves,
             DiagnoseFitStatus,
+            ScoreExperiment,
             CompareExperiments,
             RunEvaluation,
             GetExperimentResults,

@@ -1,5 +1,6 @@
 /datasets/
 **/.env
+test*.py
 
 # Agent experiments
 agent/experiments/
@@ -7,6 +8,8 @@ agent/experiments_hpo_version1/
 agent/results/
 agent/test*.py
 agent/experiment.zip
+agent/experiments_*/
+agent/experiment*.zip
 
 # Test files and reports
 agent/tests/

@@ -36,6 +36,10 @@ from .training_diagnostics_tools import (
     DiagnoseFitStatus,
 )
 
+from .reward_tools import (
+    ScoreExperiment,
+)
+
 __all__ = [
     # config_tools
     'ReadConfig',
@@ -63,4 +67,7 @@ __all__ = [
     # training_diagnostics_tools
     'AnalyzeTrainingCurves',
     'DiagnoseFitStatus',
+
+    # reward_tools
+    'ScoreExperiment',
 ]
