@@ -27,6 +27,49 @@ DEFAULT_CONFIG_NAME = "train_ecapa_tdnn.yaml"
 CONFIG_ENV_VAR = "SR_AGENT_CONFIG_PATH"
 CONFIG_PATH = str(get_config_file(DEFAULT_CONFIG_NAME))
 
+DATA_PROCESSING_KEYS = [
+    "data_folder",
+    "split_ratio",
+    "skip_prep",
+    "sentence_len",
+    "random_chunk",
+    "random_segment",
+    "split_speaker",
+    "splits",
+    "amp_th",
+    "save_folder",
+    "output_folder",
+]
+
+HPO_KEYS = [
+    "number_of_epochs",
+    "batch_size",
+    "lr",
+    "base_lr",
+    "step_size",
+    "num_workers",
+]
+
+MODEL_SECTION_KEYS = [
+    "embedding_model",
+    "classifier",
+    "compute_cost",
+    "mean_var_norm",
+]
+
+
+def _append_key_section(summary: str, title: str, config_dict: Dict, keys: List[str]) -> str:
+    summary += f"{title}:\n"
+    any_value = False
+    for key in keys:
+        if key in config_dict:
+            summary += f"  {key}: {config_dict[key]}\n"
+            any_value = True
+    if not any_value:
+        summary += "  (无)\n"
+    summary += "\n"
+    return summary
+
 # 轻量缓存：按配置路径复用 ConfigParser，避免每次工具调用都重新实例化
 _PARSER_CACHE: Dict[str, ConfigParser] = {}
 _PARSER_CACHE_LOCK = Lock()
@@ -66,10 +109,10 @@ def _resolve_config_path(config_path: Optional[Union[str, Path]] = None) -> str:
 @tool
 def ReadConfig(config_path: Optional[str] = None) -> str:
     """
-    读取当前 ECAPA-TDNN 配置文件的完整内容，包括模型结构信息。
+    读取当前 ECAPA-TDNN 配置文件的关键内容，覆盖数据处理参数、训练超参数和模型结构信息。
     
     Returns:
-        str: 配置文件的完整 YAML 内容（包括模型结构）
+        str: 配置摘要
     """
     try:
         # 使用 ConfigParser 读取配置
@@ -77,23 +120,17 @@ def ReadConfig(config_path: Optional[str] = None) -> str:
         parser = _get_parser(path)
         config_dict = parser.load_config()
         
-        # 返回关键配置和模型结构
-        summary = "当前配置 (包括模型结构):\n"
+        # 返回关键配置、数据处理参数和模型超参数
+        summary = "当前配置 (数据处理 + 训练超参数 + 模型结构):\n"
         summary += "=" * 80 + "\n\n"
         
-        # 基础训练参数
-        basic_params = ['lr', 'batch_size', 'number_of_epochs', 'step_size', 'seed']
-        summary += "📊 基础训练参数:\n"
-        for param in basic_params:
-            if param in config_dict:
-                summary += f"  {param}: {config_dict[param]}\n"
-        summary += "\n"
+        summary = _append_key_section(summary, "🧹 数据处理参数", config_dict, DATA_PROCESSING_KEYS)
+        summary = _append_key_section(summary, "🎯 训练超参数", config_dict, HPO_KEYS)
         
         # 模型结构参数
-        model_sections = ['embedding_model', 'classifier', 'compute_cost', 'opt_class']
         summary += "🏗️  模型结构参数:\n"
-        
-        for section in model_sections:
+
+        for section in MODEL_SECTION_KEYS:
             if section in config_dict:
                 value = config_dict[section]
                 if isinstance(value, dict):
@@ -118,6 +155,11 @@ def UpdateConfig(
 ) -> str:
     """
     使用 JSON 形式的配置更新 ECAPA-TDNN YAML 文件。
+
+    这个工具同时服务于数据处理智能体和超参数智能体，通常用于修改：
+    - 数据处理相关字段，例如 split_ratio, sentence_len, skip_prep, random_chunk, split_speaker
+    - 训练超参数相关字段，例如 number_of_epochs, batch_size, lr, base_lr, max_lr, step_size
+    - 模型结构相关字段，例如 embedding_model, classifier, compute_cost
     
     参数:
         config_json: JSON 字符串或 dict，表示要更新的字段
@@ -154,7 +196,11 @@ def UpdateConfig(
             _invalidate_parser_cache(path)
         
         backup_info = f"\n✅ 配置已备份到: {backup_path}" if backup_path else ""
-        return f"✅ 配置已更新: {updates} (persist={persist}){backup_info}"
+        return (
+            "✅ 配置已更新\n"
+            f"修改内容: {updates}\n"
+            f"persist={persist}{backup_info}"
+        )
     
     except Exception as e:
         return f"❌ 修改配置失败: {str(e)}"
@@ -178,6 +224,18 @@ def ListConfigParameters(path: Optional[str] = None) -> str:
         
         summary = f"\n📋 配置参数列表 - {config_path.name}\n"
         summary += "=" * 80 + "\n\n"
+
+        summary += "🧹 数据处理参数候选:\n"
+        for key in DATA_PROCESSING_KEYS:
+            if key in config_dict:
+                summary += f"  {key}: {config_dict[key]}\n"
+        summary += "\n"
+
+        summary += "🎯 训练超参数候选:\n"
+        for key in HPO_KEYS:
+            if key in config_dict:
+                summary += f"  {key}: {config_dict[key]}\n"
+        summary += "\n"
         
         def _list_params(d, prefix="", indent=2):
             """递归列出参数"""

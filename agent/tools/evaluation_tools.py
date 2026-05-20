@@ -90,7 +90,7 @@ def RunEvaluation(model_path: Optional[str] = None,
         if not record:
             return f"❌ 实验不存在: {experiment_id}"
 
-        exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
+        exp_dir = tracker.experiments_dir
         eval_output_folder = exp_dir / "evaluation"
 
         training_info = record.get("training", {})
@@ -196,7 +196,7 @@ def RunEvaluation(model_path: Optional[str] = None,
     - 分数文件: {scores_file if scores_file and scores_file.exists() else 'N/A'}"""
 
         if eer is not None:
-            summary += f"\n\n💡 EER 越低越好，最佳目标是 < 2%"
+            summary += f"\n\n💡 EER 越低越好，最佳目标是 < 5%"
 
         return summary
     except Exception as e:

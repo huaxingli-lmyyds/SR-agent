@@ -75,6 +75,21 @@ def get_experiments_dir() -> Path:
     return get_agent_dir() / "experiments"
 
 
+def get_hpo_experiments_dir() -> Path:
+    """获取超参数智能体实验目录。"""
+    return get_experiments_dir() / "hpo"
+
+
+def get_data_processing_experiments_dir() -> Path:
+    """获取数据处理智能体实验目录。"""
+    return get_experiments_dir() / "dp"
+
+
+def get_manage_experiments_dir() -> Path:
+    """获取统筹智能体实验目录。"""
+    return get_experiments_dir() / "manage"
+
+
 def get_results_dir() -> Path:
     """
     获取结果目录

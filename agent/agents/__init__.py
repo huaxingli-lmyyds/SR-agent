@@ -15,6 +15,11 @@ from .data_processing_agent import (
     DataProcessingResult,
     create_data_processing_agent,
 )
+from .orchestrator import (
+    CoordinatorAgent,
+    OrchestratedPipeline,
+    OrchestrationResult,
+)
 
 __all__ = [
     'LangChainHPOAgent',
@@ -25,4 +30,7 @@ __all__ = [
     'DataProcessingHPOAgent',
     'DataProcessingResult',
     'create_data_processing_agent',
+    'CoordinatorAgent',
+    'OrchestratedPipeline',
+    'OrchestrationResult',
 ]

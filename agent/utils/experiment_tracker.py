@@ -3,6 +3,7 @@
 提供实验记录管理、状态跟踪、结果比较等功能
 """
 
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Union, Dict, List, Optional, Any
 from datetime import datetime
@@ -12,9 +13,62 @@ import shutil
 # 导入路径工具
 from .path_tool import (
     get_experiments_dir,
+    get_hpo_experiments_dir,
+    get_data_processing_experiments_dir,
+    get_manage_experiments_dir,
     ensure_dir,
     list_directories
 )
+
+
+@dataclass
+class BaseExperimentRecord:
+    """所有智能体实验记录的公共基类。"""
+
+    experiment_type: str
+    experiment_id: str = ""
+    timestamp: str = ""
+    description: str = ""
+    status: str = "created"
+    duration_seconds: float = 0.0
+    config_path: str = ""
+    results: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class HPOExperimentRecord(BaseExperimentRecord):
+    """超参数智能体实验记录。"""
+
+    experiment_type: str = "hpo"
+    training: Dict[str, Any] = field(default_factory=dict)
+    evaluation: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class DataProcessingExperimentRecord(BaseExperimentRecord):
+    """数据处理智能体实验记录。"""
+
+    experiment_type: str = "data_processing"
+    data_processing: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class OrchestrationExperimentRecord(BaseExperimentRecord):
+    """统筹智能体实验记录。"""
+
+    experiment_type: str = "orchestration"
+    orchestration: Dict[str, Any] = field(default_factory=dict)
+    linked_experiments: Dict[str, Any] = field(default_factory=dict)
+    a2a_messages: List[Dict[str, Any]] = field(default_factory=list)
+    data_processing_summary_history: List[Dict[str, Any]] = field(default_factory=list)
+    hpo_feedback_history: List[Dict[str, Any]] = field(default_factory=list)
+
+
+ExperimentRecordDict = Dict[str, Any]
 
 
 class ExperimentTracker:
@@ -27,10 +81,10 @@ class ExperimentTracker:
         参数:
             experiments_dir: 实验目录，如果为 None 则使用默认目录
         """
-        if experiments_dir:
+        if experiments_dir is not None:
             self.experiments_dir = Path(experiments_dir)
         else:
-            self.experiments_dir = get_experiments_dir()
+            self.experiments_dir = get_hpo_experiments_dir()
         
         # 确保目录存在
         ensure_dir(self.experiments_dir)
@@ -44,15 +98,19 @@ class ExperimentTracker:
     def create_experiment(self, config_path: str,
                          data_folder: str,
                          output_folder: Optional[str] = None,
-                         description: str = "") -> str:
+                         description: str = "",
+                         experiment_type: str = "hpo",
+                         extra_fields: Optional[Dict[str, Any]] = None) -> str:
         """
         创建新实验
         
         参数:
-            config: 配置字典
             config_path: 配置文件路径
             data_folder: 数据文件夹路径
+            output_folder: 输出文件夹路径
             description: 实验描述
+            experiment_type: 实验类型，默认 hpo
+            extra_fields: 额外要写入记录的字段
         
         Returns:
             实验 ID
@@ -62,33 +120,26 @@ class ExperimentTracker:
         experiment_id = f"{base_id}_{self._counter}"
         self._counter += 1
         
+        experiments_dir = self._resolve_agent_experiments_dir(experiment_type)
+
         # 创建实验目录
-        exp_dir = ensure_dir(self.experiments_dir / experiment_id)
+        exp_dir = ensure_dir(experiments_dir / experiment_id)
         
         # 备份配置文件
         config_backup = exp_dir / "config.yaml"
         shutil.copy2(config_path, config_backup)
         
         # 创建实验记录
-        experiment_record = {
-            "experiment_id": experiment_id,
-            "timestamp": datetime.now().isoformat(),
-            "description": description,
-            "status": "created",
-            "duration_seconds": 0,
-            "config_path": config_path,
-            "training": {
-                "config_backup_path": str(config_backup),
-                "data_folder": data_folder,
-                "output_folder": output_folder,
-                "train_log_path": None,
-                "metrics": None,
-                "model_paths": []
-            },
-            "evaluation": None,
-            "results": None,
-            "error": None
-        }
+        experiment_record = self._build_record(
+            experiment_type=experiment_type,
+            experiment_id=experiment_id,
+            config_path=config_path,
+            data_folder=data_folder,
+            output_folder=output_folder,
+            description=description,
+            config_backup_path=str(config_backup),
+            extra_fields=extra_fields,
+        )
         
         # 保存实验记录
         record_path = exp_dir / "experiment_record.json"
@@ -99,6 +150,48 @@ class ExperimentTracker:
         self._update_history(experiment_record)
         
         return experiment_id
+
+    def create_hpo_experiment(self, config_path: str, data_folder: str,
+                              output_folder: Optional[str] = None,
+                              description: str = "",
+                              extra_fields: Optional[Dict[str, Any]] = None) -> str:
+        """创建超参数智能体实验记录。"""
+        return self.create_experiment(
+            config_path=config_path,
+            data_folder=data_folder,
+            output_folder=output_folder,
+            description=description,
+            experiment_type="hpo",
+            extra_fields=extra_fields,
+        )
+
+    def create_data_processing_experiment(self, config_path: str, data_folder: str,
+                                          output_folder: Optional[str] = None,
+                                          description: str = "",
+                                          extra_fields: Optional[Dict[str, Any]] = None) -> str:
+        """创建数据处理智能体实验记录。"""
+        return self.create_experiment(
+            config_path=config_path,
+            data_folder=data_folder,
+            output_folder=output_folder,
+            description=description,
+            experiment_type="data_processing",
+            extra_fields=extra_fields,
+        )
+
+    def create_orchestration_experiment(self, config_path: str, data_folder: str,
+                                        output_folder: Optional[str] = None,
+                                        description: str = "",
+                                        extra_fields: Optional[Dict[str, Any]] = None) -> str:
+        """创建统筹智能体实验记录。"""
+        return self.create_experiment(
+            config_path=config_path,
+            data_folder=data_folder,
+            output_folder=output_folder,
+            description=description,
+            experiment_type="orchestration",
+            extra_fields=extra_fields,
+        )
     
     def update_experiment(self, experiment_id: str, 
                          results: Optional[Dict] = None,
@@ -106,7 +199,14 @@ class ExperimentTracker:
                          error: Optional[str] = None,
                          duration: Optional[float] = None,
                          training: Optional[Dict] = None,
-                         evaluation: Optional[Dict] = None) -> bool:
+                         evaluation: Optional[Dict] = None,
+                         data_processing: Optional[Dict] = None,
+                         orchestration: Optional[Dict] = None,
+                         linked_experiments: Optional[Dict] = None,
+                         a2a_messages: Optional[List[Dict[str, Any]]] = None,
+                         data_processing_summary_history: Optional[List[Dict[str, Any]]] = None,
+                         hpo_feedback_history: Optional[List[Dict[str, Any]]] = None,
+                         experiment_type: Optional[str] = None) -> bool:
         """
         更新实验信息
         
@@ -121,7 +221,7 @@ class ExperimentTracker:
             是否更新成功
         """
         # 读取实验记录
-        record = self.get_experiment(experiment_id)
+        record, record_dir = self._load_record(experiment_id, experiment_type=experiment_type)
         if record is None:
             return False
         
@@ -140,9 +240,25 @@ class ExperimentTracker:
             record["training"] = current_training
         if evaluation is not None:
             record["evaluation"] = evaluation
+        if data_processing is not None:
+            current_data_processing = record.get("data_processing") or {}
+            current_data_processing.update(data_processing)
+            record["data_processing"] = current_data_processing
+        if orchestration is not None:
+            current_orchestration = record.get("orchestration") or {}
+            current_orchestration.update(orchestration)
+            record["orchestration"] = current_orchestration
+        if linked_experiments is not None:
+            record["linked_experiments"] = linked_experiments
+        if a2a_messages is not None:
+            record["a2a_messages"] = a2a_messages
+        if data_processing_summary_history is not None:
+            record["data_processing_summary_history"] = data_processing_summary_history
+        if hpo_feedback_history is not None:
+            record["hpo_feedback_history"] = hpo_feedback_history
         
         # 保存更新后的记录
-        record_path = self.experiments_dir / experiment_id / "experiment_record.json"
+        record_path = record_dir / experiment_id / "experiment_record.json"
         with open(record_path, 'w', encoding='utf-8') as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
         
@@ -150,6 +266,38 @@ class ExperimentTracker:
         self._update_history(record)
         
         return True
+
+    def update_hpo_experiment(self, experiment_id: str, **kwargs) -> bool:
+        """更新超参数智能体实验记录。"""
+        return self.update_experiment(experiment_id, **kwargs)
+
+    def update_data_processing_experiment(self, experiment_id: str,
+                                          data_processing: Optional[Dict] = None,
+                                          **kwargs) -> bool:
+        """更新数据处理智能体实验记录。"""
+        return self.update_experiment(
+            experiment_id,
+            data_processing=data_processing,
+            **kwargs,
+        )
+
+    def update_orchestration_experiment(self, experiment_id: str,
+                                        orchestration: Optional[Dict] = None,
+                                        linked_experiments: Optional[Dict] = None,
+                                        a2a_messages: Optional[List[Dict[str, Any]]] = None,
+                                        data_processing_summary_history: Optional[List[Dict[str, Any]]] = None,
+                                        hpo_feedback_history: Optional[List[Dict[str, Any]]] = None,
+                                        **kwargs) -> bool:
+        """更新统筹智能体实验记录。"""
+        return self.update_experiment(
+            experiment_id,
+            orchestration=orchestration,
+            linked_experiments=linked_experiments,
+            a2a_messages=a2a_messages,
+            data_processing_summary_history=data_processing_summary_history,
+            hpo_feedback_history=hpo_feedback_history,
+            **kwargs,
+        )
     
     def get_experiment(self, experiment_id: str) -> Optional[Dict]:
         """
@@ -161,22 +309,15 @@ class ExperimentTracker:
         Returns:
             实验记录字典，如果不存在则返回 None
         """
-        exp_dir = self.experiments_dir / experiment_id
-        if not exp_dir.exists():
-            return None
-        
-        record_path = exp_dir / "experiment_record.json"
-        if not record_path.exists():
-            return None
-        
-        with open(record_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        record, _ = self._load_record(experiment_id)
+        return record
     
     def list_experiments(self, 
                        status: Optional[str] = None,
                        limit: Optional[int] = None,
                        sort_by: str = "timestamp",
-                       reverse: bool = True) -> List[Dict]:
+                       reverse: bool = True,
+                       experiment_type: Optional[str] = None) -> List[Dict]:
         """
         列出实验
         
@@ -190,7 +331,7 @@ class ExperimentTracker:
             实验记录列表
         """
         # 读取历史记录
-        history = self._load_history()
+        history = self._load_history(experiment_type=experiment_type)
         
         # 筛选状态
         if status:
@@ -212,7 +353,8 @@ class ExperimentTracker:
     def find_best_experiment(self, 
                            metric: str = "eer",
                            minimize: bool = True,
-                           top_n: int = 1) -> List[Dict]:
+                           top_n: int = 1,
+                           experiment_type: Optional[str] = None) -> List[Dict]:
         """
         查找最佳实验
         
@@ -225,7 +367,7 @@ class ExperimentTracker:
             最佳实验记录列表
         """
         # 获取所有成功的实验
-        successful_exps = self.list_experiments(status="success")
+        successful_exps = self.list_experiments(status="success", experiment_type=experiment_type)
         
         # 过滤出有该指标的实验
         valid_exps = []
@@ -377,12 +519,12 @@ class ExperimentTracker:
         Returns:
             是否删除成功
         """
-        exp_dir = self.experiments_dir / experiment_id
-        if not exp_dir.exists():
+        record, record_dir = self._load_record(experiment_id)
+        if record is None:
             return False
         
         # 删除目录
-        shutil.rmtree(exp_dir)
+        shutil.rmtree(record_dir / experiment_id)
         
         # 更新历史记录
         self._remove_from_history(experiment_id)
@@ -439,13 +581,14 @@ class ExperimentTracker:
         
         return output_path
     
-    def _load_history(self) -> List[Dict]:
+    def _load_history(self, experiment_type: Optional[str] = None) -> List[Dict]:
         """加载历史记录"""
-        if not self.history_file.exists():
+        history_file = self._get_history_file(experiment_type)
+        if not history_file.exists():
             return []
         
         try:
-            with open(self.history_file, 'r', encoding='utf-8') as f:
+            with open(history_file, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
                 if not content:
                     return []
@@ -456,7 +599,8 @@ class ExperimentTracker:
     
     def _update_history(self, experiment: Dict):
         """更新历史记录"""
-        history = self._load_history()
+        history = self._load_history(experiment.get("experiment_type"))
+        history_file = self._get_history_file(experiment.get("experiment_type"))
         
         # 查找并更新或添加
         found = False
@@ -470,16 +614,140 @@ class ExperimentTracker:
             history.append(experiment)
         
         # 保存
-        with open(self.history_file, 'w', encoding='utf-8') as f:
+        ensure_dir(history_file.parent)
+        with open(history_file, 'w', encoding='utf-8') as f:
             json.dump(history, f, indent=2, ensure_ascii=False)
+
+    def _build_record(self,
+                       experiment_type: str,
+                       experiment_id: str,
+                       config_path: str,
+                       data_folder: str,
+                       output_folder: Optional[str],
+                       description: str,
+                       config_backup_path: str,
+                       extra_fields: Optional[Dict[str, Any]] = None) -> ExperimentRecordDict:
+        """根据实验类型生成对应结构的记录。"""
+        base_kwargs = {
+            "experiment_id": experiment_id,
+            "timestamp": datetime.now().isoformat(),
+            "description": description,
+            "status": "created",
+            "duration_seconds": 0,
+            "config_path": config_path,
+            "results": None,
+            "error": None,
+        }
+
+        if experiment_type == "data_processing":
+            record = DataProcessingExperimentRecord(**base_kwargs).to_dict()
+            record["data_processing"] = {
+                "config_backup_path": config_backup_path,
+                "data_folder": data_folder,
+                "output_folder": output_folder,
+                "save_folder": output_folder,
+                "verification_file": None,
+                "split_ratio": None,
+                "sentence_len": None,
+                "skip_prep": None,
+                "stats": None,
+                "summary": None,
+            }
+        elif experiment_type == "orchestration":
+            record = OrchestrationExperimentRecord(**base_kwargs).to_dict()
+            record["orchestration"] = {
+                "config_backup_path": config_backup_path,
+                "data_folder": data_folder,
+                "output_folder": output_folder,
+                "manager_decision_history": [],
+                "rounds": 0,
+                "final_state": None,
+            }
+            record["linked_experiments"] = {}
+            record["a2a_messages"] = []
+            record["data_processing_summary_history"] = []
+            record["hpo_feedback_history"] = []
+        else:
+            record = HPOExperimentRecord(**base_kwargs).to_dict()
+            record["training"] = {
+                "config_backup_path": config_backup_path,
+                "data_folder": data_folder,
+                "output_folder": output_folder,
+                "train_log_path": None,
+                "metrics": None,
+                "model_paths": []
+            }
+            record["evaluation"] = None
+
+        if extra_fields:
+            for key, value in extra_fields.items():
+                if isinstance(value, dict) and isinstance(record.get(key), dict):
+                    merged = dict(record.get(key) or {})
+                    merged.update(value)
+                    record[key] = merged
+                else:
+                    record[key] = value
+
+        return record
     
     def _remove_from_history(self, experiment_id: str):
         """从历史记录中移除实验"""
-        history = self._load_history()
-        history = [exp for exp in history if exp['experiment_id'] != experiment_id]
-        
-        with open(self.history_file, 'w', encoding='utf-8') as f:
-            json.dump(history, f, indent=2, ensure_ascii=False)
+        removed = False
+        for experiment_type in ("hpo", "data_processing", "orchestration"):
+            history = self._load_history(experiment_type)
+            filtered = [exp for exp in history if exp['experiment_id'] != experiment_id]
+            if len(filtered) != len(history):
+                removed = True
+            history_file = self._get_history_file(experiment_type)
+            ensure_dir(history_file.parent)
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(filtered, f, indent=2, ensure_ascii=False)
+
+        if not removed:
+            history = self._load_history()
+            history = [exp for exp in history if exp['experiment_id'] != experiment_id]
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+
+    def _resolve_agent_experiments_dir(self, experiment_type: str) -> Path:
+        if experiment_type == "data_processing":
+            return get_data_processing_experiments_dir()
+        if experiment_type == "orchestration":
+            return get_manage_experiments_dir()
+        return get_hpo_experiments_dir()
+
+    def _get_history_file(self, experiment_type: Optional[str] = None) -> Path:
+        if experiment_type is None:
+            return self.history_file
+        return self._resolve_agent_experiments_dir(experiment_type) / "experiments_history.json"
+
+    def _load_record(self, experiment_id: str, experiment_type: Optional[str] = None) -> tuple[Optional[Dict], Path]:
+        if experiment_type:
+            record_dir = self._resolve_agent_experiments_dir(experiment_type)
+            record_path = record_dir / experiment_id / "experiment_record.json"
+            if record_path.exists():
+                with open(record_path, 'r', encoding='utf-8') as f:
+                    return json.load(f), record_dir
+            return None, record_dir
+
+        candidate_dirs = [self.experiments_dir]
+        for candidate_type in ("hpo", "data_processing", "orchestration"):
+            record_dir = self._resolve_agent_experiments_dir(candidate_type)
+            if record_dir not in candidate_dirs:
+                candidate_dirs.append(record_dir)
+
+        for record_dir in candidate_dirs:
+            record_path = record_dir / experiment_id / "experiment_record.json"
+            if record_path.exists():
+                with open(record_path, 'r', encoding='utf-8') as f:
+                    return json.load(f), record_dir
+
+        record_dir = self.experiments_dir
+        record_path = record_dir / experiment_id / "experiment_record.json"
+        if record_path.exists():
+            with open(record_path, 'r', encoding='utf-8') as f:
+                return json.load(f), record_dir
+        return None, record_dir
 
 
 # 便捷函数

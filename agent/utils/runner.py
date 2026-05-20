@@ -138,10 +138,11 @@ def run_data_prep(
         save_path.mkdir(parents=True, exist_ok=True)
         verification_local = save_path / os.path.basename(str(verification_file))
         download_file(str(verification_file), str(verification_local))
+        cache_dir = _get_prep_cache_dir("train")
 
         prepare_module.prepare_voxceleb(
             data_folder=data_folder,
-            save_folder=str(save_path),
+            save_folder=str(cache_dir),
             verification_pairs_file=str(verification_local),
             splits=splits,
             split_ratio=split_ratio,
@@ -157,14 +158,14 @@ def run_data_prep(
             "status": "success",
             "error": None,
             "verification_local": str(verification_local),
-            "save_folder": str(save_path),
+            "save_folder": str(cache_dir),
         }
     except Exception as exc:
         return {
             "status": "failed",
             "error": f"{type(exc).__name__}: {exc}",
             "verification_local": None,
-            "save_folder": str(save_folder),
+            "save_folder": str(cache_dir),
         }
 
 

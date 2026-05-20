@@ -10,6 +10,9 @@ from .path_tool import (
     get_datasets_dir,
     get_recipes_dir,
     get_experiments_dir,
+    get_hpo_experiments_dir,
+    get_data_processing_experiments_dir,
+    get_manage_experiments_dir,
     get_results_dir,
     ensure_dir,
     find_result_dirs,
@@ -34,6 +37,10 @@ from .config_parser import (
 )
 
 from .experiment_tracker import (
+    BaseExperimentRecord,
+    HPOExperimentRecord,
+    DataProcessingExperimentRecord,
+    OrchestrationExperimentRecord,
     ExperimentTracker,
     create_experiment,
     list_experiments,
@@ -74,6 +81,9 @@ __all__ = [
     'get_datasets_dir',
     'get_recipes_dir',
     'get_experiments_dir',
+    'get_hpo_experiments_dir',
+    'get_data_processing_experiments_dir',
+    'get_manage_experiments_dir',
     'get_results_dir',
     'ensure_dir',
     'find_result_dirs',
@@ -96,6 +106,10 @@ __all__ = [
     'compare_configs',
     
     # experiment_tracker
+    'BaseExperimentRecord',
+    'HPOExperimentRecord',
+    'DataProcessingExperimentRecord',
+    'OrchestrationExperimentRecord',
     'ExperimentTracker',
     'create_experiment',
     'list_experiments',

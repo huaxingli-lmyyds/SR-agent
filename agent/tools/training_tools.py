@@ -240,7 +240,7 @@ def TrainModel(config_path: Optional[str] = None,
                 description=description or "",
             )
 
-        exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
+        exp_dir = ensure_dir(tracker.experiments_dir / experiment_id)
 
         output_folder_path = _resolve_path(str(output_folder)) if output_folder else None
         if output_folder_path is None or exp_dir not in output_folder_path.parents:
@@ -342,7 +342,8 @@ def EvaluateModel(experiment_id: Optional[str] = None) -> str:
         str: 评估结果
     """
     try:
-        exp_dir = get_experiments_dir()
+        tracker = ExperimentTracker()
+        exp_dir = tracker.experiments_dir
         
         if experiment_id:
             target_dir = exp_dir / experiment_id
@@ -424,7 +425,8 @@ def AnalyzeResults(experiment_id: Optional[str] = None) -> str:
     try:
         from agent.utils import extract_log_metrics
         
-        exp_dir = get_experiments_dir()
+        tracker = ExperimentTracker()
+        exp_dir = tracker.experiments_dir
         
         if experiment_id:
             target_dir = exp_dir / experiment_id

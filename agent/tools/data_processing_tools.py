@@ -74,16 +74,10 @@ def _count_csv_rows(path: Path) -> Optional[int]:
 @tool
 def PrepareVoxCelebData(
     config_path: Optional[str] = None,
-    data_folder: Optional[str] = None,
-    save_folder: Optional[str] = None,
-    verification_file: Optional[str] = None,
     split_ratio: Optional[str] = None,
     sentence_len: Optional[str] = None,
-    splits: Optional[str] = None,
     skip_prep: Optional[str] = None,
-    source: Optional[str] = None,
     random_segment: Optional[str] = None,
-    amp_th: Optional[str] = None,
     split_speaker: Optional[str] = None,
 ) -> str:
     """
@@ -91,16 +85,10 @@ def PrepareVoxCelebData(
 
     参数:
         config_path: 配置文件路径
-        data_folder: 数据根目录（可覆盖配置）
-        save_folder: CSV 输出目录（可覆盖配置）
-        verification_file: 验证列表文件或 URL（可覆盖配置）
         split_ratio: 训练/验证比例（JSON 列表或 "90,10"）
         sentence_len: 片段长度（秒）
-        splits: 准备的拆分列表（JSON 列表或 "train,dev,test"）
         skip_prep: 是否跳过准备
-        source: VoxCeleb 源数据路径
         random_segment: 是否随机切片
-        amp_th: 幅度阈值
         split_speaker: 是否按说话人划分
 
     Returns:
@@ -111,36 +99,37 @@ def PrepareVoxCelebData(
         parser = ConfigParser(cfg_path)
         config_data = parser.load_config(resolve_references=True)
 
-        df = data_folder or config_data.get("data_folder")
-        if not df or df == "!PLACEHOLDER":
-            df = "../datasets/voxceleb1"
-
-        sf = save_folder or config_data.get("save_folder")
-        if not sf:
-            return "❌ 无法确定 save_folder，请在配置或参数中设置"
-
-        vf = verification_file or config_data.get("verification_file")
-        if not vf:
-            return "❌ 无法确定 verification_file，请在配置或参数中设置"
-
         split_ratio_val = _parse_list(split_ratio) or config_data.get("split_ratio") or [90, 10]
         sentence_len_val = _parse_float(sentence_len)
         if sentence_len_val is None:
             sentence_len_val = config_data.get("sentence_len") or 3.0
 
-        splits_val = _parse_list(splits) or ["train", "dev", "test"]
         skip_prep_val = _parse_bool(skip_prep)
         if skip_prep_val is None:
             skip_prep_val = bool(config_data.get("skip_prep", False))
 
-        source_val = source or config_data.get("voxceleb_source")
         random_segment_val = _parse_bool(random_segment)
         if random_segment_val is None:
             random_segment_val = False
-        amp_th_val = _parse_float(amp_th) or 5e-04
         split_speaker_val = _parse_bool(split_speaker)
         if split_speaker_val is None:
             split_speaker_val = False
+
+        df = config_data.get("data_folder")
+        if not df or df == "!PLACEHOLDER":
+            df = "../datasets/voxceleb1"
+
+        sf = config_data.get("save_folder")
+        if not sf:
+            return "❌ 无法确定 save_folder，请在配置中设置"
+
+        vf = config_data.get("verification_file")
+        if not vf:
+            return "❌ 无法确定 verification_file，请在配置中设置"
+
+        splits_val = config_data.get("splits") or ["train", "dev", "test"]
+        source_val = config_data.get("voxceleb_source")
+        amp_th_val = config_data.get("amp_th") or 5e-04
 
         prep_result = runner.run_data_prep(
             data_folder=df,

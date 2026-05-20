@@ -3,7 +3,6 @@
 使用 create_agent 标准接口，无需 AgentExecutor
 """
 
-import os
 import json
 import re
 from typing import Dict, List, Optional, Any
@@ -11,19 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import dotenv
-from langchain_openai import ChatOpenAI
-from langchain.agents import create_agent
-
 from agent.utils import ExperimentTracker, get_agent_dir
 from agent.utils.reward import compute_reward
 from agent.utils.logger import AgentLogger
 from agent.memory import MemoryStore, MemoryUpdate, build_history_entry
-
-# 加载环境变量
-dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
-os.environ["OPENAI_API_KEY"] = os.getenv("ZHIPUAI_API_KEY")
-os.environ["OPENAI_API_BASE"] = os.getenv("ZHIU_API_BASE_URL")
+from agent.agents.base_agent import BaseLangChainAgent
 
 
 @dataclass
@@ -37,7 +28,7 @@ class OptimizationResult:
     execution_summary: str
 
 
-class LangChainHPOAgent:
+class LangChainHPOAgent(BaseLangChainAgent):
     """基于 LangChain v1.0 的超参数优化智能体"""
     
     def __init__(
@@ -62,21 +53,17 @@ class LangChainHPOAgent:
             memory_key: 记忆存储的模型标识（可选）
             memory_path: 记忆文件路径（可选）
         """
-        self.model_name = model_name
-        self.temperature = temperature
-        self.max_iterations = max_iterations
-        self.verbose = verbose
+        super().__init__(
+            model_name=model_name,
+            temperature=temperature,
+            max_iterations=max_iterations,
+            verbose=verbose,
+        )
         self.config_path = config_path
-        self.agent_logger = AgentLogger(get_agent_dir() / "logs" / "agent.log")
+        self.agent_logger = AgentLogger(get_agent_dir() / "logs" / "agent_HPO.log")
         self.memory_key = memory_key or Path(config_path).stem or "default_model"
         self.memory_store = MemoryStore(
             file_path=Path(memory_path) if memory_path else None
-        )
-        
-        # 初始化 LLM
-        self.llm = ChatOpenAI(
-            model=model_name,
-            temperature=temperature
         )
         
         # 导入已修饰的工具
@@ -86,8 +73,7 @@ class LangChainHPOAgent:
         self.system_prompt = self._create_system_prompt()
         
         # 创建智能体（使用 create_agent，无需 AgentExecutor）
-        self.agent = create_agent(
-            model=self.llm,
+        self.agent = self._build_agent(
             tools=self.tools,
             system_prompt=self.system_prompt,
             middleware=self.agent_logger.build_middleware(),
@@ -161,8 +147,6 @@ class LangChainHPOAgent:
         reward, _ = compute_reward({
             "eer": results.get("eer"),
             "min_dcf": results.get("min_dcf"),
-            "params_million": results.get("params_million"),
-            "inference_ms": results.get("inference_ms"),
         })
         return (
             "历史最佳实验基线:\n"
@@ -226,9 +210,9 @@ class LangChainHPOAgent:
             AnalyzeResults,
         )
         from agent.tools.experiment_history_tools import (
-            CompareExperiments,
-            GetExperimentResults,
-            ListExperiments
+            CompareHPOExperiments,
+            GetHPOExperimentResults,
+            ListHPOExperiments,
         )
         from agent.tools.evaluation_tools import (
             RunEvaluation
@@ -254,10 +238,10 @@ class LangChainHPOAgent:
             AnalyzeTrainingCurves,
             DiagnoseFitStatus,
             ScoreExperiment,
-            CompareExperiments,
+            CompareHPOExperiments,
             RunEvaluation,
-            GetExperimentResults,
-            ListExperiments
+            GetHPOExperimentResults,
+            ListHPOExperiments
         ]
     
     def optimize_hyperparameters(
@@ -313,12 +297,7 @@ class LangChainHPOAgent:
         
         # 执行智能体（直接 invoke，无需 AgentExecutor）
         try:
-            # 使用新的消息格式
-            messages = [
-                {"role": "user", "content": objective}
-            ]
-            
-            result = self.agent.invoke({"messages": messages})
+            result = self._invoke(objective)
             
             # 提取结果
             messages_result = result.get("messages", [])
@@ -522,13 +501,8 @@ class LangChainHPOAgent:
             print("=" * 80)
             print()
         
-        # 使用新的消息格式
-        messages = [
-            {"role": "user", "content": objective}
-        ]
-        
         # 执行智能体
-        result = self.agent.invoke({"messages": messages})
+        result = self._invoke(objective)
         
         # 提取结果
         messages_result = result.get("messages", [])
