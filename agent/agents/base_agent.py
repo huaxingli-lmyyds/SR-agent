@@ -45,15 +45,7 @@ class BaseLangChainAgent:
         tools: List[Any],
         system_prompt: str,
         middleware: Optional[Any] = None,
-        prompt_arg: str = "system_prompt",
     ) -> Any:
-        if prompt_arg == "prompt":
-            return create_agent(
-                model=self.llm,
-                tools=tools,
-                prompt=system_prompt,
-                middleware=middleware,
-            )
         return create_agent(
             model=self.llm,
             tools=tools,
@@ -64,3 +56,20 @@ class BaseLangChainAgent:
     def _invoke(self, objective: str) -> Any:
         messages = [{"role": "user", "content": objective}]
         return self.agent.invoke({"messages": messages})
+
+    def _invoke_with_recursion_limit(self, objective: str, recursion_limit: int) -> Any:
+        messages = [{"role": "user", "content": objective}]
+        return self.agent.invoke(
+            {"messages": messages},
+            config={"recursion_limit": recursion_limit},
+        )
+
+    @staticmethod
+    def _extract_message_content(message: Any) -> str:
+        if message is None:
+            return ""
+        if isinstance(message, dict):
+            content = message.get("content", message)
+        else:
+            content = getattr(message, "content", message)
+        return str(content)

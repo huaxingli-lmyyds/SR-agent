@@ -1,6 +1,9 @@
 /datasets/
 **/.env
 test*.py
+agent/agents/test*.py
+agent/prep_cache/
+agent/logs/
 
 # Agent experiments
 agent/experiments/

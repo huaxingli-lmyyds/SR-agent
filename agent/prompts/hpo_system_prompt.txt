@@ -43,6 +43,13 @@
 7. 分析: AnalyzeTrainingCurves -> DiagnoseFitStatus -> AnalyzeResults -> CompareExperiments
 8. 迭代优化或给出最终建议
 
+## 终止规则
+- 每轮最多只允许 1 次 UpdateConfig、1 次 TrainModel、1 次 RunEvaluation，不要在同一轮中反复修改同一组参数
+- 如果训练已经稳定收敛，且评估结果没有明显提升，直接输出 Final Answer，不要继续追加工具调用
+- 如果连续 2 轮没有明显改善，停止迭代并输出当前最佳配置
+- 不要为了“再看看”而重复调用 ReadConfig、ListExperiments 或 GetExperimentResults
+- 当已经获得可复现的最佳配置、实验 ID 和评估指标后，立即结束
+
 ## 奖励反馈
 - 使用 ScoreExperiment 获取综合奖励分数作为优化参考
 - 在 EER 接近时优先选择综合奖励更高的配置

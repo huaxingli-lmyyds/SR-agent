@@ -13,6 +13,7 @@ from pathlib import Path
 from agent.utils import ExperimentTracker, ConfigParser
 from agent.utils import get_agent_dir
 from agent.utils.logger import AgentLogger
+from agent.utils.path_tool import get_config_file
 from agent.utils.path_tool import get_data_processing_experiments_dir
 from agent.agents.base_agent import BaseLangChainAgent
 
@@ -39,7 +40,7 @@ class DataProcessingAgent(BaseLangChainAgent):
         temperature: float = 0.2,
         max_iterations: int = 6,
         verbose: bool = True,
-        config_path: str = "../configs/train_ecapa_tdnn.yaml",
+        config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
         experiments_dir: Optional[Union[str, Path]] = None,
     ):
         """
@@ -69,7 +70,6 @@ class DataProcessingAgent(BaseLangChainAgent):
             tools=self.tools,
             system_prompt=self.system_prompt,
             middleware=self.agent_logger.build_middleware(),
-            prompt_arg="prompt",
         )
 
     def _create_system_prompt(self) -> str:
@@ -139,6 +139,8 @@ class DataProcessingAgent(BaseLangChainAgent):
         - 输出最佳数据处理配置总结
 
         请开始优化，使用可用工具完成准备与分析，并在最后提供最佳配置。
+        规则：当 PrepareVoxCelebData 返回成功后，必须立即停止继续调用任何工具，直接输出 Final Answer。
+        规则：根据传入信息进行分析，最多只允许一轮 ReadConfig/ListConfigParameters/UpdateConfig 组合和一次 PrepareVoxCelebData 调用，不要循环重复执行。
         """
 
         if hpo_feedback:
@@ -170,12 +172,13 @@ class DataProcessingAgent(BaseLangChainAgent):
         self.agent_logger.append(f"objective={objective.strip()}")
 
         try:
-            result = self._invoke(objective)
+            recursion_limit = max(50, self.max_iterations * 8)
+            result = self._invoke_with_recursion_limit(objective, recursion_limit)
 
             messages_result = result.get("messages", [])
             final_answer = ""
             if messages_result:
-                final_answer = str(messages_result[-1].get("content", messages_result[-1]))
+                final_answer = self._extract_message_content(messages_result[-1])
 
             intermediate_steps = result.get("intermediate_steps", [])
             best_config = self._extract_best_config(final_answer, intermediate_steps)
@@ -364,7 +367,7 @@ class DataProcessingAgent(BaseLangChainAgent):
             messages_result = result.get("messages", [])
             final_answer = ""
             if messages_result:
-                final_answer = str(messages_result[-1].get("content", messages_result[-1]))
+                final_answer = self._extract_message_content(messages_result[-1])
 
             intermediate_steps = result.get("intermediate_steps", [])
             best_config = self._extract_best_config(final_answer, intermediate_steps)

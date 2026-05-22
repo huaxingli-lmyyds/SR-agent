@@ -36,14 +36,14 @@ verification_file:
   https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt
 
 split_ratio:
-- 92
-- 8
+- 85
+- 15
 skip_prep: false
 ckpt_interval_minutes: 15 # save checkpoint every N min
 
 # Training parameters
-number_of_epochs: 15
-batch_size: 16
+number_of_epochs: 10
+batch_size: 32
 lr: 0.001
 base_lr: 0.00000001
 max_lr: !ref <lr>

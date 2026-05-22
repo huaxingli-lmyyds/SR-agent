@@ -120,6 +120,7 @@ def run_data_prep(
     random_segment: bool,
     amp_th: float,
     split_speaker: bool,
+    signal:str = None
 ) -> Dict[str, Any]:
     try:
         from speechbrain.utils.data_utils import download_file
@@ -138,11 +139,13 @@ def run_data_prep(
         save_path.mkdir(parents=True, exist_ok=True)
         verification_local = save_path / os.path.basename(str(verification_file))
         download_file(str(verification_file), str(verification_local))
-        cache_dir = _get_prep_cache_dir("train")
+        if signal == "prep_only":
+            save_folder = _get_prep_cache_dir("train")
+        
 
         prepare_module.prepare_voxceleb(
             data_folder=data_folder,
-            save_folder=str(cache_dir),
+            save_folder=str(save_folder),
             verification_pairs_file=str(verification_local),
             splits=splits,
             split_ratio=split_ratio,
@@ -158,14 +161,14 @@ def run_data_prep(
             "status": "success",
             "error": None,
             "verification_local": str(verification_local),
-            "save_folder": str(cache_dir),
+            "save_folder": str(save_folder),
         }
     except Exception as exc:
         return {
             "status": "failed",
             "error": f"{type(exc).__name__}: {exc}",
             "verification_local": None,
-            "save_folder": str(cache_dir),
+            "save_folder": str(save_folder),
         }
 
 
@@ -351,7 +354,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
     Run SpeechBrain training pipeline.
 
     Returns:
-        {"status": "success"|"failed", "eer": float|None, "error": str|None}
+        {"status": "success"|"failed", "valid_error_rate": float|None, "error": str|None}
     """
     try:
         import torch
@@ -360,14 +363,14 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         if _TRAIN_RECIPE_MODULE is None:
             return {
                 "status": "failed",
-                "eer": None,
+                "valid_error_rate": None,
                 "error": _TRAIN_RECIPE_ERROR or "Training recipe failed to load",
             }
 
         if _PREPARE_MODULE is None:
             return {
                 "status": "failed",
-                "eer": None,
+                "valid_error_rate": None,
                 "error": _PREPARE_ERROR or "Prepare module failed to load",
             }
 
@@ -377,7 +380,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         if not Path(config_path).exists():
             return {
                 "status": "failed",
-                "eer": None,
+                "valid_error_rate": None,
                 "error": f"Config not found: {config_path}",
             }
 
@@ -394,7 +397,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
 
         hparams, err = _load_hyperpyyaml_config(config_path, normalized_overrides)
         if err:
-            return {"status": "failed", "eer": None, "error": err}
+            return {"status": "failed", "valid_error_rate": None, "error": err}
 
         data_folder = hparams.get("data_folder")
         if not data_folder or data_folder == "!PLACEHOLDER":
@@ -474,13 +477,13 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         else:
             log_path = Path(hparams["output_folder"]) / "train_log.txt"
 
-        eer = _extract_best_valid_error_rate(log_path)
+        valid_error_rate = _extract_best_valid_error_rate(log_path)
 
-        return {"status": "success", "eer": eer, "error": None}
+        return {"status": "success", "valid_error_rate": valid_error_rate, "error": None}
     except Exception as exc:
         return {
             "status": "failed",
-            "eer": None,
+            "valid_error_rate": None,
             "error": f"{type(exc).__name__}: {exc}",
         }
 

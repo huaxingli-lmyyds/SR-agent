@@ -94,6 +94,17 @@ def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
     return get_project_root() / path
 
 
+def _resolve_data_folder(path_value: Optional[str]) -> str:
+    if not path_value or path_value == "!PLACEHOLDER":
+        return str(get_project_root() / "datasets" / "voxceleb1")
+
+    path = Path(path_value)
+    if path.is_absolute():
+        return str(path)
+
+    return str(_resolve_path(path_value).resolve())
+
+
 def _find_output_folder(
     exp_dir: Path,
     output_folder_path: Optional[Path],
@@ -216,14 +227,9 @@ def TrainModel(config_path: Optional[str] = None,
 
         # 确定数据文件夹
         if data_folder:
-            df = data_folder
-        elif config_data.get("data_folder"):
-            df = str(config_data.get("data_folder"))
+            df = _resolve_data_folder(str(data_folder))
         else:
-            df = "./datasets/voxceleb1"
-
-        if not df or df == "!PLACEHOLDER":
-            df = "./datasets/voxceleb1"
+            df = _resolve_data_folder(str(config_data.get("data_folder")))
 
         output_folder = config_data.get("output_folder")
         if record:
@@ -231,7 +237,7 @@ def TrainModel(config_path: Optional[str] = None,
             if training_info.get("output_folder"):
                 output_folder = training_info.get("output_folder")
             if training_info.get("data_folder"):
-                df = training_info.get("data_folder")
+                df = _resolve_data_folder(str(training_info.get("data_folder")))
         else:
             experiment_id = tracker.create_experiment(
                 config_path=config_path_str,
@@ -263,7 +269,7 @@ def TrainModel(config_path: Optional[str] = None,
             status = "failed"
             error_msg = train_result.get("error")
 
-        valid_error_rate = train_result.get("eer") if isinstance(train_result, dict) else None
+        valid_error_rate = train_result.get("valid_error_rate") if isinstance(train_result, dict) else None
         output_folder_path = _find_output_folder(
             exp_dir,
             output_folder_path,

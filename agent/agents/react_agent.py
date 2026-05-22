@@ -13,6 +13,7 @@ from pathlib import Path
 from agent.utils import ExperimentTracker, get_agent_dir
 from agent.utils.reward import compute_reward
 from agent.utils.logger import AgentLogger
+from agent.utils.path_tool import get_config_file, get_hpo_experiments_dir
 from agent.memory import MemoryStore, MemoryUpdate, build_history_entry
 from agent.agents.base_agent import BaseLangChainAgent
 
@@ -37,7 +38,8 @@ class LangChainHPOAgent(BaseLangChainAgent):
         temperature: float = 0.2,
         max_iterations: int = 10,
         verbose: bool = True,
-        config_path: str = "../configs/train_ecapa_tdnn.yaml",
+        config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
+        experiments_dir: Optional[str] = None,
         memory_key: Optional[str] = None,
         memory_path: Optional[str] = None
     ):
@@ -50,6 +52,7 @@ class LangChainHPOAgent(BaseLangChainAgent):
             max_iterations: 最大迭代次数（通过中间件实现）
             verbose: 是否显示详细输出
             config_path: 配置文件路径
+            experiments_dir: HPO 实验目录（可选）
             memory_key: 记忆存储的模型标识（可选）
             memory_path: 记忆文件路径（可选）
         """
@@ -61,6 +64,7 @@ class LangChainHPOAgent(BaseLangChainAgent):
         )
         self.config_path = config_path
         self.agent_logger = AgentLogger(get_agent_dir() / "logs" / "agent_HPO.log")
+        self.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else get_hpo_experiments_dir()
         self.memory_key = memory_key or Path(config_path).stem or "default_model"
         self.memory_store = MemoryStore(
             file_path=Path(memory_path) if memory_path else None
@@ -281,6 +285,9 @@ class LangChainHPOAgent(BaseLangChainAgent):
         {memory_context}
 
         请开始优化，使用可用工具完成实验，并在最后提供最佳配置。
+        约束：每轮最多只允许 1 次 UpdateConfig、1 次 TrainModel、1 次 RunEvaluation。
+        约束：每次只改 1-2 个关键参数，不要反复尝试同一组参数。
+        约束：如果训练收敛稳定且指标已经接近目标，或者连续 2 轮没有明显改善，立即停止并输出 Final Answer。
         """
         
         if self.verbose:
@@ -297,13 +304,16 @@ class LangChainHPOAgent(BaseLangChainAgent):
         
         # 执行智能体（直接 invoke，无需 AgentExecutor）
         try:
-            result = self._invoke(objective)
+            recursion_limit = max(60, self.max_iterations * 12)
+            if max_experiments is not None:
+                recursion_limit = max(recursion_limit, max_experiments * 20)
+            result = self._invoke_with_recursion_limit(objective, recursion_limit)
             
             # 提取结果
             messages_result = result.get("messages", [])
             final_answer = ""
             if messages_result:
-                final_answer = str(messages_result[-1].get("content", messages_result[-1]))
+                final_answer = self._extract_message_content(messages_result[-1])
             
             intermediate_steps = result.get("intermediate_steps", [])
             
@@ -508,7 +518,7 @@ class LangChainHPOAgent(BaseLangChainAgent):
         messages_result = result.get("messages", [])
         final_answer = ""
         if messages_result:
-            final_answer = str(messages_result[-1].get("content", messages_result[-1]))
+            final_answer = self._extract_message_content(messages_result[-1])
         
         intermediate_steps = result.get("intermediate_steps", [])
         
@@ -555,7 +565,8 @@ def create_react_agent(
     model_name: str = "GLM-4.7",
     temperature: float = 0.2,
     max_iterations: int = 10,
-    verbose: bool = True
+    verbose: bool = True,
+    experiments_dir: Optional[str] = None,
 ) -> LangChainHPOAgent:
     """
     创建 LangChain v1.0 智能体的便捷函数
@@ -573,7 +584,8 @@ def create_react_agent(
         model_name=model_name,
         temperature=temperature,
         max_iterations=max_iterations,
-        verbose=verbose
+        verbose=verbose,
+        experiments_dir=experiments_dir,
     )
 
 

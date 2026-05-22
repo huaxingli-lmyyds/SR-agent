@@ -35,6 +35,17 @@ def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
     return get_project_root() / path
 
 
+def _resolve_data_folder(path_value: Optional[str]) -> str:
+    if not path_value or path_value == "!PLACEHOLDER":
+        return str(get_project_root() / "datasets" / "voxceleb1")
+
+    path = Path(path_value)
+    if path.is_absolute():
+        return str(path)
+
+    return str(_resolve_path(path_value).resolve())
+
+
 def _parse_evaluation_log(log_path: Path) -> dict:
     metrics = {"eer": None, "min_dcf": None}
     if not log_path.exists():
@@ -107,8 +118,7 @@ def RunEvaluation(model_path: Optional[str] = None,
             elif record_model_path:
                 model_path = record_model_path
 
-        if not data_folder or data_folder == "!PLACEHOLDER":
-            data_folder = "../datasets/voxceleb1"
+        data_folder = _resolve_data_folder(data_folder)
 
         # 记录开始时间
         start_time = datetime.now()

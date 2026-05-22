@@ -31,6 +31,7 @@ from agent.utils.path_tool import (
     get_hpo_experiments_dir,
     get_manage_experiments_dir,
     get_agent_dir,
+    get_config_file,
 )
 
 
@@ -53,7 +54,7 @@ class CoordinatorAgent(BaseLangChainAgent):
         data_iterations: int = 6,
         max_rounds: int = 3,
         verbose: bool = True,
-        config_path: str = "../configs/train_ecapa_tdnn.yaml",
+        config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
     ) -> None:
         super().__init__(
             model_name=model_name,
@@ -61,7 +62,7 @@ class CoordinatorAgent(BaseLangChainAgent):
             max_iterations=max_iterations,
             verbose=verbose,
         )
-        self.config_path = config_path
+        self.config_path = str(config_path)
         self.data_iterations = data_iterations
         self.max_rounds = max_rounds
 
@@ -90,7 +91,6 @@ class CoordinatorAgent(BaseLangChainAgent):
             tools=self.tools,
             system_prompt=self.system_prompt,
             middleware=self.agent_logger.build_middleware(),
-            prompt_arg="prompt",
         )
 
     def _load_config(self) -> Dict[str, Any]:
@@ -145,21 +145,21 @@ class CoordinatorAgent(BaseLangChainAgent):
     def _create_system_prompt(self) -> str:
         return f"""你是声纹识别系统的统筹智能体。
 
-你的任务是协调两个专门子智能体：
-- 数据处理智能体：负责数据准备、划分和质量优化
-- 超参数智能体：负责训练、评估和超参数优化
+            你的任务是协调两个专门子智能体：
+            - 数据处理智能体：负责数据准备、划分和质量优化
+            - 超参数智能体：负责训练、评估和超参数优化
 
-你必须通过工具完成工作，不要直接编造结果。
+            你必须通过工具完成工作，不要直接编造结果。
 
-可用工具策略：
-1. 先查看统筹记录，了解当前状态
-2. 根据需要调用数据处理工具，获得最新数据摘要
-3. 再调用 HPO 工具，结合数据摘要进行训练/评估优化
-4. 你可以在两者之间反复切换，但不要超过 {self.max_rounds} 轮核心迭代
-5. 完成后给出最终总结，必须包含 manage / dp / hpo 的实验 ID
+            可用工具策略：
+            1. 先查看统筹记录，了解当前状态
+            2. 根据需要调用数据处理工具，获得最新数据摘要
+            3. 再调用 HPO 工具，结合数据摘要进行训练/评估优化
+            4. 你可以在两者之间反复切换，但不要超过 {self.max_rounds} 轮核心迭代
+            5. 完成后给出最终总结，必须包含 manage / dp / hpo 的实验 ID
 
-当前目标：将声纹识别系统优化到目标 EER 以下，并保持数据处理与训练链路可追踪。
-请只通过工具推进，不要跳过实验记录。"""
+            当前目标：将声纹识别系统优化到目标 EER 以下，并保持数据处理与训练链路可追踪。
+            请只通过工具推进，不要跳过实验记录。"""
 
     def _load_tools(self):
         @tool
@@ -422,7 +422,7 @@ class CoordinatorAgent(BaseLangChainAgent):
             messages_result = result.get("messages", [])
             final_answer = ""
             if messages_result:
-                final_answer = str(messages_result[-1].get("content", messages_result[-1]))
+                final_answer = self._extract_message_content(messages_result[-1])
 
             self._sync_manage_record(status="success", last_action="complete", final_answer=final_answer)
             self.agent_logger.append("agent_run_end success")

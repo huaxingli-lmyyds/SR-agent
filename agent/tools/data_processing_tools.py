@@ -11,9 +11,22 @@ import os
 import json
 
 from agent.utils import ConfigParser, get_config_file
+from agent.utils.path_tool import get_datasets_dir, get_project_root
 from agent.utils import runner
 
 CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
+
+
+def _resolve_data_folder(path_value: Optional[str]) -> str:
+    if not path_value or path_value == "!PLACEHOLDER":
+        return str(get_datasets_dir() / "voxceleb1")
+
+    path = Path(path_value)
+    if path.is_absolute():
+        return str(path)
+
+    project_root = get_project_root()
+    return str((project_root / path).resolve())
 
 
 def _parse_bool(value: Optional[str]) -> Optional[bool]:
@@ -115,9 +128,7 @@ def PrepareVoxCelebData(
         if split_speaker_val is None:
             split_speaker_val = False
 
-        df = config_data.get("data_folder")
-        if not df or df == "!PLACEHOLDER":
-            df = "../datasets/voxceleb1"
+        df = _resolve_data_folder(config_data.get("data_folder"))
 
         sf = config_data.get("save_folder")
         if not sf:
@@ -127,7 +138,7 @@ def PrepareVoxCelebData(
         if not vf:
             return "❌ 无法确定 verification_file，请在配置中设置"
 
-        splits_val = config_data.get("splits") or ["train", "dev", "test"]
+        splits_val = config_data.get("splits") or ["train", "dev"]
         source_val = config_data.get("voxceleb_source")
         amp_th_val = config_data.get("amp_th") or 5e-04
 
@@ -143,6 +154,7 @@ def PrepareVoxCelebData(
             random_segment=random_segment_val,
             amp_th=amp_th_val,
             split_speaker=split_speaker_val,
+            signal = "prep_only"
         )
 
         if prep_result.get("status") != "success":
@@ -153,14 +165,11 @@ def PrepareVoxCelebData(
 
         train_csv = sf_path / "train.csv"
         dev_csv = sf_path / "dev.csv"
-        test_csv = sf_path / "test.csv"
-        enrol_csv = sf_path / "enrol.csv"
+
 
         stats = {
             "train": _count_csv_rows(train_csv),
             "dev": _count_csv_rows(dev_csv),
-            "test": _count_csv_rows(test_csv),
-            "enrol": _count_csv_rows(enrol_csv),
         }
 
         summary = (
@@ -176,13 +185,9 @@ def PrepareVoxCelebData(
             "📊 CSV 统计:\n"
             f"  - train: {stats['train']}\n"
             f"  - dev: {stats['dev']}\n"
-            f"  - test: {stats['test']}\n"
-            f"  - enrol: {stats['enrol']}\n\n"
             "📁 CSV 路径:\n"
             f"  - train: {train_csv}\n"
             f"  - dev: {dev_csv}\n"
-            f"  - test: {test_csv}\n"
-            f"  - enrol: {enrol_csv}"
         )
 
         return summary
