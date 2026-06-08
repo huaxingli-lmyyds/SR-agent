@@ -5,6 +5,8 @@ agent/agents/test*.py
 agent/prep_cache/
 agent/logs/
 
+read/
+
 # Agent experiments
 agent/experiments/
 agent/experiments_hpo_version1/
@@ -13,6 +15,10 @@ agent/test*.py
 agent/experiment.zip
 agent/experiments_*/
 agent/experiment*.zip
+datasets.zip
+*.md
+*_*.md
+
 
 # Test files and reports
 agent/tests/
