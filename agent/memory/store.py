@@ -118,10 +118,16 @@ class MemoryService:
         matches.sort(key=lambda item: item.get("created_at", ""), reverse=True)
         return matches[: max(query.limit, 0)]
 
-    def get_model(self, model_key: str, dataset_key: Optional[str] = None) -> Dict[str, Any]:
+    def get_model(
+        self,
+        model_key: str,
+        dataset_key: Optional[str] = None,
+        task_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Return a compatibility summary derived from the latest HPO episode."""
         episodes = self.search(MemoryQuery(
             agent_type="hpo_agent",
+            task_type=task_type,
             model_family=model_key,
             dataset_key=dataset_key,
             limit=1,

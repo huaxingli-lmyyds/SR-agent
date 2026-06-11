@@ -70,7 +70,7 @@ class HPOAgent(BaseLangChainAgent):
             verbose: 是否显示详细输出
             config_path: 配置文件路径
             experiments_dir: HPO 实验目录（可选）
-            memory_key: 记忆存储的模型标识（可选）
+            memory_key: 已弃用的兼容参数；记忆按 model_family 和 dataset_key 隔离
             memory_path: 记忆文件路径（可选）
         """
         super().__init__(
@@ -82,11 +82,15 @@ class HPOAgent(BaseLangChainAgent):
         self.config_path = str(resolve_config_path(config_path))
         self.agent_logger = AgentLogger(get_logs_dir() / "hpo_agent.log")
         self.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else get_hpo_experiments_dir()
-        self.memory_key = memory_key or Path(config_path).stem or "default_model"
         self.task_type = task_type
         self.model_family = model_family
         self.implementation = implementation
         self.runner = runner
+        self.memory_key = self.model_family
+        if memory_key and memory_key != self.model_family:
+            self.agent_logger.append(
+                f"ignored_legacy_memory_key value={memory_key} model_family={self.model_family}"
+            )
         memory_root = resolve_optional_project_path(memory_path) if memory_path else None
         if memory_root is not None and memory_root.suffix:
             memory_root = memory_root.parent
@@ -159,8 +163,18 @@ class HPOAgent(BaseLangChainAgent):
 
     def _get_history_context(self, metric: str = "eer", mode: str = "min") -> str:
         """从实验历史中提取基线信息。"""
-        tracker = ExperimentTracker()
-        best_list = tracker.find_best_experiment(metric=metric, minimize=mode == "min", top_n=1)
+        tracker = ExperimentTracker(self.experiments_dir)
+        best_list = tracker.find_best_experiment(
+            metric=metric,
+            minimize=mode == "min",
+            top_n=1,
+            experiment_type="hpo",
+            task_type=self.task_type,
+            model_family=self.model_family,
+            dataset=self.memory_scope.dataset_key,
+            implementation=self.implementation,
+            runner=self.runner,
+        )
         if not best_list:
             return "历史实验: 暂无可用记录。"
 
@@ -188,8 +202,9 @@ class HPOAgent(BaseLangChainAgent):
         """从记忆存储中提取精简上下文。"""
         try:
             memory = self.memory_store.get_model(
-                self.memory_key,
+                self.model_family,
                 dataset_key=self.memory_scope.dataset_key,
+                task_type=self.task_type,
             )
             if not memory:
                 return "记忆摘要: 暂无记录。"
@@ -443,7 +458,7 @@ class HPOAgent(BaseLangChainAgent):
             if messages_result:
                 final_answer = self._extract_message_content(messages_result[-1])
             
-            intermediate_steps = result.get("intermediate_steps", [])
+            intermediate_steps = self._extract_execution_trace(result)
             
             # 分析结果
             best_config = self._extract_best_config(final_answer, intermediate_steps)
@@ -705,15 +720,13 @@ class HPOAgent(BaseLangChainAgent):
         # 从训练/评估步骤中提取
         train_steps = []
         for step in intermediate_steps:
-            if isinstance(step, tuple) and len(step) > 0:
-                tool_call = step[0]
-                tool_name = str(getattr(tool_call, "tool", ""))
-                if "train" in tool_name.lower() or "evaluate" in tool_name.lower():
-                    train_steps.append(step)
+            tool_name = str(step.get("tool", "")) if isinstance(step, dict) else ""
+            if "train" in tool_name.lower() or "evaluate" in tool_name.lower():
+                train_steps.append(step)
         
         best_eer = float('inf')
         for step in train_steps:
-            obs = step[1] if len(step) > 1 else ""
+            obs = step.get("output", "")
             obs_text = str(obs)
 
             exp_id_match = re.search(r"Experiment ID:\s*([\w\-]+)", obs_text)
@@ -755,12 +768,11 @@ class HPOAgent(BaseLangChainAgent):
         outcomes: Dict[str, Any] = {}
 
         for step in intermediate_steps:
-            if not isinstance(step, tuple) or len(step) < 1:
+            if not isinstance(step, dict):
                 continue
-            tool_call = step[0]
-            observation = step[1] if len(step) > 1 else ""
-            tool_name = str(getattr(tool_call, "tool", ""))
-            tool_input = getattr(tool_call, "tool_input", None)
+            observation = step.get("output", "")
+            tool_name = str(step.get("tool", ""))
+            tool_input = step.get("input")
 
             if "UpdateConfig" in tool_name:
                 change_entry = {"tool": tool_name, "input": tool_input}
@@ -793,11 +805,9 @@ class HPOAgent(BaseLangChainAgent):
         
         tool_usage = {}
         for step in intermediate_steps:
-            if isinstance(step, tuple) and len(step) > 0:
-                tool_call = step[0]
-                if hasattr(tool_call, 'tool'):
-                    tool_name = str(tool_call.tool)
-                    tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
+            if isinstance(step, dict):
+                tool_name = str(step.get("tool", "unknown_tool"))
+                tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
         
         summary_lines = [
             f"总执行步骤: {len(intermediate_steps)}",
@@ -844,7 +854,7 @@ class HPOAgent(BaseLangChainAgent):
         if messages_result:
             final_answer = self._extract_message_content(messages_result[-1])
         
-        intermediate_steps = result.get("intermediate_steps", [])
+        intermediate_steps = self._extract_execution_trace(result)
         
         # 分析结果
         best_config = self._extract_best_config(final_answer, intermediate_steps)

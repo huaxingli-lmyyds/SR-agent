@@ -282,7 +282,7 @@ class DataProcessingAgent(BaseLangChainAgent):
             if messages_result:
                 final_answer = self._extract_message_content(messages_result[-1])
 
-            intermediate_steps = result.get("intermediate_steps", [])
+            intermediate_steps = self._extract_execution_trace(result)
             best_config = self._extract_best_config(final_answer, intermediate_steps)
             summary = self._generate_summary(intermediate_steps, best_config)
             data_summary = self._build_data_summary(best_config, summary, objective)
@@ -502,13 +502,12 @@ class DataProcessingAgent(BaseLangChainAgent):
 
         prep_steps = []
         for step in intermediate_steps:
-            if isinstance(step, tuple) and len(step) > 0:
-                tool_call = step[0]
-                if hasattr(tool_call, "tool") and "prepare" in str(tool_call.tool).lower():
-                    prep_steps.append(step)
+            tool_name = str(step.get("tool", "")) if isinstance(step, dict) else ""
+            if "prepare" in tool_name.lower():
+                prep_steps.append(step)
 
         if prep_steps:
-            obs_text = str(prep_steps[-1][1] if len(prep_steps[-1]) > 1 else "")
+            obs_text = str(prep_steps[-1].get("output", ""))
             ratio_match = re.search(r"拆分比例:\s*\[([^\]]+)\]", obs_text)
             if ratio_match:
                 ratio_vals = [item.strip() for item in ratio_match.group(1).split(",")]
@@ -543,11 +542,9 @@ class DataProcessingAgent(BaseLangChainAgent):
 
         tool_usage: Dict[str, int] = {}
         for step in intermediate_steps:
-            if isinstance(step, tuple) and len(step) > 0:
-                tool_call = step[0]
-                if hasattr(tool_call, "tool"):
-                    tool_name = str(tool_call.tool)
-                    tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
+            if isinstance(step, dict):
+                tool_name = str(step.get("tool", "unknown_tool"))
+                tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
 
         summary_lines = [
             f"总执行步骤: {len(intermediate_steps)}",
@@ -608,7 +605,7 @@ class DataProcessingAgent(BaseLangChainAgent):
             if messages_result:
                 final_answer = self._extract_message_content(messages_result[-1])
 
-            intermediate_steps = result.get("intermediate_steps", [])
+            intermediate_steps = self._extract_execution_trace(result)
             best_config = self._extract_best_config(final_answer, intermediate_steps)
             summary = self._generate_summary(intermediate_steps, best_config)
 

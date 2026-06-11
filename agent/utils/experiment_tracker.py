@@ -414,7 +414,12 @@ class ExperimentTracker:
                            metric: str = "eer",
                            minimize: bool = True,
                            top_n: int = 1,
-                           experiment_type: Optional[str] = None) -> List[Dict]:
+                           experiment_type: Optional[str] = None,
+                           task_type: Optional[str] = None,
+                           model_family: Optional[str] = None,
+                           dataset: Optional[str] = None,
+                           implementation: Optional[str] = None,
+                           runner: Optional[str] = None) -> List[Dict]:
         """
         查找最佳实验
         
@@ -428,6 +433,17 @@ class ExperimentTracker:
         """
         # 获取所有成功的实验
         successful_exps = self.list_experiments(status="success", experiment_type=experiment_type)
+        successful_exps = [
+            exp for exp in successful_exps
+            if self._matches_scope(
+                exp,
+                task_type=task_type,
+                model_family=model_family,
+                dataset=dataset,
+                implementation=implementation,
+                runner=runner,
+            )
+        ]
         
         # 过滤出有该指标的实验
         valid_exps = []
@@ -446,6 +462,28 @@ class ExperimentTracker:
         )
         
         return valid_exps[:top_n]
+
+    @staticmethod
+    def _matches_scope(
+        experiment: Dict[str, Any],
+        task_type: Optional[str] = None,
+        model_family: Optional[str] = None,
+        dataset: Optional[str] = None,
+        implementation: Optional[str] = None,
+        runner: Optional[str] = None,
+    ) -> bool:
+        """Match optional model-agnostic experiment scope fields."""
+        task = experiment.get("task") or {}
+        model = experiment.get("model") or {}
+        execution = experiment.get("execution") or {}
+        expected = (
+            (task_type, task.get("type")),
+            (model_family, model.get("family")),
+            (dataset, task.get("dataset")),
+            (implementation, model.get("implementation")),
+            (runner, execution.get("runner")),
+        )
+        return all(not wanted or str(actual) == str(wanted) for wanted, actual in expected)
     
     def compare_experiments(self, experiment_ids: List[str]) -> Dict[str, Any]:
         """
