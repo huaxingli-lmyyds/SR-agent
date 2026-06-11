@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Protocol
+from typing import Any, Dict, Protocol, TypeVar
 
 from .contracts import Artifact, OperationResult
 
@@ -27,6 +27,14 @@ class ModelAdapter(Protocol):
 class RunnerAdapter(Protocol):
     runner: str
 
+    def run_training(self, config_path: str, overrides: Dict[str, Any]) -> Dict[str, Any]: ...
+    def run_evaluation(
+        self,
+        config_path: str,
+        model_path: str | None,
+        data_path: str | None,
+        overrides: Dict[str, Any],
+    ) -> Dict[str, Any]: ...
     def normalize_training_result(self, raw: Dict[str, Any]) -> OperationResult: ...
     def normalize_evaluation_result(self, raw: Dict[str, Any]) -> OperationResult: ...
 
@@ -59,6 +67,25 @@ class SpeechBrainEcapaAdapter:
 @dataclass
 class SpeechBrainRunnerAdapter:
     runner: str = "speechbrain"
+
+    def run_training(self, config_path: str, overrides: Dict[str, Any]) -> Dict[str, Any]:
+        from agent.utils.runner import run_training
+        return run_training(config_path, overrides)
+
+    def run_evaluation(
+        self,
+        config_path: str,
+        model_path: str | None,
+        data_path: str | None,
+        overrides: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from agent.utils.runner import run_evaluation
+        return run_evaluation(
+            config_path=config_path,
+            model_path=model_path,
+            data_folder=data_path,
+            overrides=overrides,
+        )
 
     def normalize_training_result(self, raw: Dict[str, Any]) -> OperationResult:
         output_folder = raw.get("output_folder")
@@ -115,3 +142,26 @@ def register_model_adapter(adapter: ModelAdapter) -> None:
 
 def register_runner_adapter(adapter: RunnerAdapter) -> None:
     RUNNER_ADAPTERS[adapter.runner] = adapter
+
+
+AdapterT = TypeVar("AdapterT")
+
+
+def _get_adapter(registry: Dict[str, AdapterT], key: str, kind: str) -> AdapterT:
+    try:
+        return registry[key]
+    except KeyError as exc:
+        available = ", ".join(sorted(registry)) or "none"
+        raise ValueError(f"unknown {kind} adapter '{key}'; available: {available}") from exc
+
+
+def get_task_adapter(task_type: str) -> TaskAdapter:
+    return _get_adapter(TASK_ADAPTERS, task_type, "task")
+
+
+def get_model_adapter(model_family: str) -> ModelAdapter:
+    return _get_adapter(MODEL_ADAPTERS, model_family, "model")
+
+
+def get_runner_adapter(runner: str) -> RunnerAdapter:
+    return _get_adapter(RUNNER_ADAPTERS, runner, "runner")

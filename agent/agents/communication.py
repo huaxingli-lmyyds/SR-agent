@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 import json
 import uuid
+
+
+def json_safe(value: Any) -> Any:
+    """Convert protocol payloads to JSON-native values at the boundary."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, (datetime, Path)):
+        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 class MessageType:
@@ -28,30 +44,33 @@ class AgentTaskRequest:
     request_id: str = field(default_factory=lambda: f"request_{uuid.uuid4().hex}")
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return json_safe(asdict(self))
 
 
 @dataclass
 class AgentTaskResult:
-    """Task result returned by a specialized agent."""
+    """Fully serializable task result returned by a specialized agent."""
 
     status: str
     summary: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
     recommendations: List[Dict[str, Any]] = field(default_factory=list)
     experiment_ids: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     request_id: Optional[str] = None
-    runtime_result: Any = field(default=None, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        return json_safe({
             "status": self.status,
             "summary": self.summary,
+            "metrics": self.metrics,
+            "artifacts": self.artifacts,
             "recommendations": self.recommendations,
             "experiment_ids": self.experiment_ids,
             "error": self.error,
             "request_id": self.request_id,
-        }
+        })
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, default=str)
@@ -73,7 +92,7 @@ class AgentMessage:
     message_id: str = field(default_factory=lambda: f"message_{uuid.uuid4().hex}")
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return json_safe(asdict(self))
 
 
 class MessageService:

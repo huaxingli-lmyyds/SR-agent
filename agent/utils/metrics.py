@@ -98,18 +98,18 @@ class MetricsExtractor:
         }
         
         # 提取 EER
-        eer_match = self.eer_pattern.search(content)
-        if eer_match:
+        eer_matches = self.eer_pattern.findall(content)
+        if eer_matches:
             try:
-                metrics["eer"] = float(eer_match.group(1))
+                metrics["eer"] = float(eer_matches[-1])
             except ValueError:
                 pass
         
         # 提取 minDCF
-        min_dcf_match = self.min_dcf_pattern.search(content)
-        if min_dcf_match:
+        min_dcf_matches = self.min_dcf_pattern.findall(content)
+        if min_dcf_matches:
             try:
-                metrics["min_dcf"] = float(min_dcf_match.group(1))
+                metrics["min_dcf"] = float(min_dcf_matches[-1])
             except ValueError:
                 pass
         
@@ -195,10 +195,12 @@ class MetricsCalculator:
             raise ValueError("genuine_scores 和 impostor_scores 不能为空")
         
         # 合并所有分数并打标签
-        all_scores = np.concatenate([genuine_scores, impostor_scores])
+        genuine_arr = np.asarray(genuine_scores, dtype=float)
+        impostor_arr = np.asarray(impostor_scores, dtype=float)
+        all_scores = np.concatenate([genuine_arr, impostor_arr])
         all_labels = np.concatenate([
-            np.ones(len(genuine_scores)),
-            np.zeros(len(impostor_scores))
+            np.ones(len(genuine_arr)),
+            np.zeros(len(impostor_arr))
         ])
         
         # 排序
@@ -212,13 +214,13 @@ class MetricsCalculator:
         
         for threshold in sorted_scores:
             # FAR: 冒充者被错误接受的比例
-            impostor_above = np.sum(impostor_scores >= threshold)
-            far = impostor_above / len(impostor_scores)
+            impostor_above = np.sum(impostor_arr >= threshold)
+            far = impostor_above / len(impostor_arr)
             far_list.append(far)
             
             # FRR: 真实说话人被拒绝的比例
-            genuine_below = np.sum(genuine_scores < threshold)
-            frr = genuine_below / len(genuine_scores)
+            genuine_below = np.sum(genuine_arr < threshold)
+            frr = genuine_below / len(genuine_arr)
             frr_list.append(frr)
         
         # 找到 FAR 和 FRR 最接近的点
@@ -254,18 +256,20 @@ class MetricsCalculator:
         if not genuine_scores or not impostor_scores:
             raise ValueError("genuine_scores 和 impostor_scores 不能为空")
         
-        all_scores = np.concatenate([genuine_scores, impostor_scores])
+        genuine_arr = np.asarray(genuine_scores, dtype=float)
+        impostor_arr = np.asarray(impostor_scores, dtype=float)
+        all_scores = np.concatenate([genuine_arr, impostor_arr])
         thresholds = np.linspace(np.min(all_scores), np.max(all_scores), 1000)
         
         dcf_values = []
         
         for threshold in thresholds:
             # 计算 FAR 和 FRR
-            impostor_above = np.sum(impostor_scores >= threshold)
-            far = impostor_above / len(impostor_scores)
+            impostor_above = np.sum(impostor_arr >= threshold)
+            far = impostor_above / len(impostor_arr)
             
-            genuine_below = np.sum(genuine_scores < threshold)
-            frr = genuine_below / len(genuine_scores)
+            genuine_below = np.sum(genuine_arr < threshold)
+            frr = genuine_below / len(genuine_arr)
             
             # 计算 DCF
             dcf = p_target * c_miss * frr + (1 - p_target) * c_fa * far
@@ -319,13 +323,13 @@ class MetricsCalculator:
         
         # 根据 valid loss 找出最佳 epoch
         if valid_losses:
-            best_loss_idx = int(np.argmin(valid_losses))
+            best_loss_idx = min(range(len(valid_losses)), key=valid_losses.__getitem__)
             result["best_loss_epoch"] = epochs[best_loss_idx]
             result["best_valid_loss"] = valid_losses[best_loss_idx]
         
         # 根据 valid error rate 找出最佳 epoch
         if valid_error_rates:
-            best_error_idx = int(np.argmin(valid_error_rates))
+            best_error_idx = min(range(len(valid_error_rates)), key=valid_error_rates.__getitem__)
             result["best_error_epoch"] = epochs[best_error_idx]
             result["best_valid_error_rate"] = valid_error_rates[best_error_idx]
         
@@ -344,8 +348,11 @@ class MetricsComparator:
         return flattened
 
     @staticmethod
-    def compare_experiments(experiments: List[Dict], 
-                           primary_metric: str = "eer") -> Dict[str, Any]:
+    def compare_experiments(
+        experiments: List[Dict],
+        primary_metric: str = "eer",
+        metric_modes: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         """
         比较多个实验的性能指标
         
@@ -368,6 +375,7 @@ class MetricsComparator:
         if not valid_experiments:
             return {"error": "没有找到成功的实验"}
         
+        metric_modes = dict(metric_modes or {})
         comparison = {
             "experiments": {},
             "metrics_summary": {},
@@ -402,8 +410,8 @@ class MetricsComparator:
                     values.append((exp_id, float(results[metric])))
             
             if values:
-                # 排序（假设越小越好，如 EER、loss）
-                sorted_values = sorted(values, key=lambda x: x[1])
+                mode = metric_modes.get(metric, _default_metric_mode(metric))
+                sorted_values = sorted(values, key=lambda x: x[1], reverse=mode == "max")
                 
                 # 计算统计信息
                 numeric_values = [v[1] for v in values]
@@ -415,7 +423,8 @@ class MetricsComparator:
                     "worst_value": sorted_values[-1][1],
                     "average": sum(numeric_values) / len(numeric_values),
                     "std": MetricsComparator._std_dev(numeric_values),
-                    "all_values": {eid: val for eid, val in values}
+                    "all_values": {eid: val for eid, val in values},
+                    "mode": mode,
                 }
                 
                 # 找出最佳实验
@@ -426,7 +435,8 @@ class MetricsComparator:
             metric_data = comparison["metrics_summary"][primary_metric]
             sorted_experiments = sorted(
                 metric_data["all_values"].items(),
-                key=lambda x: x[1]
+                key=lambda x: x[1],
+                reverse=metric_data.get("mode") == "max",
             )
             comparison["ranking"] = {
                 eid: rank + 1 
@@ -475,14 +485,21 @@ class MetricsComparator:
                     current_val = float(current_value)
                     
                     # 计算改进（假设越小越好，如 EER）
-                    improvement = ((baseline_val - current_val) / baseline_val) * 100
+                    mode = _default_metric_mode(metric)
+                    delta = current_val - baseline_val
+                    signed_gain = delta if mode == "max" else -delta
+                    improvement = (
+                        signed_gain / abs(baseline_val) * 100
+                        if baseline_val != 0 else None
+                    )
                     
                     comparison["metrics"][metric] = {
                         "baseline": baseline_val,
                         "current": current_val,
                         "difference": current_val - baseline_val,
                         "improvement_percent": improvement,
-                        "is_better": current_val < baseline_val
+                        "mode": mode,
+                        "is_better": current_val > baseline_val if mode == "max" else current_val < baseline_val,
                     }
                 except (ValueError, TypeError):
                     comparison["metrics"][metric] = {"error": "无法比较数值"}
@@ -493,13 +510,19 @@ class MetricsComparator:
         valid_improvements = [
             m["improvement_percent"] 
             for m in comparison["metrics"].values() 
-            if "improvement_percent" in m
+            if m.get("improvement_percent") is not None
         ]
         
         if valid_improvements:
             comparison["average_improvement"] = sum(valid_improvements) / len(valid_improvements)
         
         return comparison
+
+
+def _default_metric_mode(metric: str) -> str:
+    normalized = metric.lower()
+    maximize_tokens = ("accuracy", "precision", "recall", "f1", "auc", "map", "reward")
+    return "max" if any(token in normalized for token in maximize_tokens) else "min"
 
 
 class MetricsVisualizer:
@@ -715,10 +738,8 @@ def compute_metrics_from_scores(scores_path: Union[str, Path]) -> Dict[str, floa
 
 
 def compare_experiments(experiments: List[Dict],
-                      primary_metric: str = "eer") -> Dict[str, Any]:
+                      primary_metric: str = "eer",
+                      metric_modes: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """快速比较实验的便捷函数"""
     comparator = MetricsComparator()
-    return comparator.compare_experiments(experiments, primary_metric)
-
-
-import numpy as np  # 在文件末尾导入
+    return comparator.compare_experiments(experiments, primary_metric, metric_modes)

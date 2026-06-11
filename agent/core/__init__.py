@@ -9,6 +9,9 @@ from .adapters import (
     register_model_adapter,
     register_runner_adapter,
     register_task_adapter,
+    get_model_adapter,
+    get_runner_adapter,
+    get_task_adapter,
 )
 
 __all__ = [
@@ -22,4 +25,7 @@ __all__ = [
     "register_task_adapter",
     "register_model_adapter",
     "register_runner_adapter",
+    "get_task_adapter",
+    "get_model_adapter",
+    "get_runner_adapter",
 ]

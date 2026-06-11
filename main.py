@@ -19,6 +19,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--objective", type=str, default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--config-path", type=str, default=str(get_config_file("train_ecapa_tdnn.yaml")))
+    parser.add_argument("--task-type", type=str, default="speaker_verification")
+    parser.add_argument("--model-family", type=str, default="ecapa_tdnn")
+    parser.add_argument("--implementation", type=str, default="speechbrain")
+    parser.add_argument("--runner", type=str, default="speechbrain")
     return parser
 
 
@@ -33,6 +37,10 @@ def main() -> None:
         max_rounds=args.rounds,
         verbose=args.verbose,
         config_path=args.config_path,
+        task_type=args.task_type,
+        model_family=args.model_family,
+        implementation=args.implementation,
+        runner=args.runner,
     )
     result = pipeline.run(
         target_eer=args.target_eer,

@@ -106,7 +106,7 @@ def _resolve_config_path(config_path: Optional[Union[str, Path]] = None) -> str:
 @tool
 def ReadConfig(config_path: Optional[str] = None) -> str:
     """
-    读取当前 ECAPA-TDNN 配置文件的关键内容，覆盖数据处理参数、训练超参数和模型结构信息。
+    读取当前模型配置文件的关键内容。
     
     Returns:
         str: 配置摘要
@@ -174,7 +174,9 @@ def UpdateConfig(
         elif isinstance(config_json, dict):
             updates = config_json
         else:
-            return "config_json 必须是 JSON 字符串或 dict 类型"
+            return json.dumps({"status": "failed", "error": "config_json must be a JSON object"}, ensure_ascii=False)
+        if not isinstance(updates, dict) or not updates:
+            return json.dumps({"status": "failed", "error": "config_json must be a non-empty JSON object"}, ensure_ascii=False)
         
         # 使用 ConfigParser 更新配置
         path = _resolve_config_path(config_path)
@@ -285,14 +287,14 @@ def GetConfigStructure(config_path: Optional[str] = None) -> str:
                     items.append(f"{indent_str}{full_key} (list[{len(value)}])")
                 elif isinstance(value, tuple):
                     items.append(f"{indent_str}{full_key} (tuple[{len(value)}])")
+                elif isinstance(value, bool):
+                    items.append(f"{indent_str}{full_key} (bool) = {value}")
                 elif isinstance(value, int):
                     items.append(f"{indent_str}{full_key} (int) = {value}")
                 elif isinstance(value, float):
                     items.append(f"{indent_str}{full_key} (float) = {value}")
                 elif isinstance(value, str):
                     items.append(f"{indent_str}{full_key} (str) = {value}")
-                elif isinstance(value, bool):
-                    items.append(f"{indent_str}{full_key} (bool) = {value}")
                 else:
                     items.append(f"{indent_str}{full_key} ({type(value).__name__}) = {value}")
             return "\n".join(items)
@@ -319,7 +321,11 @@ def ResetConfig(config_path: Optional[str] = None) -> str:
         if not backup_dir.exists():
             return "❌ 没有找到备份目录"
         
-        backups = sorted(backup_dir.glob("*.yaml"), key=lambda p: p.stat().st_mtime)
+        config_stem = Path(path).stem
+        backups = sorted(
+            backup_dir.glob(f"{config_stem}.backup_*{Path(path).suffix}"),
+            key=lambda p: p.stat().st_mtime,
+        )
         if not backups:
             return "❌ 没有找到备份文件"
         

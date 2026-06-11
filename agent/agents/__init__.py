@@ -25,6 +25,15 @@ from .communication import (
     MessageService,
     MessageType,
 )
+from .coordination import (
+    AgentRegistration,
+    AgentRegistry,
+    CompletionDecision,
+    CompletionPolicy,
+    CoordinatedAgent,
+    TaskDispatcher,
+    TaskExecutionRecord,
+)
 
 __all__ = [
     'HPOAgent',
@@ -41,4 +50,11 @@ __all__ = [
     'AgentTaskResult',
     'MessageService',
     'MessageType',
+    'AgentRegistration',
+    'AgentRegistry',
+    'CompletionDecision',
+    'CompletionPolicy',
+    'CoordinatedAgent',
+    'TaskDispatcher',
+    'TaskExecutionRecord',
 ]

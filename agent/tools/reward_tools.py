@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any
 import json
 
 from agent.utils import ExperimentTracker
-from agent.utils.reward import compute_reward
+from agent.utils.reward import compute_objective_reward
 
 
 def _normalize_metrics(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -16,6 +16,14 @@ def _normalize_metrics(record: Dict[str, Any]) -> Dict[str, Any]:
         "eer": (metrics.get("test") or {}).get("eer", (metrics.get("validation") or {}).get("eer")),
         "min_dcf": (metrics.get("test") or {}).get("min_dcf"),
     }
+
+
+def _recorded_metric(record: Dict[str, Any], metric: str) -> Any:
+    for split in ("test", "validation", "train", "summary"):
+        value = ((record.get("metrics") or {}).get(split) or {}).get(metric)
+        if value is not None:
+            return value
+    return None
 
 
 @tool
@@ -35,12 +43,12 @@ def ScoreExperiment(experiment_id: Optional[str] = None,
     if experiment_id is None:
         recent = tracker.list_experiments(limit=1)
         if not recent:
-            return "📋 暂无实验记录"
+            return json.dumps({"status": "failed", "error": "no experiment record"}, ensure_ascii=False)
         experiment_id = recent[0]["experiment_id"]
 
     record = tracker.get_experiment(experiment_id)
     if not record:
-        return f"❌ 实验不存在: {experiment_id}"
+        return json.dumps({"status": "failed", "error": "experiment not found", "experiment_id": experiment_id}, ensure_ascii=False)
 
     weights: Optional[Dict[str, float]] = None
     if weights_json:
@@ -49,25 +57,36 @@ def ScoreExperiment(experiment_id: Optional[str] = None,
             if isinstance(parsed, dict):
                 weights = parsed
         except json.JSONDecodeError as exc:
-            return f"weights_json JSON decode failed: {exc}"
+            return json.dumps({"status": "failed", "error": f"weights_json JSON decode failed: {exc}"}, ensure_ascii=False)
 
+    task = record.get("task") or {}
+    primary_metric = task.get("primary_metric") or "eer"
+    metric_mode = task.get("metric_mode") or "min"
     metrics = _normalize_metrics(record)
-    reward, breakdown = compute_reward(metrics, weights)
+    if primary_metric not in metrics:
+        metrics[primary_metric] = _recorded_metric(record, primary_metric)
+    reward, breakdown = compute_objective_reward(
+        metrics,
+        primary_metric=primary_metric,
+        mode=metric_mode,
+        weights=weights,
+    )
     if reward is None:
-        return "⚠️  缺少 EER，无法计算奖励分数"
+        return json.dumps({
+            "status": "failed",
+            "error": f"missing primary metric: {primary_metric}",
+            "experiment_id": experiment_id,
+        }, ensure_ascii=False)
 
-    summary = f"\n🎯 奖励评分 - 实验 ID: {experiment_id}\n"
-    summary += "=" * 80 + "\n\n"
-    summary += f"综合得分: {reward:.6f}\n"
-    summary += "分项贡献:\n"
-    for key, value in breakdown.items():
-        summary += f"  - {key}: {value:.6f}\n"
-
-    summary += "\n使用指标:\n"
-    for key, value in metrics.items():
-        summary += f"  - {key}: {value if value is not None else 'N/A'}\n"
-
-    return summary
+    return json.dumps({
+        "status": "success",
+        "experiment_id": experiment_id,
+        "primary_metric": primary_metric,
+        "metric_mode": metric_mode,
+        "reward": reward,
+        "breakdown": breakdown,
+        "metrics": metrics,
+    }, ensure_ascii=False, default=str)
 
 
 __all__ = ["ScoreExperiment"]

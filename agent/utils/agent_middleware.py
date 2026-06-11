@@ -41,7 +41,11 @@ def build_agent_logging_middleware(logger: Any, truncate_limit: int = 800) -> Li
 			"tool_call name="
 			f"{tool_name} args={_truncate(json.dumps(tool_args, ensure_ascii=False))}"
 		)
-		result = handler(request)
+		try:
+			result = handler(request)
+		except Exception as exc:
+			logger.append(f"tool_error name={tool_name} error={_truncate(str(exc))}")
+			raise
 		result_text = getattr(result, "content", str(result))
 		logger.append(
 			f"tool_result name={tool_name} content={_truncate(str(result_text))}"

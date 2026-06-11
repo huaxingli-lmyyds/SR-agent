@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Any, List, Tuple, Union
 from pathlib import Path
+import hashlib
+import json
 import re
 import os
 import shutil
@@ -90,6 +92,12 @@ def _get_prep_cache_dir(tag: str) -> Path:
     cache_dir = get_prep_cache_dir(tag)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
+
+
+def _prep_cache_tag(stage: str, **parameters: Any) -> str:
+    payload = json.dumps(parameters, sort_keys=True, ensure_ascii=False, default=str)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{stage}_{digest}"
 
 
 def _required_prep_files(splits: List[str], verification_file: str) -> List[str]:
@@ -265,7 +273,13 @@ def run_evaluation(
                 params[key] = str(resolved)
 
         splits = ["train", "dev", "test"]
-        cache_dir = _get_prep_cache_dir("eval")
+        cache_dir = _get_prep_cache_dir(_prep_cache_tag(
+            "eval",
+            data_folder=params["data_folder"],
+            verification_file=params["verification_file"],
+            split_ratio=params["split_ratio"],
+            splits=splits,
+        ))
         cache_result = run_data_prep(
             data_folder=params["data_folder"],
             save_folder=str(cache_dir),
@@ -430,7 +444,16 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 hparams[key] = str(resolved)
 
         splits = ["train", "dev"]
-        cache_dir = _get_prep_cache_dir("train")
+        cache_dir = _get_prep_cache_dir(_prep_cache_tag(
+            "train",
+            data_folder=hparams["data_folder"],
+            verification_file=hparams["verification_file"],
+            split_ratio=hparams["split_ratio"],
+            sentence_len=hparams["sentence_len"],
+            splits=splits,
+            random_chunk=hparams.get("random_chunk", False),
+            split_speaker=hparams.get("split_speaker", False),
+        ))
         cache_result = run_data_prep(
             data_folder=hparams["data_folder"],
             save_folder=str(cache_dir),

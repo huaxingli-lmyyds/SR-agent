@@ -93,8 +93,10 @@ class ExperimentTracker:
         """
         if experiments_dir is not None:
             self.experiments_dir = Path(experiments_dir).resolve()
+            self._custom_experiments_dir = True
         else:
             self.experiments_dir = get_hpo_experiments_dir()
+            self._custom_experiments_dir = False
         
         # 确保目录存在
         ensure_dir(self.experiments_dir)
@@ -137,11 +139,13 @@ class ExperimentTracker:
         output_folder = str(resolved_output_folder) if resolved_output_folder is not None else None
 
         # 生成实验 ID（使用计数器避免同一秒内的冲突）
+        experiments_dir = self._record_dir(experiment_type)
         base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        experiment_id = f"{base_id}_{self._counter}"
-        self._counter += 1
-        
-        experiments_dir = get_experiment_type_dir(experiment_type)
+        while True:
+            experiment_id = f"{base_id}_{self._counter}"
+            self._counter += 1
+            if not (experiments_dir / experiment_id).exists():
+                break
 
         # 创建实验目录
         exp_dir = ensure_dir(experiments_dir / experiment_id)
@@ -283,12 +287,16 @@ class ExperimentTracker:
             ("model", model),
             ("execution", execution),
             ("parameters", parameters),
-            ("extensions", extensions),
         ):
             if value:
                 current = dict(record.get(key) or {})
                 current.update(value)
                 record[key] = current
+        if extensions:
+            record["extensions"] = self._deep_merge(
+                dict(record.get("extensions") or {}),
+                extensions,
+            )
         if metrics:
             current_metrics = dict(record.get("metrics") or {})
             for split, values in metrics.items():
@@ -316,6 +324,15 @@ class ExperimentTracker:
         self._update_history(record)
         
         return True
+
+    @classmethod
+    def _deep_merge(cls, current: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in updates.items():
+            if isinstance(value, dict) and isinstance(current.get(key), dict):
+                current[key] = cls._deep_merge(dict(current[key]), value)
+            else:
+                current[key] = value
+        return current
 
     def update_hpo_experiment(self, experiment_id: str, **kwargs) -> bool:
         """更新超参数智能体实验记录。"""
@@ -483,10 +500,11 @@ class ExperimentTracker:
             if values:
                 # 判断指标类型
                 if all(isinstance(v[1], (int, float)) for v in values):
-                    # 数值型指标，找出最佳值
-                    sorted_values = sorted(values, key=lambda x: x[1])
+                    mode = self._metric_mode(experiments, metric)
+                    sorted_values = sorted(values, key=lambda x: x[1], reverse=mode == "max")
                     comparison["metrics_comparison"][metric] = {
                         "type": "numeric",
+                        "mode": mode,
                         "values": {exp_id: val for exp_id, val in values},
                         "best": sorted_values[0][0],
                         "best_value": sorted_values[0][1]
@@ -512,6 +530,16 @@ class ExperimentTracker:
             if value is not None:
                 return value
         return None
+
+    @staticmethod
+    def _metric_mode(records: List[Dict[str, Any]], metric: str) -> str:
+        for record in records:
+            task = record.get("task") or {}
+            if task.get("primary_metric") == metric and task.get("metric_mode") in {"min", "max"}:
+                return task["metric_mode"]
+        normalized = metric.lower()
+        maximize = ("accuracy", "precision", "recall", "f1", "auc", "map", "reward")
+        return "max" if any(token in normalized for token in maximize) else "min"
     
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -706,18 +734,18 @@ class ExperimentTracker:
                 }.get(experiment_type, "hpo_agent")
             },
             "task": task or {
-                "type": "speaker_verification",
+                "type": "generic",
                 "dataset": data_folder,
-                "primary_metric": "eer",
-                "metric_mode": "min",
+                "primary_metric": None,
+                "metric_mode": None,
             },
             "model": model or {
-                "family": "ecapa_tdnn",
-                "implementation": "speechbrain",
+                "family": "unknown",
+                "implementation": "unknown",
                 "config_path": config_path,
             },
             "execution": execution or {
-                "runner": "speechbrain",
+                "runner": "unknown",
                 "output_folder": output_folder,
                 "config_backup_path": config_backup_path,
             },
@@ -745,6 +773,16 @@ class ExperimentTracker:
     
     def _remove_from_history(self, experiment_id: str):
         """从历史记录中移除实验"""
+        if self._custom_experiments_dir:
+            history = [
+                exp for exp in self._load_history()
+                if exp["experiment_id"] != experiment_id
+            ]
+            ensure_dir(self.history_file.parent)
+            with open(self.history_file, "w", encoding="utf-8") as stream:
+                json.dump(history, stream, indent=2, ensure_ascii=False)
+            return
+
         removed = False
         for experiment_type in ("hpo", "data_processing", "orchestration"):
             history = self._load_history(experiment_type)
@@ -763,13 +801,13 @@ class ExperimentTracker:
                 json.dump(history, f, indent=2, ensure_ascii=False)
 
     def _get_history_file(self, experiment_type: Optional[str] = None) -> Path:
-        if experiment_type is None:
+        if experiment_type is None or self._custom_experiments_dir:
             return self.history_file
         return get_experiment_type_dir(experiment_type) / "experiments_history.json"
 
     def _load_record(self, experiment_id: str, experiment_type: Optional[str] = None) -> tuple[Optional[Dict], Path]:
         if experiment_type:
-            record_dir = get_experiment_type_dir(experiment_type)
+            record_dir = self._record_dir(experiment_type)
             record_path = record_dir / experiment_id / "experiment_record.json"
             if record_path.exists():
                 with open(record_path, 'r', encoding='utf-8') as f:
@@ -794,6 +832,9 @@ class ExperimentTracker:
             with open(record_path, 'r', encoding='utf-8') as f:
                 return json.load(f), record_dir
         return None, record_dir
+
+    def _record_dir(self, experiment_type: str) -> Path:
+        return self.experiments_dir if self._custom_experiments_dir else get_experiment_type_dir(experiment_type)
 
 
 # 便捷函数

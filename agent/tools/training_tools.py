@@ -20,8 +20,7 @@ from agent.utils import (
     resolve_optional_project_path,
     ExperimentTracker,
 )
-from agent.utils.runner import run_training
-from agent.core.adapters import RUNNER_ADAPTERS
+from agent.core.adapters import get_model_adapter, get_runner_adapter, get_task_adapter
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
 
@@ -81,7 +80,7 @@ def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
     if not uniq:
         return []
 
-    best_path = min(uniq.values(), key=lambda p: p.stat().st_mtime)
+    best_path = max(uniq.values(), key=lambda p: p.stat().st_mtime)
     return [str(best_path)]
 
 
@@ -160,7 +159,14 @@ def _parse_training_log(train_log_path: Path) -> Tuple[List[Dict[str, Any]], Dic
 def TrainModel(config_path: Optional[str] = None,
                data_folder: Optional[str] = None,
                description: Optional[str] = None,
-               experiment_id: Optional[str] = None) -> str:
+               experiment_id: Optional[str] = None,
+               trial_id: Optional[str] = None,
+               parameters_json: Optional[str] = None,
+               budget_json: Optional[str] = None,
+               task_type: Optional[str] = None,
+               model_family: Optional[str] = None,
+               implementation: Optional[str] = None,
+               runner: Optional[str] = None) -> str:
     """
     运行 ECAPA-TDNN 模型的训练脚本。
     训练完成后会自动保存实验记录，包括配置、训练日志和结果。
@@ -213,6 +219,14 @@ def TrainModel(config_path: Optional[str] = None,
         from agent.utils import ConfigParser
         parser = ConfigParser(config_path_str)
         config_data = parser.load_config(resolve_references=True)
+        task_type = task_type or ((record or {}).get("task") or {}).get("type") or "speaker_verification"
+        model_family = model_family or ((record or {}).get("model") or {}).get("family") or "ecapa_tdnn"
+        implementation = implementation or ((record or {}).get("model") or {}).get("implementation") or "speechbrain"
+        runner_name = runner or ((record or {}).get("execution") or {}).get("runner") or implementation
+        task_adapter = get_task_adapter(task_type)
+        model_adapter = get_model_adapter(model_family)
+        runner_adapter = get_runner_adapter(runner_name)
+        model_adapter.validate_config(config_data)
 
         # 确定数据文件夹
         if data_folder:
@@ -233,12 +247,27 @@ def TrainModel(config_path: Optional[str] = None,
                 data_folder=df,
                 output_folder=str(output_folder) if output_folder else None,
                 description=description or "",
+                task={
+                    "type": task_type,
+                    "dataset": df,
+                    "primary_metric": task_adapter.primary_metric,
+                    "metric_mode": task_adapter.metric_mode,
+                },
+                model={
+                    "family": model_family,
+                    "implementation": implementation,
+                    "config_path": config_path_str,
+                },
+                execution={"runner": runner_name, "output_folder": str(output_folder) if output_folder else None},
             )
 
         exp_dir = get_experiment_dir(experiment_id, "hpo", create=True)
 
         output_folder_path = resolve_optional_project_path(output_folder)
-        if output_folder_path is None or exp_dir not in output_folder_path.parents:
+        if trial_id:
+            output_folder_path = exp_dir / "trials" / trial_id / "output"
+            output_folder = str(output_folder_path)
+        elif output_folder_path is None or exp_dir not in output_folder_path.parents:
             output_folder_path = exp_dir / "output"
             output_folder = str(output_folder_path)
 
@@ -247,7 +276,14 @@ def TrainModel(config_path: Optional[str] = None,
             "data_folder": df,
             "output_folder": str(output_folder_path),
         }
-        train_result = run_training(config_path_str, overrides)
+        trial_parameters = json.loads(parameters_json) if parameters_json else {}
+        trial_budget = json.loads(budget_json) if budget_json else {}
+        if not isinstance(trial_parameters, dict) or not isinstance(trial_budget, dict):
+            raise ValueError("parameters_json and budget_json must be JSON objects")
+        overrides.update(trial_parameters)
+        if trial_budget.get("epochs") is not None:
+            overrides["number_of_epochs"] = trial_budget["epochs"]
+        train_result = runner_adapter.run_training(config_path_str, overrides)
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -283,7 +319,7 @@ def TrainModel(config_path: Optional[str] = None,
             training_metrics.update(final_metrics)
 
         # experiment_tracker 更新记录
-        operation_result = RUNNER_ADAPTERS["speechbrain"].normalize_training_result({
+        operation_result = runner_adapter.normalize_training_result({
             "status": status,
             "error": error_msg,
             "output_folder": str(output_folder_path) if output_folder_path else None,
@@ -294,19 +330,21 @@ def TrainModel(config_path: Optional[str] = None,
             "final_metrics": final_metrics,
         })
         operation_result.task = (record or {}).get("task") or {
-            "type": "speaker_verification",
+            "type": task_type,
             "dataset": df,
-            "primary_metric": "eer",
-            "metric_mode": "min",
+            "primary_metric": task_adapter.primary_metric,
+            "metric_mode": task_adapter.metric_mode,
         }
         operation_result.model = (record or {}).get("model") or {
-            "family": "ecapa_tdnn",
-            "implementation": "speechbrain",
+            "family": model_family,
+            "implementation": implementation,
             "config_path": config_path_str,
         }
         operation_result.execution.update({
-            "runner": "speechbrain",
+            "runner": runner_name,
             "output_folder": output_folder,
+            "trial_id": trial_id,
+            "budget": trial_budget,
         })
         operation_result.parameters = dict(overrides)
         ExperimentService(tracker).record_result(
@@ -315,6 +353,19 @@ def TrainModel(config_path: Optional[str] = None,
             duration_seconds=duration,
             actor={"type": "hpo_agent", "name": "model_optimizer"},
         )
+        if trial_id and status == "success":
+            tracker.update_hpo_experiment(
+                experiment_id,
+                status="running",
+                extensions={"optimization": {
+                    "latest_trial_execution": {
+                        "trial_id": trial_id,
+                        "parameters": trial_parameters,
+                        "budget": trial_budget,
+                        "metrics": training_metrics,
+                    }
+                }},
+            )
         return operation_result.to_json()
     except Exception as e:
         return OperationResult(
@@ -327,153 +378,59 @@ def TrainModel(config_path: Optional[str] = None,
 
 @tool
 def EvaluateModel(experiment_id: Optional[str] = None) -> str:
-    """
-    评估指定实验的模型性能。
-    
-    参数:
-        experiment_id: 实验 ID，如果为 None 则评估最近的实验
-    
-    Returns:
-        str: 评估结果
-    """
+    """Evaluate through the registered runner and return OperationResult JSON."""
     try:
-        tracker = ExperimentTracker()
-        exp_dir = tracker.experiments_dir
-        
-        if experiment_id:
-            target_dir = get_experiment_dir(experiment_id, "hpo")
-            if not target_dir.exists():
-                return f"❌ 实验不存在: {experiment_id}"
-        else:
-            # 获取最近的实验
-            exps = sorted(exp_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-            if not exps:
-                return "📋 暂无实验记录"
-            target_dir = exps[0]
-            experiment_id = target_dir.name
-        
-        tracker = ExperimentTracker()
-        record = tracker.get_experiment(experiment_id)
-        if not record:
-            return f"⚠️  实验记录文件不存在: {target_dir / 'experiment_record.json'}"
-
-        status = record.get('status', 'unknown')
-        if status != "success":
-            return f"⚠️  实验未成功完成，无法评估 (状态: {status})"
-
-        model_paths = [
-            item.get("path") for item in record.get("artifacts") or []
-            if item.get("type") == "checkpoint"
-        ]
-        output_folder = (record.get("execution") or {}).get("output_folder")
-        if not model_paths:
-            model_paths = _find_model_paths(output_folder, target_dir)
-
-        model_path = model_paths[0] if model_paths else None
-        data_folder = (record.get("task") or {}).get("dataset")
-
-        if not model_path:
-            return "⚠️  未找到模型参数文件，无法评估"
-
         from agent.tools.evaluation_tools import RunEvaluation
-        RunEvaluation.invoke({
-            "model_path": model_path,
-            "data_folder": data_folder,
-            "experiment_id": experiment_id
-        })
-
-        updated = tracker.get_experiment(experiment_id) or {}
-        evaluation = {"status": updated.get("status"), "results": (updated.get("metrics") or {}).get("test")}
-        if not evaluation:
-            return "⚠️  评估未写入实验记录"
-
-        eval_results = evaluation.get("results", {})
-        record_path = target_dir / "experiment_record.json"
-
-        summary = f"\n📊 模型评估 - 实验 ID: {experiment_id}\n"
-        summary += "=" * 80 + "\n\n"
-        summary += f"评估状态: {evaluation.get('status', 'unknown')}\n"
-
-        if eval_results:
-            summary += "性能指标:\n"
-            for key, value in eval_results.items():
-                summary += f"  {key}: {value}\n"
-
-        summary += f"\n📁 文件位置:\n"
-        summary += f"  - 实验记录: {record_path}\n"
-
-        return summary
-    
-    except Exception as e:
-        return f"❌ 评估模型失败: {str(e)}"
+        return RunEvaluation.invoke({"experiment_id": experiment_id})
+    except Exception as exc:
+        return OperationResult(
+            status="failed",
+            stage="evaluation",
+            error=str(exc),
+            experiment_id=experiment_id,
+        ).to_json()
 
 
 @tool
 def AnalyzeResults(experiment_id: Optional[str] = None) -> str:
-    """
-    分析实验结果，包括训练日志中的关键指标和趋势。
-    
-    参数:
-        experiment_id: 实验 ID，如果为 None 则分析最近的实验
-    
-    Returns:
-        str: 分析结果
-    """
+    """Return recorded metrics plus metrics parsed from a training log."""
     try:
         from agent.utils import extract_log_metrics
         
         tracker = ExperimentTracker()
-        exp_dir = tracker.experiments_dir
-        
-        if experiment_id:
-            target_dir = get_experiment_dir(experiment_id, "hpo")
-            if not target_dir.exists():
-                return f"❌ 实验不存在: {experiment_id}"
-        else:
-            # 获取最近的实验
-            exps = sorted(exp_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-            if not exps:
-                return "📋 暂无实验记录"
-            target_dir = exps[0]
-            experiment_id = target_dir.name
-        
-        # 查找日志文件
-        log_path = get_experiment_log_path(experiment_id, "hpo")
-        if not log_path.exists():
-            log_files = list(target_dir.glob("*.log")) + list(target_dir.glob("*.txt"))
-            if log_files:
-                log_path = log_files[0]
-            else:
-                return f"⚠️  未找到日志文件"
-        
-        # 提取指标
-        metrics = extract_log_metrics(str(log_path))
-        
-        summary = f"\n📊 实验分析 - 实验 ID: {experiment_id}\n"
-        summary += "=" * 80 + "\n\n"
-        
-        if isinstance(metrics, dict) and "error" in metrics:
-            return f"⚠️  {metrics['error']}\n{summary}"
-        
-        summary += "提取的指标:\n"
-        for key, value in metrics.items():
-            summary += f"  {key}: {value}\n"
-        
-        # 读取实验记录
-        record_path = target_dir / "experiment_record.json"
-        if record_path.exists():
-            with open(record_path, 'r', encoding='utf-8') as f:
-                record = json.load(f)
-            
-            if record.get("metrics"):
-                summary += "\n保存的结果:\n"
-                for split, values in record["metrics"].items():
-                    summary += f"  {split}: {values}\n"
-        
-        return summary
+        if experiment_id is None:
+            recent = tracker.list_experiments(limit=1)
+            experiment_id = recent[0]["experiment_id"] if recent else None
+        record = tracker.get_experiment(experiment_id) if experiment_id else None
+        if not record:
+            return OperationResult(
+                status="failed",
+                stage="analysis",
+                error="experiment not found",
+                experiment_id=experiment_id,
+            ).to_json()
+
+        log_path = next((
+            Path(item["path"])
+            for item in record.get("artifacts") or []
+            if item.get("type") == "log" and item.get("path")
+        ), None)
+        parsed_metrics = extract_log_metrics(log_path) if log_path and log_path.exists() else {}
+        return json.dumps({
+            "status": "success",
+            "experiment_id": experiment_id,
+            "recorded_metrics": record.get("metrics") or {},
+            "parsed_log_metrics": parsed_metrics,
+            "log_path": str(log_path) if log_path else None,
+        }, ensure_ascii=False, default=str)
     
     except Exception as e:
-        return f"❌ 分析结果失败: {str(e)}"
+        return OperationResult(
+            status="failed",
+            stage="analysis",
+            error=str(e),
+            experiment_id=experiment_id,
+        ).to_json()
 
 
 # 导出所有工具

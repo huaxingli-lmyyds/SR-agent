@@ -54,3 +54,19 @@ def compute_reward(
         breakdown["min_dcf"] = term
 
     return reward, breakdown
+
+
+def compute_objective_reward(
+    metrics: Dict[str, Any],
+    primary_metric: str,
+    mode: str = "min",
+    weights: Optional[Dict[str, float]] = None,
+) -> Tuple[Optional[float], Dict[str, float]]:
+    """Compute a maximized reward for any primary objective."""
+    if primary_metric == "eer":
+        return compute_reward(metrics, weights)
+    value = _to_float(metrics.get(primary_metric))
+    if value is None:
+        return None, {}
+    reward = value if mode == "max" else -value
+    return reward, {primary_metric: reward}

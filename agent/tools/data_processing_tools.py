@@ -64,13 +64,16 @@ def _count_csv_rows(path: Path) -> Optional[int]:
         return None
     try:
         with path.open("r", encoding="utf-8") as fin:
-            rows = fin.readlines()
-        if not rows:
+            first = fin.readline()
+            if not first:
+                return 0
+            count = sum(1 for _ in fin)
+        if not first:
             return 0
-        header = rows[0].lower()
+        header = first.lower()
         if "id" in header and "wav" in header:
-            return max(len(rows) - 1, 0)
-        return len(rows)
+            return count
+        return count + 1
     except Exception:
         return None
 
@@ -203,17 +206,15 @@ def PrepareVoxCelebData(
         sf_path = Path(prep_result.get("save_folder") or sf)
         verification_local = prep_result.get("verification_local")
 
-        train_csv = sf_path / "train.csv"
-        dev_csv = sf_path / "dev.csv"
-
-
-        stats = {
-            "train": _count_csv_rows(train_csv),
-            "dev": _count_csv_rows(dev_csv),
-        }
+        manifest_names = list(dict.fromkeys([*splits_val, "enrol"] if "test" in splits_val else splits_val))
         csv_files = {
-            "train": str(train_csv),
-            "dev": str(dev_csv),
+            name: str(sf_path / f"{name}.csv")
+            for name in manifest_names
+            if (sf_path / f"{name}.csv").exists()
+        }
+        stats = {
+            name: _count_csv_rows(Path(path))
+            for name, path in csv_files.items()
         }
 
         if experiment_id:

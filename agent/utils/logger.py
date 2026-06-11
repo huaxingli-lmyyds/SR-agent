@@ -6,6 +6,7 @@
 from pathlib import Path
 from typing import Union, Optional, List, Any
 from datetime import datetime
+from threading import Lock
 
 from agent.utils.agent_middleware import build_agent_logging_middleware
 from agent.utils.path_tool import resolve_project_path
@@ -17,13 +18,15 @@ class Logger:
     def __init__(self, log_path: Union[str, Path]):
         self.log_path = resolve_project_path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = Lock()
 
     def write(self, message: str) -> None:
         """追加一行日志文本"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"{timestamp} {message}\n"
-        with self.log_path.open("a", encoding="utf-8") as fout:
-            fout.write(line)
+        with self._lock:
+            with self.log_path.open("a", encoding="utf-8") as fout:
+                fout.write(line)
 
     def info(self, message: str) -> None:
         self.write(f"INFO {message}")
@@ -55,11 +58,13 @@ class AgentLogger:
         self.log_path = resolve_project_path(log_path)
         self.truncate_limit = truncate_limit
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = Lock()
 
     def append(self, message: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self.log_path.open("a", encoding="utf-8") as fout:
-            fout.write(f"{timestamp} {message}\n")
+        with self._lock:
+            with self.log_path.open("a", encoding="utf-8") as fout:
+                fout.write(f"{timestamp} {message}\n")
 
     def _truncate(self, text: str) -> str:
         text = text.strip()

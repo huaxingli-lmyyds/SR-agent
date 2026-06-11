@@ -6,6 +6,7 @@
 from langchain_core.tools import tool
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
+import json
 import re
 
 from agent.utils import ExperimentTracker, get_experiment_dir
@@ -16,12 +17,12 @@ def _get_record(experiment_id: Optional[str]) -> Tuple[Optional[Dict[str, Any]],
     if experiment_id is None:
         recent = tracker.list_experiments(limit=1)
         if not recent:
-            return None, "📋 暂无实验记录"
+            return None, "no experiment record"
         experiment_id = recent[0]["experiment_id"]
 
     record = tracker.get_experiment(experiment_id)
     if not record:
-        return None, f"❌ 实验不存在: {experiment_id}"
+        return None, f"experiment not found: {experiment_id}"
     return record, None
 
 
@@ -54,8 +55,13 @@ def _parse_train_log(train_log_path: Path) -> List[Dict[str, Any]]:
 
 
 def _collect_epoch_data(record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    speechbrain = (record.get("extensions") or {}).get("speechbrain") or {}
-    epoch_data = speechbrain.get("epoch_data") or []
+    extensions = record.get("extensions") or {}
+    epoch_data = ((record.get("execution") or {}).get("training_history") or [])
+    if not epoch_data:
+        for extension in extensions.values():
+            if isinstance(extension, dict) and extension.get("epoch_data"):
+                epoch_data = extension["epoch_data"]
+                break
     if epoch_data:
         return epoch_data
 
@@ -66,7 +72,10 @@ def _collect_epoch_data(record: Dict[str, Any]) -> List[Dict[str, Any]]:
     if train_log_path:
         return _parse_train_log(Path(train_log_path))
 
-    exp_dir = get_experiment_dir(record["experiment_id"], "hpo")
+    exp_dir = get_experiment_dir(
+        record["experiment_id"],
+        record.get("experiment_type") or "hpo",
+    )
     fallback_log = exp_dir / "train_log.txt"
     if fallback_log.exists():
         return _parse_train_log(fallback_log)
@@ -88,6 +97,34 @@ def _trend_label(value: float, eps: float) -> str:
     return "flat"
 
 
+def _diagnostic_series(
+    record: Dict[str, Any],
+    epoch_data: List[Dict[str, Any]],
+    last_n: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    required = ("train_loss", "valid_loss")
+    if any(any(key not in item for key in required) for item in epoch_data):
+        return None, "training history must contain train_loss and valid_loss"
+    task = record.get("task") or {}
+    primary_metric = task.get("primary_metric") or "valid_error_rate"
+    metric_mode = task.get("metric_mode") or "min"
+    metric_key = primary_metric
+    if not all(metric_key in item for item in epoch_data):
+        metric_key = "valid_error_rate"
+    if not all(metric_key in item for item in epoch_data):
+        return None, f"training history does not contain primary metric: {primary_metric}"
+    window = epoch_data[-last_n:]
+    return {
+        "window": window,
+        "primary_metric": primary_metric,
+        "metric_key": metric_key,
+        "metric_mode": metric_mode,
+        "train_losses": [item["train_loss"] for item in window],
+        "valid_losses": [item["valid_loss"] for item in window],
+        "metric_values": [item[metric_key] for item in window],
+    }, None
+
+
 @tool
 def AnalyzeTrainingCurves(experiment_id: Optional[str] = None, last_n: int = 5) -> str:
     """
@@ -102,16 +139,19 @@ def AnalyzeTrainingCurves(experiment_id: Optional[str] = None, last_n: int = 5) 
     """
     record, err = _get_record(experiment_id)
     if err:
-        return err
+        return json.dumps({"status": "failed", "error": err}, ensure_ascii=False)
 
     epoch_data = _collect_epoch_data(record)
     if len(epoch_data) < 2:
-        return "⚠️  训练曲线数据不足，无法分析"
+        return json.dumps({"status": "failed", "error": "insufficient training history"}, ensure_ascii=False)
 
-    window = epoch_data[-max(2, last_n):]
-    train_losses = [item["train_loss"] for item in window]
-    valid_losses = [item["valid_loss"] for item in window]
-    error_rates = [item["valid_error_rate"] for item in window]
+    series, err = _diagnostic_series(record, epoch_data, max(2, last_n))
+    if err:
+        return json.dumps({"status": "failed", "error": err}, ensure_ascii=False)
+    window = series["window"]
+    train_losses = series["train_losses"]
+    valid_losses = series["valid_losses"]
+    error_rates = series["metric_values"]
     gaps = [v - t for v, t in zip(valid_losses, train_losses)]
 
     eps = 1e-4
@@ -120,15 +160,24 @@ def AnalyzeTrainingCurves(experiment_id: Optional[str] = None, last_n: int = 5) 
     error_slope = _slope(error_rates)
     gap_slope = _slope(gaps)
 
-    summary = f"\n📈 训练曲线趋势 - 实验 ID: {record['experiment_id']}\n"
-    summary += "=" * 80 + "\n\n"
-    summary += f"最近 {len(window)} 个 epoch:\n"
-    summary += f"  train_loss: {train_losses[0]:.6f} -> {train_losses[-1]:.6f} ({_trend_label(train_slope, eps)})\n"
-    summary += f"  valid_loss: {valid_losses[0]:.6f} -> {valid_losses[-1]:.6f} ({_trend_label(valid_slope, eps)})\n"
-    summary += f"  valid_error_rate: {error_rates[0]:.6f} -> {error_rates[-1]:.6f} ({_trend_label(error_slope, eps)})\n"
-    summary += f"  gap(valid-train): {gaps[0]:.6f} -> {gaps[-1]:.6f} ({_trend_label(gap_slope, eps)})\n"
-
-    return summary
+    return json.dumps({
+        "status": "success",
+        "experiment_id": record["experiment_id"],
+        "primary_metric": series["primary_metric"],
+        "window_size": len(window),
+        "trends": {
+            "train_loss": _trend_label(train_slope, eps),
+            "valid_loss": _trend_label(valid_slope, eps),
+            series["metric_key"]: _trend_label(error_slope, eps),
+            "generalization_gap": _trend_label(gap_slope, eps),
+        },
+        "slopes": {
+            "train_loss": train_slope,
+            "valid_loss": valid_slope,
+            series["metric_key"]: error_slope,
+            "generalization_gap": gap_slope,
+        },
+    }, ensure_ascii=False)
 
 
 @tool
@@ -145,16 +194,18 @@ def DiagnoseFitStatus(experiment_id: Optional[str] = None, last_n: int = 5) -> s
     """
     record, err = _get_record(experiment_id)
     if err:
-        return err
+        return json.dumps({"status": "failed", "error": err}, ensure_ascii=False)
 
     epoch_data = _collect_epoch_data(record)
     if len(epoch_data) < 3:
-        return "⚠️  训练曲线数据不足，无法诊断"
+        return json.dumps({"status": "failed", "error": "insufficient training history"}, ensure_ascii=False)
 
-    window = epoch_data[-max(3, last_n):]
-    train_losses = [item["train_loss"] for item in window]
-    valid_losses = [item["valid_loss"] for item in window]
-    error_rates = [item["valid_error_rate"] for item in window]
+    series, err = _diagnostic_series(record, epoch_data, max(3, last_n))
+    if err:
+        return json.dumps({"status": "failed", "error": err}, ensure_ascii=False)
+    train_losses = series["train_losses"]
+    valid_losses = series["valid_losses"]
+    error_rates = series["metric_values"]
     gaps = [v - t for v, t in zip(valid_losses, train_losses)]
 
     eps = 1e-4
@@ -164,8 +215,8 @@ def DiagnoseFitStatus(experiment_id: Optional[str] = None, last_n: int = 5) -> s
     gap_slope = _slope(gaps)
     gap_latest = gaps[-1]
 
-    train_improve = (train_losses[0] - train_losses[-1]) / max(train_losses[0], 1e-8)
-    valid_improve = (valid_losses[0] - valid_losses[-1]) / max(valid_losses[0], 1e-8)
+    train_improve = (train_losses[0] - train_losses[-1]) / max(abs(train_losses[0]), 1e-8)
+    valid_improve = (valid_losses[0] - valid_losses[-1]) / max(abs(valid_losses[0]), 1e-8)
 
     status = "stable"
     reasons: List[str] = []
@@ -177,34 +228,37 @@ def DiagnoseFitStatus(experiment_id: Optional[str] = None, last_n: int = 5) -> s
         status = "overfitting"
         reasons.append("验证损失与训练损失差距扩大")
 
-    if train_improve < 0.01 and valid_improve < 0.01 and error_rates[-1] > 0.05:
+    if train_improve < 0.01 and valid_improve < 0.01:
         status = "underfitting"
-        reasons.append("训练/验证损失几乎不下降且 valid_error_rate 偏高")
-    if abs(train_slope) < eps and abs(valid_slope) < eps and error_rates[-1] > 0.05:
+        reasons.append("训练和验证损失几乎不下降")
+    if abs(train_slope) < eps and abs(valid_slope) < eps:
         status = "underfitting"
-        reasons.append("训练/验证曲线平坦且效果未达标")
+        reasons.append("训练和验证曲线平坦")
 
     if status == "stable":
-        if valid_slope < -eps or error_slope < -eps:
+        metric_improving = error_slope < -eps if series["metric_mode"] == "min" else error_slope > eps
+        if valid_slope < -eps or metric_improving:
             reasons.append("验证指标仍在改善")
         else:
             reasons.append("曲线变化较小，可能接近收敛")
 
-    summary = f"\n🧪 拟合状态诊断 - 实验 ID: {record['experiment_id']}\n"
-    summary += "=" * 80 + "\n\n"
-    summary += f"状态判断: {status}\n"
-    for reason in reasons:
-        summary += f"- {reason}\n"
-
-    summary += "\n建议:\n"
+    recommendations = []
     if status == "overfitting":
-        summary += "- 考虑增大正则化、减少轮数或增大数据增强\n"
+        recommendations.append("increase_regularization_or_data_augmentation")
     elif status == "underfitting":
-        summary += "- 考虑提高模型容量或训练轮数，或调整学习率\n"
+        recommendations.append("increase_capacity_or_training_budget")
     else:
-        summary += "- 可继续微调参数或执行评估\n"
+        recommendations.append("continue_tuning_or_evaluate")
 
-    return summary
+    return json.dumps({
+        "status": "success",
+        "experiment_id": record["experiment_id"],
+        "fit_status": status,
+        "primary_metric": series["primary_metric"],
+        "metric_mode": series["metric_mode"],
+        "reasons": reasons,
+        "recommendations": recommendations,
+    }, ensure_ascii=False)
 
 
 __all__ = [

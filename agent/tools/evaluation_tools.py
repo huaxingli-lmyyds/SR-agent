@@ -8,7 +8,7 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from agent.core.adapters import RUNNER_ADAPTERS
+from agent.core.adapters import get_runner_adapter, get_task_adapter
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
 from agent.utils import (
@@ -20,7 +20,6 @@ from agent.utils import (
     resolve_data_path,
     resolve_optional_project_path,
 )
-from agent.utils import runner
 
 
 def _checkpoint_path(record: dict) -> Optional[str]:
@@ -30,8 +29,7 @@ def _checkpoint_path(record: dict) -> Optional[str]:
     return None
 
 
-@tool
-def RunEvaluation(
+def _run_evaluation(
     model_path: Optional[str] = None,
     verification_config: Optional[str] = None,
     data_folder: Optional[str] = None,
@@ -61,19 +59,42 @@ def RunEvaluation(
     model_path = model_path or _checkpoint_path(record)
     resolved_model = resolve_optional_project_path(model_path)
     model_path = str(resolved_model) if resolved_model is not None else None
+    if model_path is None:
+        return OperationResult(
+            status="failed",
+            stage="evaluation",
+            error="no checkpoint artifact or model_path was provided",
+            experiment_id=experiment_id,
+        ).to_json()
     data_folder = str(resolve_data_path(data_folder or (record.get("task") or {}).get("dataset")))
-    output_folder = get_experiment_artifact_dir(experiment_id, "evaluation", "hpo", create=True)
-    config_path = str(resolve_config_path(verification_config, default_name="verification_ecapa.yaml"))
+    output_folder = get_experiment_artifact_dir(
+        experiment_id,
+        "evaluation",
+        record.get("experiment_type") or "hpo",
+        create=True,
+    )
+    task = record.get("task") or {}
+    execution = record.get("execution") or {}
+    runner_name = execution.get("runner") or (record.get("model") or {}).get("implementation") or "speechbrain"
+    runner_adapter = get_runner_adapter(runner_name)
+    task_adapter = get_task_adapter(task.get("type") or "speaker_verification")
+    config_candidate = verification_config or execution.get("evaluation_config_path")
+    if config_candidate is None and runner_name != "speechbrain":
+        config_candidate = record.get("config_path")
+    config_path = str(resolve_config_path(config_candidate, default_name="verification_ecapa.yaml"))
 
     started_at = datetime.now()
-    raw = runner.run_evaluation(
-        config_path=config_path,
+    raw = runner_adapter.run_evaluation(
+        config_path,
         model_path=model_path,
-        data_folder=data_folder,
+        data_path=data_folder,
         overrides={"output_folder": str(output_folder)},
     )
 
-    metrics = {"eer": raw.get("eer"), "min_dcf": raw.get("min_dcf")}
+    metrics = dict(raw.get("metrics") or {})
+    for key in ("eer", "min_dcf"):
+        if raw.get(key) is not None:
+            metrics[key] = raw[key]
     scores_path = raw.get("scores_path")
     if scores_path and Path(scores_path).exists():
         scores = extract_scores_data(scores_path)
@@ -83,7 +104,8 @@ def RunEvaluation(
                 scores.get("impostor_scores", []),
             ))
 
-    result = RUNNER_ADAPTERS["speechbrain"].normalize_evaluation_result({
+    task_adapter.validate_metrics(metrics)
+    result = runner_adapter.normalize_evaluation_result({
         "status": raw.get("status", "failed"),
         "error": raw.get("error"),
         "metrics": metrics,
@@ -94,7 +116,7 @@ def RunEvaluation(
     result.task = record.get("task") or {}
     result.model = record.get("model") or {}
     result.execution.update({
-        "runner": "speechbrain",
+        "runner": runner_name,
         "output_folder": raw.get("output_folder") or str(output_folder),
     })
     result.parameters = {"model_path": model_path, "data_path": data_folder}
@@ -105,6 +127,30 @@ def RunEvaluation(
         actor={"type": "hpo_agent", "name": "model_evaluator"},
     )
     return result.to_json()
+
+
+@tool
+def RunEvaluation(
+    model_path: Optional[str] = None,
+    verification_config: Optional[str] = None,
+    data_folder: Optional[str] = None,
+    experiment_id: Optional[str] = None,
+) -> str:
+    """Evaluate through a registered runner and always return OperationResult JSON."""
+    try:
+        return _run_evaluation(
+            model_path=model_path,
+            verification_config=verification_config,
+            data_folder=data_folder,
+            experiment_id=experiment_id,
+        )
+    except Exception as exc:
+        return OperationResult(
+            status="failed",
+            stage="evaluation",
+            error=str(exc),
+            experiment_id=experiment_id,
+        ).to_json()
 
 
 __all__ = ["RunEvaluation"]

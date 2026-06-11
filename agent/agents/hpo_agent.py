@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent.utils import ConfigParser, ExperimentTracker, get_agent_dir
-from agent.utils.reward import compute_reward
+from agent.utils.reward import compute_objective_reward
 from agent.utils.logger import AgentLogger
 from agent.utils.path_tool import (
     get_config_file,
@@ -25,6 +25,7 @@ from agent.utils.path_tool import (
 from agent.memory import EpisodeMemory, MemoryQuery, MemoryScope, MemoryService
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.agents.base_agent import BaseLangChainAgent
+from agent.hpo import HPOService, Objective, SearchParameter, SearchSpace, TrialBudget
 
 
 @dataclass
@@ -37,6 +38,8 @@ class OptimizationResult:
     best_config: Dict[str, Any]
     execution_summary: str
     experiment_id: str
+    study: Optional[Dict[str, Any]] = None
+    trials: Optional[List[Dict[str, Any]]] = None
 
 
 class HPOAgent(BaseLangChainAgent):
@@ -51,7 +54,11 @@ class HPOAgent(BaseLangChainAgent):
         config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
         experiments_dir: Optional[str] = None,
         memory_key: Optional[str] = None,
-        memory_path: Optional[str] = None
+        memory_path: Optional[str] = None,
+        task_type: str = "speaker_verification",
+        model_family: str = "ecapa_tdnn",
+        implementation: str = "speechbrain",
+        runner: str = "speechbrain",
     ):
         """
         初始化 LangChain v1.0 智能体
@@ -76,6 +83,10 @@ class HPOAgent(BaseLangChainAgent):
         self.agent_logger = AgentLogger(get_logs_dir() / "hpo_agent.log")
         self.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else get_hpo_experiments_dir()
         self.memory_key = memory_key or Path(config_path).stem or "default_model"
+        self.task_type = task_type
+        self.model_family = model_family
+        self.implementation = implementation
+        self.runner = runner
         memory_root = resolve_optional_project_path(memory_path) if memory_path else None
         if memory_root is not None and memory_root.suffix:
             memory_root = memory_root.parent
@@ -83,8 +94,8 @@ class HPOAgent(BaseLangChainAgent):
         self.memory_store = self.memory_service
         self.memory_scope = MemoryScope(
             agent_type="hpo_agent",
-            task_type="speaker_verification",
-            model_family=self.memory_key,
+            task_type=self.task_type,
+            model_family=self.model_family,
             tags=["optimization", "training", "evaluation"],
         )
         
@@ -146,24 +157,25 @@ class HPOAgent(BaseLangChainAgent):
         except OSError:
             return "You are a model-agnostic hyperparameter optimization agent."
 
-    def _get_history_context(self, metric: str = "eer") -> str:
+    def _get_history_context(self, metric: str = "eer", mode: str = "min") -> str:
         """从实验历史中提取基线信息。"""
         tracker = ExperimentTracker()
-        best_list = tracker.find_best_experiment(metric=metric, minimize=True, top_n=1)
+        best_list = tracker.find_best_experiment(metric=metric, minimize=mode == "min", top_n=1)
         if not best_list:
             return "历史实验: 暂无可用记录。"
 
         best = best_list[0]
         exp_id = best.get("experiment_id", "N/A")
         results = (best.get("metrics") or {}).get("test") or (best.get("metrics") or {}).get("validation") or {}
-        config = best.get("config", {})
+        config = best.get("parameters", {})
 
         key_fields = ["lr", "batch_size", "number_of_epochs"]
         config_summary = {k: config.get(k) for k in key_fields if k in config}
-        reward, _ = compute_reward({
-            "eer": results.get("eer"),
-            "min_dcf": results.get("min_dcf"),
-        })
+        reward, _ = compute_objective_reward(
+            results,
+            primary_metric=metric,
+            mode=mode,
+        )
         return (
             "历史最佳实验基线:\n"
             f"- 实验ID: {exp_id}\n"
@@ -243,6 +255,13 @@ class HPOAgent(BaseLangChainAgent):
         from agent.tools.reward_tools import (
             ScoreExperiment,
         )
+        from agent.tools.hpo_tools import (
+            CheckTrialEarlyStopping,
+            GetHPOStudy,
+            PromoteHPOTrials,
+            RecordHPOTrialResult,
+            SuggestHPOTrials,
+        )
         
         # 直接返回已修饰的工具实例
         return [
@@ -260,14 +279,23 @@ class HPOAgent(BaseLangChainAgent):
             CompareHPOExperiments,
             RunEvaluation,
             GetHPOExperimentResults,
-            ListHPOExperiments
+            ListHPOExperiments,
+            SuggestHPOTrials,
+            RecordHPOTrialResult,
+            CheckTrialEarlyStopping,
+            PromoteHPOTrials,
+            GetHPOStudy,
         ]
     
     def optimize_hyperparameters(
         self,
         target_eer: float = 0.08,
         max_experiments: Optional[int] = None,
-        custom_objective: Optional[str] = None
+        custom_objective: Optional[str] = None,
+        search_space: Optional[Dict[str, Any]] = None,
+        budgets: Optional[List[Dict[str, Any]]] = None,
+        primary_metric: str = "eer",
+        metric_mode: str = "min",
     ) -> OptimizationResult:
         """
         优化超参数
@@ -292,18 +320,44 @@ class HPOAgent(BaseLangChainAgent):
             data_folder=data_folder,
             output_folder=str(resolved_output) if resolved_output else None,
             description="HPO agent optimization run",
+            task={
+                "type": self.memory_scope.task_type,
+                "dataset": data_folder,
+                "primary_metric": primary_metric,
+                "metric_mode": metric_mode,
+            },
+            model={
+                "family": self.model_family,
+                "implementation": self.implementation,
+                "config_path": self.config_path,
+            },
+            execution={"runner": self.runner, "output_folder": str(resolved_output) if resolved_output else None},
             extra_fields={
                 "extensions": {
                     "optimization": {
                         "target_eer": target_eer,
                         "max_experiments": max_experiments,
+                        "primary_metric": primary_metric,
+                        "metric_mode": metric_mode,
                     }
                 }
             },
         )
+        trial_limit = max_experiments or max(3, min(self.max_iterations, 9))
+        hpo_service = HPOService(tracker)
+        study = hpo_service.create_study(
+            experiment_id,
+            self._build_search_space(search_space),
+            [Objective(metric=primary_metric, mode=metric_mode)],
+            self._build_budgets(budgets),
+            strategy="successive_halving",
+            reduction_factor=3,
+            random_seed=int(config_data.get("seed", 0) or 0),
+            max_trials=trial_limit,
+        )
 
         # 构建优化目标
-        history_context = self._get_history_context(metric="eer")
+        history_context = self._get_history_context(metric=primary_metric, mode=metric_mode)
         memory_context = self._get_memory_context(max_chars=800)
 
         if custom_objective:
@@ -345,6 +399,24 @@ class HPOAgent(BaseLangChainAgent):
             print("=" * 80)
             print()
 
+        objective = self._build_study_objective(
+            custom_objective=custom_objective,
+            history_context=history_context,
+            memory_context=memory_context,
+            experiment_id=experiment_id,
+            study_id=study.study_id,
+            primary_metric=primary_metric,
+            metric_mode=metric_mode,
+            target_value=target_eer if primary_metric == "eer" else None,
+        )
+        objective += (
+            f"\n\nStructured HPO study_id={study.study_id}, experiment_id={experiment_id}.\n"
+            "Use SuggestHPOTrials before training candidates. Pass trial_id, parameters_json "
+            "and budget_json to TrainModel. Record every completed, stopped, or failed trial "
+            "with RecordHPOTrialResult. Check intermediate metrics with "
+            "CheckTrialEarlyStopping and promote candidates with PromoteHPOTrials. "
+            "Do not modify the primary config file for individual trial candidates.\n"
+        )
         self.agent_logger.append(f"objective={objective.strip()}")
         tracker.update_hpo_experiment(
             experiment_id=experiment_id,
@@ -352,6 +424,8 @@ class HPOAgent(BaseLangChainAgent):
             extensions={"optimization": {
                 "target_eer": target_eer,
                 "max_experiments": max_experiments,
+                "primary_metric": primary_metric,
+                "metric_mode": metric_mode,
                 "objective": objective,
             }},
         )
@@ -373,6 +447,15 @@ class HPOAgent(BaseLangChainAgent):
             
             # 分析结果
             best_config = self._extract_best_config(final_answer, intermediate_steps)
+            current_study = hpo_service.finish_study(
+                hpo_service.load_study(experiment_id),
+                "completed",
+                "agent_run_completed",
+            )
+            trials = hpo_service.list_trials(experiment_id)
+            if current_study.best_trial_id:
+                best_trial = hpo_service.load_trial(experiment_id, current_study.best_trial_id)
+                best_config = {**best_trial.parameters, **best_trial.metrics}
             
             # 生成总结
             summary = self._generate_summary(intermediate_steps, best_config)
@@ -386,6 +469,8 @@ class HPOAgent(BaseLangChainAgent):
                     "status": "success",
                     "duration_seconds": duration,
                     "target_eer": target_eer,
+                    "primary_metric": primary_metric,
+                    "metric_mode": metric_mode,
                     "objective": objective,
                     "best_config": best_config,
                     "execution_summary": summary,
@@ -402,6 +487,8 @@ class HPOAgent(BaseLangChainAgent):
                 best_config=best_config,
                 execution_summary=summary,
                 experiment_id=experiment_id,
+                study=current_study.to_dict(),
+                trials=[trial.to_dict() for trial in trials],
             )
 
             self._persist_memory(
@@ -419,12 +506,16 @@ class HPOAgent(BaseLangChainAgent):
                 duration=duration,
                 extensions={"optimization": {
                     "target_eer": target_eer,
+                    "primary_metric": primary_metric,
+                    "metric_mode": metric_mode,
                     "objective": objective,
                     "best_config": best_config,
                     "execution_summary": summary,
                     "final_answer": final_answer,
                     "total_steps": len(intermediate_steps),
                     "run_history": run_history,
+                    "study": optimization_result.study,
+                    "trials": optimization_result.trials,
                 }},
                 parameters=best_config,
             )
@@ -445,6 +536,14 @@ class HPOAgent(BaseLangChainAgent):
         
         except Exception as e:
             duration = (datetime.now() - run_started_at).total_seconds()
+            try:
+                hpo_service.finish_study(
+                    hpo_service.load_study(experiment_id),
+                    "failed",
+                    str(e),
+                )
+            except Exception:
+                pass
             record = tracker.get_experiment(experiment_id) or {}
             run_history = list(((record.get("extensions") or {}).get("optimization") or {}).get("run_history") or [])
             run_history.append(
@@ -498,6 +597,10 @@ class HPOAgent(BaseLangChainAgent):
                 target_eer=float(request.context.get("target_eer", 0.02)),
                 max_experiments=request.budget.get("max_experiments"),
                 custom_objective=request.objective,
+                search_space=request.context.get("search_space"),
+                budgets=request.context.get("budgets"),
+                primary_metric=request.context.get("primary_metric", "eer"),
+                metric_mode=request.context.get("metric_mode", "min"),
             )
             return AgentTaskResult(
                 status="success",
@@ -506,6 +609,13 @@ class HPOAgent(BaseLangChainAgent):
                     "execution_summary": result.execution_summary,
                     "final_answer": result.final_answer,
                     "total_steps": result.total_steps,
+                    "study": result.study,
+                    "trials": result.trials,
+                },
+                metrics={
+                    key: value
+                    for key, value in result.best_config.items()
+                    if key in {"eer", "accuracy", "loss", "min_dcf", "precision", "recall", "f1"}
                 },
                 recommendations=[{
                     "action": "review_result",
@@ -514,7 +624,6 @@ class HPOAgent(BaseLangChainAgent):
                 }],
                 experiment_ids={"hpo": result.experiment_id},
                 request_id=request.request_id,
-                runtime_result=result,
             )
         except Exception as exc:
             return AgentTaskResult(
@@ -524,6 +633,57 @@ class HPOAgent(BaseLangChainAgent):
                 request_id=request.request_id,
             )
     
+    @staticmethod
+    def _build_search_space(search_space: Optional[Dict[str, Any]]) -> SearchSpace:
+        if search_space:
+            return SearchSpace(
+                parameters=[
+                    SearchParameter(**item)
+                    for item in search_space.get("parameters") or []
+                ],
+                constraints=search_space.get("constraints") or [],
+            )
+        return SearchSpace(parameters=[
+            SearchParameter("lr", "float", low=1e-5, high=1e-2, scale="log"),
+            SearchParameter("batch_size", "categorical", choices=[16, 32, 64]),
+            SearchParameter("number_of_epochs", "int", low=5, high=30),
+        ])
+
+    @staticmethod
+    def _build_budgets(budgets: Optional[List[Dict[str, Any]]]) -> List[TrialBudget]:
+        if budgets:
+            return [TrialBudget(**item) for item in budgets]
+        return [
+            TrialBudget(stage="screening", epochs=3, data_fraction=0.25),
+            TrialBudget(stage="promotion", epochs=8, data_fraction=0.5),
+            TrialBudget(stage="confirmation", epochs=20, data_fraction=1.0),
+        ]
+
+    @staticmethod
+    def _build_study_objective(
+        *,
+        custom_objective: Optional[str],
+        history_context: str,
+        memory_context: str,
+        experiment_id: str,
+        study_id: str,
+        primary_metric: str,
+        metric_mode: str,
+        target_value: Optional[float],
+    ) -> str:
+        target_text = (
+            f"Target value: {target_value}."
+            if target_value is not None
+            else "No fixed target value was provided."
+        )
+        return (
+            "Manage a structured, model-agnostic hyperparameter optimization study.\n"
+            f"experiment_id={experiment_id}, study_id={study_id}.\n"
+            f"Primary metric: {primary_metric}; mode: {metric_mode}. {target_text}\n"
+            f"{history_context}\n{memory_context}\n"
+            f"Additional objective: {custom_objective or 'Improve the primary metric within the available budget.'}\n"
+        )
+
     def _extract_best_config(
         self,
         final_answer: str,
@@ -733,6 +893,10 @@ def create_hpo_agent(
     verbose: bool = True,
     config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
     experiments_dir: Optional[str] = None,
+    task_type: str = "speaker_verification",
+    model_family: str = "ecapa_tdnn",
+    implementation: str = "speechbrain",
+    runner: str = "speechbrain",
 ) -> HPOAgent:
     """
     创建 LangChain v1.0 智能体的便捷函数
@@ -753,4 +917,8 @@ def create_hpo_agent(
         verbose=verbose,
         config_path=config_path,
         experiments_dir=experiments_dir,
+        task_type=task_type,
+        model_family=model_family,
+        implementation=implementation,
+        runner=runner,
     )

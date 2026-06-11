@@ -1,39 +1,39 @@
-"""
-Tool-based orchestrator for speaker recognition optimization.
-
-The coordinator is a real LangChain tool-using agent. It can launch the
-specialized data-processing and HPO sub-agents, inspect orchestration history,
-and keep the top-level experiment record in the manage directory.
-"""
+"""Registry-driven coordinator for model optimization agents."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
 
-from agent.agents.communication import AgentTaskRequest, MessageService
 from agent.agents.base_agent import BaseLangChainAgent
-from agent.agents.data_processing_agent import create_data_processing_agent, DataProcessingResult
-from agent.agents.hpo_agent import create_hpo_agent, OptimizationResult
+from agent.agents.communication import AgentTaskRequest, MessageService
+from agent.agents.coordination import (
+    AgentRegistration,
+    AgentRegistry,
+    CompletionDecision,
+    CompletionPolicy,
+    TaskDispatcher,
+    TaskExecutionRecord,
+)
+from agent.core.adapters import get_task_adapter
 from agent.memory import EpisodeMemory, MemoryQuery, MemoryScope, MemoryService
 from agent.tools.experiment_history_tools import (
     CompareOrchestrationExperiments,
     GetOrchestrationExperimentResults,
     ListOrchestrationExperiments,
 )
-from agent.utils import ExperimentTracker, ConfigParser
+from agent.utils import ConfigParser, ExperimentTracker
 from agent.utils.logger import AgentLogger
 from agent.utils.path_tool import (
+    get_config_file,
     get_data_processing_experiments_dir,
     get_hpo_experiments_dir,
-    get_manage_experiments_dir,
-    get_agent_dir,
-    get_config_file,
     get_logs_dir,
+    get_manage_experiments_dir,
     resolve_config_path,
     resolve_config_value_path,
     resolve_data_path,
@@ -42,14 +42,20 @@ from agent.utils.path_tool import (
 
 @dataclass
 class OrchestrationResult:
+    """Serializable top-level result independent of specialized agent classes."""
+
     experiment_id: str
+    status: str
     rounds: int
-    data_processing: List[DataProcessingResult]
-    hpo: List[OptimizationResult]
+    completion: Dict[str, Any]
+    task_results: List[Dict[str, Any]]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 class CoordinatorAgent(BaseLangChainAgent):
-    """Tool-based top-level coordinator for the speaker recognition system."""
+    """Coordinate registered agents through one structured dispatch interface."""
 
     def __init__(
         self,
@@ -60,6 +66,12 @@ class CoordinatorAgent(BaseLangChainAgent):
         max_rounds: int = 3,
         verbose: bool = True,
         config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
+        task_type: str = "speaker_verification",
+        model_family: str = "ecapa_tdnn",
+        implementation: str = "speechbrain",
+        runner: str = "speechbrain",
+        registry: Optional[AgentRegistry] = None,
+        completion_policy: Optional[CompletionPolicy] = None,
     ) -> None:
         super().__init__(
             model_name=model_name,
@@ -70,29 +82,34 @@ class CoordinatorAgent(BaseLangChainAgent):
         self.config_path = str(resolve_config_path(config_path))
         self.data_iterations = data_iterations
         self.max_rounds = max_rounds
-
+        self.task_type = task_type
+        self.model_family = model_family
+        self.implementation = implementation
+        self.runner = runner
         self.manage_tracker = ExperimentTracker(get_manage_experiments_dir())
-        self.data_tracker = ExperimentTracker(get_data_processing_experiments_dir())
         self.agent_logger = AgentLogger(get_logs_dir() / "agent_manage.log")
         self.memory_service = MemoryService()
         self.memory_scope = MemoryScope(
             agent_type="coordinator",
-            task_type="speaker_verification",
+            task_type=self.task_type,
             model_family="multi_agent_optimization",
             tags=["orchestration", "workflow", "optimization"],
         )
+        self.registry = registry or self._build_default_registry()
+        self.completion_policy = completion_policy or CompletionPolicy(
+            required_agent_types={
+                item["agent_type"] for item in self.registry.describe()
+            }
+        )
 
         self._manage_experiment_id: Optional[str] = None
-        self._data_experiment_id: Optional[str] = None
         self._message_service: Optional[MessageService] = None
-        self._target_eer: float = 0.02
+        self._dispatcher: Optional[TaskDispatcher] = None
+        self._target_eer = 0.02
         self._custom_objective: Optional[str] = None
-        self._latest_data_summary: Optional[Dict[str, Any]] = None
-        self._latest_hpo_result: Optional[Dict[str, Any]] = None
-        self._decision_history: List[str] = []
-        self._data_results: List[DataProcessingResult] = []
-        self._hpo_results: List[OptimizationResult] = []
-        self._linked_experiments: Dict[str, Any] = {}
+        self._task_records: List[TaskExecutionRecord] = []
+        self._latest_results: Dict[str, Dict[str, Any]] = {}
+        self._linked_experiments: Dict[str, List[str]] = {}
         self._run_started_at: Optional[datetime] = None
 
         self.tools = self._load_tools()
@@ -103,37 +120,267 @@ class CoordinatorAgent(BaseLangChainAgent):
             middleware=self.agent_logger.build_middleware(),
         )
 
-    def _load_config(self) -> Dict[str, Any]:
-        parser = ConfigParser(self.config_path)
-        return parser.load_config(resolve_references=True)
+    def _build_default_registry(self) -> AgentRegistry:
+        """Register built-in agents; callers may inject a different registry."""
+        from agent.agents.data_processing_agent import create_data_processing_agent
+        from agent.agents.hpo_agent import create_hpo_agent
 
-    def _get_memory_context(self) -> str:
-        return self.memory_service.format_context(
-            MemoryQuery(
-                task_type=self.memory_scope.task_type,
-                dataset_key=self.memory_scope.dataset_key,
-                visibility="shared",
-                limit=5,
+        registry = AgentRegistry()
+        registry.register(AgentRegistration(
+            agent_type="data_processing_agent",
+            actions=("optimize_data_processing",),
+            description="Inspect, prepare, validate, and publish datasets.",
+            factory=lambda: create_data_processing_agent(
+                model_name=self.model_name,
+                temperature=self.temperature,
+                max_iterations=self.data_iterations,
+                verbose=self.verbose,
+                config_path=self.config_path,
+                experiments_dir=get_data_processing_experiments_dir(),
+                task_type=self.task_type,
+                model_family=self.model_family,
+                implementation=self.implementation,
+                runner=self.runner,
             ),
-            max_chars=1200,
+        ))
+        registry.register(AgentRegistration(
+            agent_type="hpo_agent",
+            actions=("optimize_hyperparameters",),
+            description="Plan and execute model-agnostic hyperparameter studies.",
+            factory=lambda: create_hpo_agent(
+                model_name=self.model_name,
+                temperature=self.temperature,
+                max_iterations=self.max_iterations,
+                verbose=self.verbose,
+                config_path=self.config_path,
+                experiments_dir=get_hpo_experiments_dir(),
+                task_type=self.task_type,
+                model_family=self.model_family,
+                implementation=self.implementation,
+                runner=self.runner,
+            ),
+        ))
+        return registry
+
+    def _reset_runtime_state(self) -> None:
+        self._manage_experiment_id = None
+        self._message_service = None
+        self._dispatcher = None
+        self._task_records = []
+        self._latest_results = {}
+        self._linked_experiments = {}
+        self._run_started_at = None
+
+    def _ensure_context(self) -> None:
+        if self._manage_experiment_id is not None:
+            return
+        config = ConfigParser(self.config_path).load_config(resolve_references=True)
+        data_folder = str(resolve_data_path(config.get("data_folder")))
+        output = resolve_config_value_path(config.get("output_folder"))
+        self.memory_scope.dataset_key = data_folder
+        task_adapter = get_task_adapter(self.task_type)
+        self._manage_experiment_id = self.manage_tracker.create_orchestration_experiment(
+            config_path=self.config_path,
+            data_folder=data_folder,
+            output_folder=str(output) if output else None,
+            description="registry-driven orchestrated run",
+            task={
+                "type": self.memory_scope.task_type,
+                "dataset": data_folder,
+                "primary_metric": task_adapter.primary_metric,
+                "metric_mode": task_adapter.metric_mode,
+            },
+            model={
+                "family": "multi_agent_optimization",
+                "implementation": "coordinator",
+                "config_path": self.config_path,
+            },
+            execution={"runner": "coordinator", "output_folder": str(output) if output else None},
+            extra_fields={
+                "extensions": {
+                    "orchestration": {
+                        "target_eer": self._target_eer,
+                        "custom_objective": self._custom_objective,
+                        "registered_agents": self.registry.describe(),
+                    }
+                }
+            },
+        )
+        self._linked_experiments = {"manage": [self._manage_experiment_id]}
+        self._message_service = MessageService(session_id=self._manage_experiment_id)
+        self._dispatcher = TaskDispatcher(self.registry, self._message_service)
+        self._sync_manage_record(status="running", last_action="initialized")
+
+    @staticmethod
+    def _parse_json(value: Optional[str], field_name: str) -> Dict[str, Any]:
+        if not value:
+            return {}
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{field_name} must contain a JSON object")
+        return parsed
+
+    def _request_experiment_ids(self) -> Dict[str, Any]:
+        return {
+            key: values[-1] if values else None
+            for key, values in self._linked_experiments.items()
+        }
+
+    def _merge_experiment_ids(self, experiment_ids: Dict[str, Any]) -> None:
+        for category, raw_ids in experiment_ids.items():
+            values = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+            target = self._linked_experiments.setdefault(category, [])
+            for experiment_id in values:
+                if experiment_id and experiment_id not in target:
+                    target.append(str(experiment_id))
+
+    def _dispatch(
+        self,
+        agent_type: str,
+        action: str,
+        objective: str,
+        context: Dict[str, Any],
+        budget: Dict[str, Any],
+    ) -> TaskExecutionRecord:
+        self._ensure_context()
+        if sum(record.agent_type == agent_type for record in self._task_records) >= self.max_rounds:
+            raise RuntimeError(f"max_rounds reached for agent '{agent_type}'")
+        assert self._dispatcher is not None
+        request = AgentTaskRequest(
+            action=action,
+            objective=objective,
+            context={
+                **context,
+                "config_path": self.config_path,
+                "previous_results": self._latest_results,
+            },
+            budget=budget,
+            experiment_ids=self._request_experiment_ids(),
+        )
+        record = self._dispatcher.dispatch(agent_type, request)
+        self._task_records.append(record)
+        self._latest_results[agent_type] = record.result
+        self._merge_experiment_ids(record.result.get("experiment_ids") or {})
+        self._sync_manage_record(
+            status="running",
+            last_action=f"{agent_type}:{action}:{record.status}",
+        )
+        return record
+
+    def _create_system_prompt(self) -> str:
+        return (
+            "You are the coordinator of an extensible model optimization system. "
+            "Use DispatchAgentTask for all specialized work. Select agents and actions "
+            "from ListRegisteredAgents, pass prior results through structured context, "
+            "and do not invent execution results. A run is only successful when its "
+            "completion policy is satisfied."
+        )
+
+    def _load_tools(self):
+        @tool
+        def ListRegisteredAgents() -> str:
+            """List available agent types, actions, and descriptions."""
+            return json.dumps(self.registry.describe(), ensure_ascii=False)
+
+        @tool
+        def DispatchAgentTask(
+            agent_type: str,
+            action: str,
+            objective: str,
+            context_json: Optional[str] = None,
+            budget_json: Optional[str] = None,
+        ) -> str:
+            """Dispatch one structured task to any registered specialized agent."""
+            try:
+                record = self._dispatch(
+                    agent_type=agent_type,
+                    action=action,
+                    objective=objective,
+                    context=self._parse_json(context_json, "context_json"),
+                    budget=self._parse_json(budget_json, "budget_json"),
+                )
+                return json.dumps(record.to_dict(), ensure_ascii=False, default=str)
+            except Exception as exc:
+                return json.dumps(
+                    {"status": "failed", "agent_type": agent_type, "action": action, "error": str(exc)},
+                    ensure_ascii=False,
+                )
+
+        @tool
+        def CheckCompletion() -> str:
+            """Evaluate the configured completion policy against dispatched tasks."""
+            return json.dumps(
+                self.completion_policy.evaluate(self._task_records).to_dict(),
+                ensure_ascii=False,
+            )
+
+        return [
+            ListRegisteredAgents,
+            DispatchAgentTask,
+            CheckCompletion,
+            CompareOrchestrationExperiments,
+            GetOrchestrationExperimentResults,
+            ListOrchestrationExperiments,
+        ]
+
+    def _completion_decision(self) -> CompletionDecision:
+        return self.completion_policy.evaluate(self._task_records)
+
+    def _sync_manage_record(
+        self,
+        status: Optional[str] = None,
+        last_action: Optional[str] = None,
+        final_answer: Optional[str] = None,
+        completion: Optional[CompletionDecision] = None,
+    ) -> None:
+        if self._manage_experiment_id is None:
+            return
+        task_results = [record.to_dict() for record in self._task_records]
+        messages = (
+            [message.to_dict() for message in self._message_service.history()]
+            if self._message_service else []
+        )
+        duration = None
+        if status in {"success", "failed", "cancelled"} and self._run_started_at:
+            duration = (datetime.now() - self._run_started_at).total_seconds()
+        state = {
+            "last_action": last_action,
+            "target_eer": self._target_eer,
+            "custom_objective": self._custom_objective,
+            "rounds": len(task_results),
+            "latest_results": self._latest_results,
+            "task_results": task_results,
+            "completion": completion.to_dict() if completion else None,
+            "final_answer": final_answer,
+        }
+        self.manage_tracker.update_orchestration_experiment(
+            experiment_id=self._manage_experiment_id,
+            status=status,
+            duration=duration,
+            linked_experiments=self._linked_experiments,
+            agent_messages=messages,
+            extensions={"orchestration": state},
+        )
+        self.memory_service.update_working_state(
+            self._manage_experiment_id,
+            {
+                "status": status or "running",
+                "current_stage": last_action,
+                "linked_experiments": self._linked_experiments,
+                "task_results": task_results,
+                "completion": completion.to_dict() if completion else None,
+            },
         )
 
     def _persist_episode(self, status: str, summary: str) -> None:
-        if self._manage_experiment_id is None:
+        if not self._manage_experiment_id:
             return
         try:
             self.memory_service.remember_episode(EpisodeMemory(
                 agent_type="coordinator",
                 objective=self._custom_objective or f"target_eer={self._target_eer}",
-                action={
-                    "decision_history": self._decision_history,
-                    "rounds": max(len(self._data_results), len(self._hpo_results)),
-                },
-                outcome={
-                    "latest_data_summary": self._latest_data_summary,
-                    "latest_hpo_result": self._latest_hpo_result,
-                    "linked_experiments": self._linked_experiments,
-                },
+                action={"task_results": [record.to_dict() for record in self._task_records]},
+                outcome={"linked_experiments": self._linked_experiments},
                 summary=summary,
                 experiment_ids=[self._manage_experiment_id],
                 scope=self.memory_scope,
@@ -143,303 +390,10 @@ class CoordinatorAgent(BaseLangChainAgent):
         except Exception as exc:
             self.agent_logger.append(f"memory_update_failed error={exc}")
 
-    def _reset_runtime_state(self) -> None:
-        self._manage_experiment_id = None
-        self._data_experiment_id = None
-        self._message_service = None
-        self._latest_data_summary = None
-        self._latest_hpo_result = None
-        self._decision_history = []
-        self._data_results = []
-        self._hpo_results = []
-        self._linked_experiments = {}
-        self._run_started_at = None
-
-    def _ensure_orchestration_context(self) -> None:
-        if self._manage_experiment_id is not None and self._data_experiment_id is not None:
-            return
-
-        config_data = self._load_config()
-        data_folder = str(resolve_data_path(config_data.get("data_folder")))
-        self.memory_scope.dataset_key = data_folder
-        output_folder = config_data.get("output_folder")
-        resolved_output = resolve_config_value_path(output_folder)
-
-        if self._manage_experiment_id is None:
-            self._manage_experiment_id = self.manage_tracker.create_orchestration_experiment(
-                config_path=self.config_path,
-                data_folder=data_folder,
-                output_folder=str(resolved_output) if resolved_output else None,
-                description="orchestrated run",
-                extra_fields={
-                    "extensions": {
-                        "orchestration": {
-                            "target_eer": self._target_eer,
-                            "custom_objective": self._custom_objective,
-                        }
-                    }
-                },
-            )
-
-        if self._data_experiment_id is None:
-            self._data_experiment_id = self.data_tracker.create_data_processing_experiment(
-                config_path=self.config_path,
-                data_folder=data_folder,
-                output_folder=str(resolved_output) if resolved_output else None,
-                description="data processing run",
-            )
-
-        if self._message_service is None and self._manage_experiment_id is not None:
-            self._message_service = MessageService(session_id=self._manage_experiment_id)
-
-        self._linked_experiments = {
-            "manage": self._manage_experiment_id,
-            "data_processing": self._data_experiment_id,
-            "hpo": [],
-        }
-        self.manage_tracker.update_orchestration_experiment(
-            experiment_id=self._manage_experiment_id,
-            status="running",
-            linked_experiments=self._linked_experiments,
-        )
-        self.memory_service.update_working_state(
-            self._manage_experiment_id,
-            {
-                "status": "running",
-                "current_stage": "initialized",
-                "target_eer": self._target_eer,
-                "custom_objective": self._custom_objective,
-                "linked_experiments": self._linked_experiments,
-                "rounds": 0,
-            },
-        )
-
-    def _create_system_prompt(self) -> str:
-        return f"""你是声纹识别系统的统筹智能体。
-
-            你的任务是协调两个专门子智能体：
-            - 数据处理智能体：负责数据准备、划分和质量优化
-            - 超参数智能体：负责训练、评估和超参数优化
-
-            你必须通过工具完成工作，不要直接编造结果。
-
-            可用工具策略：
-            1. 先查看统筹记录，了解当前状态
-            2. 根据需要调用数据处理工具，获得最新数据摘要
-            3. 再调用 HPO 工具，结合数据摘要进行训练/评估优化
-            4. 你可以在两者之间反复切换，但不要超过 {self.max_rounds} 轮核心迭代
-            5. 完成后给出最终总结，必须包含 manage / dp / hpo 的实验 ID
-
-            当前目标：将声纹识别系统优化到目标 EER 以下，并保持数据处理与训练链路可追踪。
-            请只通过工具推进，不要跳过实验记录。"""
-
-    def _load_tools(self):
-        @tool
-        def LaunchDataProcessingRound(
-            target_goal: Optional[str] = None,
-            custom_objective: Optional[str] = None,
-            hpo_feedback_json: Optional[str] = None,
-        ) -> str:
-            """启动一轮数据处理智能体，并同步写入统筹记录。"""
-            self._ensure_orchestration_context()
-
-            feedback: Optional[Dict[str, Any]] = None
-            if hpo_feedback_json:
-                try:
-                    feedback = json.loads(hpo_feedback_json)
-                except json.JSONDecodeError:
-                    feedback = {"raw": hpo_feedback_json}
-
-            data_agent = create_data_processing_agent(
-                model_name=self.model_name,
-                temperature=self.temperature,
-                max_iterations=self.data_iterations,
-                verbose=self.verbose,
-                config_path=self.config_path,
-                experiments_dir=get_data_processing_experiments_dir(),
-            )
-            request = AgentTaskRequest(
-                action="optimize_data_processing",
-                objective=custom_objective or target_goal or "提升数据质量并保持训练/验证分布稳定",
-                context={
-                    "target_goal": target_goal,
-                    "hpo_feedback": feedback,
-                    "config_path": self.config_path,
-                },
-                budget={"max_runs": 1, "max_iterations": self.data_iterations},
-                experiment_ids={
-                    "manage": self._manage_experiment_id,
-                    "data_processing": self._data_experiment_id,
-                },
-            )
-            request_message = self._message_service.send_task(
-                "coordinator", "data_processing_agent", request
-            )
-            task_result = data_agent.execute_task(request)
-            self._message_service.send_result(
-                "data_processing_agent", "coordinator", request_message, task_result
-            )
-            if task_result.status == "failed" or task_result.runtime_result is None:
-                self._sync_manage_record(status="running", last_action="data_processing_failed")
-                return task_result.to_json()
-            result = task_result.runtime_result
-
-            self._data_results.append(result)
-            self._latest_data_summary = result.data_summary
-            self._decision_history.append("data_processing")
-            self._linked_experiments["data_processing"] = result.experiment_id
-
-            self._sync_manage_record(status="running", last_action="data_processing")
-            self.agent_logger.append(
-                "data_round_complete "
-                f"manage_experiment_id={self._manage_experiment_id} "
-                f"data_experiment_id={self._data_experiment_id}"
-            )
-            return task_result.to_json()
-
-        @tool
-        def LaunchHPORound(
-            target_eer: float = 0.02,
-            custom_objective: Optional[str] = None,
-        ) -> str:
-            """启动一轮超参数智能体，并同步写入统筹记录。"""
-            self._ensure_orchestration_context()
-
-            data_context = json.dumps(self._latest_data_summary or {}, ensure_ascii=False)
-            objective_parts = [
-                "请先参考最新数据处理智能体的摘要，再进行超参数优化。",
-                f"管理实验 ID: {self._manage_experiment_id}",
-                f"数据处理实验 ID: {self._data_experiment_id}",
-                f"数据处理摘要: {data_context}",
-            ]
-            if custom_objective:
-                objective_parts.append(custom_objective)
-
-            hpo_agent = create_hpo_agent(
-                model_name=self.model_name,
-                temperature=self.temperature,
-                max_iterations=self.max_iterations,
-                verbose=self.verbose,
-                config_path=self.config_path,
-                experiments_dir=get_hpo_experiments_dir(),
-            )
-            request = AgentTaskRequest(
-                action="optimize_hyperparameters",
-                objective="\n".join(objective_parts),
-                context={
-                    "target_eer": target_eer,
-                    "data_summary": self._latest_data_summary,
-                    "config_path": self.config_path,
-                },
-                budget={"max_iterations": self.max_iterations},
-                experiment_ids={
-                    "manage": self._manage_experiment_id,
-                    "data_processing": self._data_experiment_id,
-                },
-            )
-            request_message = self._message_service.send_task(
-                "coordinator", "hpo_agent", request
-            )
-            task_result = hpo_agent.execute_task(request)
-            self._message_service.send_result(
-                "hpo_agent", "coordinator", request_message, task_result
-            )
-            if task_result.status == "failed" or task_result.runtime_result is None:
-                self._sync_manage_record(status="running", last_action="hpo_failed")
-                return task_result.to_json()
-            hpo_result = task_result.runtime_result
-
-            self._hpo_results.append(hpo_result)
-            self._latest_hpo_result = {
-                "experiment_id": hpo_result.experiment_id,
-                "best_config": hpo_result.best_config,
-                "execution_summary": hpo_result.execution_summary,
-                "final_answer": hpo_result.final_answer,
-            }
-            self._decision_history.append("hpo")
-
-            hpo_experiment_id = hpo_result.experiment_id
-            hpo_ids = self._linked_experiments.setdefault("hpo", [])
-            if hpo_experiment_id and hpo_experiment_id not in hpo_ids:
-                hpo_ids.append(hpo_experiment_id)
-
-            self._sync_manage_record(status="running", last_action="hpo")
-            self.agent_logger.append(
-                "hpo_round_complete "
-                f"manage_experiment_id={self._manage_experiment_id} "
-                f"data_experiment_id={self._data_experiment_id}"
-            )
-            return task_result.to_json()
-
-        return [
-            LaunchDataProcessingRound,
-            LaunchHPORound,
-            CompareOrchestrationExperiments,
-            GetOrchestrationExperimentResults,
-            ListOrchestrationExperiments,
-        ]
-
-    def _sync_manage_record(
-        self,
-        status: Optional[str] = None,
-        last_action: Optional[str] = None,
-        final_answer: Optional[str] = None,
-    ) -> None:
-        if self._manage_experiment_id is None:
-            return
-
-        record = self.manage_tracker.get_experiment(self._manage_experiment_id) or {}
-        result_summary = dict((record.get("extensions") or {}).get("result_summary") or {})
-        if final_answer is not None:
-            result_summary["final_answer"] = final_answer
-        result_summary["linked_experiments"] = self._linked_experiments
-        if self._message_service is not None:
-            result_summary["agent_messages"] = [
-                msg.to_dict() for msg in self._message_service.history()
-            ]
-
-        orchestration_state = {
-            "manage_experiment_id": self._manage_experiment_id,
-            "data_experiment_id": self._data_experiment_id,
-            "decision_history": self._decision_history,
-            "rounds": max(len(self._data_results), len(self._hpo_results)),
-            "last_action": last_action,
-            "target_eer": self._target_eer,
-            "custom_objective": self._custom_objective,
-            "latest_data_summary": self._latest_data_summary,
-            "latest_hpo_result": self._latest_hpo_result,
-            "final_answer": final_answer,
-            "data_processing_rounds": len(self._data_results),
-            "hpo_rounds": len(self._hpo_results),
-        }
-        duration = None
-        if status in {"success", "failed", "cancelled"} and self._run_started_at is not None:
-            duration = (datetime.now() - self._run_started_at).total_seconds()
-
-        self.manage_tracker.update_orchestration_experiment(
-            experiment_id=self._manage_experiment_id,
-            status=status,
-            duration=duration,
-            extensions={
-                "result_summary": result_summary,
-                "orchestration": orchestration_state,
-            },
-            linked_experiments=self._linked_experiments,
-            agent_messages=result_summary.get("agent_messages", []),
-        )
-        self.memory_service.update_working_state(
-            self._manage_experiment_id,
-            {
-                "status": status or "running",
-                "current_stage": last_action,
-                "target_eer": self._target_eer,
-                "custom_objective": self._custom_objective,
-                "decision_history": self._decision_history,
-                "latest_data_summary": self._latest_data_summary,
-                "latest_hpo_result": self._latest_hpo_result,
-                "linked_experiments": self._linked_experiments,
-                "rounds": orchestration_state["rounds"],
-            },
+    def _memory_context(self) -> str:
+        return self.memory_service.format_context(
+            MemoryQuery(task_type=self.memory_scope.task_type, visibility="shared", limit=5),
+            max_chars=1200,
         )
 
     def run(
@@ -451,58 +405,45 @@ class CoordinatorAgent(BaseLangChainAgent):
         self._run_started_at = datetime.now()
         self._target_eer = target_eer
         self._custom_objective = custom_objective
-        self._ensure_orchestration_context()
+        self._ensure_context()
 
-        objective_parts = [
-            "你现在是声纹识别系统的统筹智能体，必须通过工具完成优化闭环。",
-            f"目标 EER: {target_eer}",
-            f"管理实验 ID: {self._manage_experiment_id}",
-            f"数据处理实验 ID: {self._data_experiment_id}",
-            "建议先调用数据处理工具，再根据结果调用 HPO 工具。",
-            f"最多进行 {self.max_rounds} 轮核心迭代。",
-        ]
-        if custom_objective:
-            objective_parts.append(custom_objective)
-        objective_parts.append(self._get_memory_context())
-
-        objective = "\n".join(objective_parts)
-
-        if self.verbose:
-            print("=" * 80)
-            print("🧩 Tool-based coordinated pipeline start")
-            print("=" * 80)
-            print(f"Manage Experiment ID: {self._manage_experiment_id}")
-            print(f"Data Experiment ID: {self._data_experiment_id}")
-            print("=" * 80)
-
-        self.agent_logger.append(f"objective={objective.strip()}")
-
+        objective = (
+            "Coordinate the registered agents to improve the model. "
+            f"Target EER: {target_eer}. Maximum rounds per agent: {self.max_rounds}. "
+            f"Additional objective: {custom_objective or 'none'}. "
+            "List registered agents, dispatch the required work, then check completion.\n"
+            f"{self._memory_context()}"
+        )
+        self.agent_logger.append(f"objective={objective}")
         try:
-            result = self._invoke(objective)
-            messages_result = result.get("messages", [])
-            final_answer = ""
-            if messages_result:
-                final_answer = self._extract_message_content(messages_result[-1])
-
-            self._sync_manage_record(status="success", last_action="complete", final_answer=final_answer)
-            self._persist_episode("success", final_answer)
-            self.agent_logger.append("agent_run_end success")
-
-            if self.verbose:
-                print("\n" + "=" * 80)
-                print("✅ Coordinated pipeline end")
-                print("=" * 80)
-
+            response = self._invoke(objective)
+            messages = response.get("messages", [])
+            final_answer = self._extract_message_content(messages[-1]) if messages else ""
+            completion = self._completion_decision()
+            tracker_status = "success" if completion.complete else "failed"
+            self._sync_manage_record(
+                status=tracker_status,
+                last_action="complete" if completion.complete else "completion_rejected",
+                final_answer=final_answer,
+                completion=completion,
+            )
+            self._persist_episode(tracker_status, final_answer or "; ".join(completion.reasons))
             return OrchestrationResult(
                 experiment_id=self._manage_experiment_id or "",
-                rounds=len(self._hpo_results),
-                data_processing=self._data_results,
-                hpo=self._hpo_results,
+                status=completion.status,
+                rounds=len(self._task_records),
+                completion=completion.to_dict(),
+                task_results=[record.to_dict() for record in self._task_records],
             )
         except Exception as exc:
-            self._sync_manage_record(status="failed", last_action="error", final_answer=str(exc))
+            completion = CompletionDecision(False, "failed", [str(exc)])
+            self._sync_manage_record(
+                status="failed",
+                last_action="error",
+                final_answer=str(exc),
+                completion=completion,
+            )
             self._persist_episode("failed", str(exc))
-            self.agent_logger.append(f"agent_run_end error={exc}")
             raise
 
 

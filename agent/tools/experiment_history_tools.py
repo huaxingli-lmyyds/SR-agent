@@ -23,6 +23,21 @@ def _metric(record: Dict[str, Any], name: str) -> Optional[Any]:
     return None
 
 
+def _field(record: Dict[str, Any], name: str) -> Optional[Any]:
+    metric_value = _metric(record, name)
+    if metric_value is not None:
+        return metric_value
+    current: Any = record
+    for part in name.split("."):
+        if not isinstance(current, dict) or part not in current:
+            current = None
+            break
+        current = current[part]
+    if current is not None:
+        return current
+    return ((record.get("extensions") or {}).get("orchestration") or {}).get(name)
+
+
 def _summary(record: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "experiment_id": record.get("experiment_id"),
@@ -49,21 +64,43 @@ def _record(tracker: ExperimentTracker, experiment_id: Optional[str]) -> Optiona
     return recent[0] if recent else None
 
 
-def _compare(tracker: ExperimentTracker, ids: Optional[List[str]], metric: str) -> str:
+def _compare(
+    tracker: ExperimentTracker,
+    ids: Optional[List[str]],
+    metric: str,
+    mode: Optional[str] = None,
+) -> str:
     records = (
         [tracker.get_experiment(item) for item in ids]
         if ids else tracker.list_experiments(limit=5)
     )
     values = {
-        record["experiment_id"]: _metric(record, metric)
-        for record in records if record and _metric(record, metric) is not None
+        record["experiment_id"]: _field(record, metric)
+        for record in records if record and _field(record, metric) is not None
     }
-    return json.dumps({"metric": metric, "values": values}, ensure_ascii=False, default=str)
+    numeric = {key: value for key, value in values.items() if isinstance(value, (int, float))}
+    selected_mode = mode or _metric_mode(records, metric)
+    best = None
+    if numeric:
+        best = (max if selected_mode == "max" else min)(numeric, key=numeric.get)
+    return json.dumps(
+        {"metric": metric, "mode": selected_mode, "values": values, "best_experiment_id": best},
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _metric_mode(records: List[Optional[Dict[str, Any]]], metric: str) -> str:
+    for record in records:
+        task = (record or {}).get("task") or {}
+        if task.get("primary_metric") == metric and task.get("metric_mode") in {"min", "max"}:
+            return task["metric_mode"]
+    return "max" if metric.lower() in {"accuracy", "precision", "recall", "f1", "auc", "map", "reward"} else "min"
 
 
 @tool
-def CompareHPOExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "eer") -> str:
-    return _compare(ExperimentTracker(get_hpo_experiments_dir()), experiment_ids, metric)
+def CompareHPOExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "eer", mode: Optional[str] = None) -> str:
+    return _compare(ExperimentTracker(get_hpo_experiments_dir()), experiment_ids, metric, mode)
 
 
 @tool
@@ -79,8 +116,8 @@ def ListHPOExperiments(n: int = 10) -> str:
 
 
 @tool
-def CompareDataProcessingExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "train") -> str:
-    return _compare(ExperimentTracker(get_data_processing_experiments_dir()), experiment_ids, metric)
+def CompareDataProcessingExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "error_count", mode: Optional[str] = None) -> str:
+    return _compare(ExperimentTracker(get_data_processing_experiments_dir()), experiment_ids, metric, mode)
 
 
 @tool
@@ -96,7 +133,7 @@ def ListDataProcessingExperiments(n: int = 10) -> str:
 
 
 @tool
-def CompareOrchestrationExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "rounds") -> str:
+def CompareOrchestrationExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "rounds", mode: Optional[str] = None) -> str:
     tracker = ExperimentTracker(get_manage_experiments_dir())
     if metric == "messages":
         records = [tracker.get_experiment(item) for item in experiment_ids] if experiment_ids else tracker.list_experiments(limit=5)
@@ -104,7 +141,7 @@ def CompareOrchestrationExperiments(experiment_ids: Optional[List[str]] = None, 
             record["experiment_id"]: len(record.get("agent_messages") or [])
             for record in records if record
         }, ensure_ascii=False)
-    return _compare(tracker, experiment_ids, metric)
+    return _compare(tracker, experiment_ids, metric, mode)
 
 
 @tool

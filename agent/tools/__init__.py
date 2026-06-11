@@ -30,6 +30,13 @@ from .evaluation_tools import (
 from .data_processing_tools import (
     PrepareVoxCelebData
 )
+from .dataset_tools import (
+    InspectDataset,
+    BuildDataProcessingPlan,
+    ExecuteDataProcessingPlan,
+    PublishDatasetVersion,
+    ListDataProcessors,
+)
 
 from .training_diagnostics_tools import (
     AnalyzeTrainingCurves,
@@ -38,6 +45,14 @@ from .training_diagnostics_tools import (
 
 from .reward_tools import (
     ScoreExperiment,
+)
+from .hpo_tools import (
+    CreateHPOStudy,
+    SuggestHPOTrials,
+    RecordHPOTrialResult,
+    CheckTrialEarlyStopping,
+    PromoteHPOTrials,
+    GetHPOStudy,
 )
 
 __all__ = [
@@ -63,6 +78,11 @@ __all__ = [
 
     # data_processing_tools
     'PrepareVoxCelebData',
+    'InspectDataset',
+    'BuildDataProcessingPlan',
+    'ExecuteDataProcessingPlan',
+    'PublishDatasetVersion',
+    'ListDataProcessors',
 
     # training_diagnostics_tools
     'AnalyzeTrainingCurves',
@@ -70,4 +90,12 @@ __all__ = [
 
     # reward_tools
     'ScoreExperiment',
+
+    # hpo_tools
+    'CreateHPOStudy',
+    'SuggestHPOTrials',
+    'RecordHPOTrialResult',
+    'CheckTrialEarlyStopping',
+    'PromoteHPOTrials',
+    'GetHPOStudy',
 ]

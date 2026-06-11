@@ -33,6 +33,9 @@ class DataProcessingResult:
     execution_summary: str
     data_summary: Dict[str, Any]
     experiment_id: str
+    dataset_profile: Optional[Dict[str, Any]] = None
+    processing_plan: Optional[Dict[str, Any]] = None
+    dataset_version: Optional[Dict[str, Any]] = None
 
 
 class DataProcessingAgent(BaseLangChainAgent):
@@ -46,6 +49,10 @@ class DataProcessingAgent(BaseLangChainAgent):
         verbose: bool = True,
         config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
         experiments_dir: Optional[Union[str, Path]] = None,
+        task_type: str = "speaker_verification",
+        model_family: str = "ecapa_tdnn",
+        implementation: str = "speechbrain",
+        runner: str = "speechbrain",
     ):
         """
         初始化数据处理智能体
@@ -65,13 +72,17 @@ class DataProcessingAgent(BaseLangChainAgent):
         )
         self.config_path = str(resolve_config_path(config_path))
         self.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else get_data_processing_experiments_dir()
+        self.task_type = task_type
+        self.model_family = model_family
+        self.implementation = implementation
+        self.runner = runner
         self.tracker = ExperimentTracker(self.experiments_dir)
         self.agent_logger = AgentLogger(get_logs_dir() / "agent_DP.log")
         self.memory_service = MemoryService()
         self.memory_scope = MemoryScope(
             agent_type="data_processing",
-            task_type="speaker_verification",
-            model_family=Path(config_path).stem,
+            task_type=self.task_type,
+            model_family=self.model_family,
             tags=["data_processing", "data_quality", "data_preparation"],
         )
 
@@ -145,6 +156,13 @@ class DataProcessingAgent(BaseLangChainAgent):
             ListDataProcessingExperiments,
         )
         from agent.tools.data_processing_tools import PrepareVoxCelebData
+        from agent.tools.dataset_tools import (
+            BuildDataProcessingPlan,
+            ExecuteDataProcessingPlan,
+            InspectDataset,
+            ListDataProcessors,
+            PublishDatasetVersion,
+        )
 
         return [
             ReadConfig,
@@ -155,6 +173,11 @@ class DataProcessingAgent(BaseLangChainAgent):
             CompareDataProcessingExperiments,
             GetDataProcessingExperimentResults,
             ListDataProcessingExperiments,
+            ListDataProcessors,
+            InspectDataset,
+            BuildDataProcessingPlan,
+            ExecuteDataProcessingPlan,
+            PublishDatasetVersion,
             PrepareVoxCelebData,
         ]
 
@@ -185,16 +208,18 @@ class DataProcessingAgent(BaseLangChainAgent):
             objective = custom_objective
         else:
             objective = f"""
-        优化 VoxCeleb 数据准备流程以提升数据质量。
+        分析并优化数据集处理流程以提升数据质量。
 
         目标：
         - {target_goal}
-        - 合理设置 split_ratio 与 sentence_len
-        - 输出最佳数据处理配置总结
+        - 首先使用 InspectDataset 生成数据质量画像
+        - 根据画像使用 BuildDataProcessingPlan 生成可审计处理计划
+        - 使用注册的数据处理器执行计划并验证处理结果
+        - 只有验证成功后才使用 PublishDatasetVersion 发布数据版本
+        - 如果当前数据为 VoxCeleb，可使用 PrepareVoxCelebData 执行具体准备流程
 
-        请开始优化，使用可用工具完成准备与分析，并在最后提供最佳配置。
-        规则：当 PrepareVoxCelebData 返回成功后，必须立即停止继续调用任何工具，直接输出 Final Answer。
-        规则：根据传入信息进行分析，最多只允许一轮 ReadConfig/ListConfigParameters/UpdateConfig 组合和一次 PrepareVoxCelebData 调用，不要循环重复执行。
+        数据集路径：{data_folder}
+        请先分析、再计划、再执行、最后验证和发布。不要覆盖原始数据。
         """
 
         if hpo_feedback:
@@ -212,11 +237,18 @@ class DataProcessingAgent(BaseLangChainAgent):
                 data_folder=data_folder,
                 output_folder=str(resolved_output) if resolved_output else None,
                 description="data processing run",
+                task={"type": self.memory_scope.task_type, "dataset": data_folder},
+                model={
+                    "family": self.model_family,
+                    "implementation": self.implementation,
+                    "config_path": self.config_path,
+                },
+                execution={"runner": self.runner, "output_folder": str(resolved_output) if resolved_output else None},
             )
 
         objective += (
             f"\n\n本轮数据处理实验 ID: {experiment_id}。"
-            f"调用 PrepareVoxCelebData 时必须传入 experiment_id={experiment_id}。\n"
+            f"调用所有数据处理工具时必须传入 experiment_id={experiment_id}。\n"
         )
 
         tracker.update_data_processing_experiment(
@@ -257,24 +289,23 @@ class DataProcessingAgent(BaseLangChainAgent):
             current_record = tracker.get_experiment(experiment_id) or {}
             if current_record.get("status") == "failed":
                 raise RuntimeError(current_record.get("error") or "data processing tool failed")
-            prepared_data = (current_record.get("extensions") or {}).get("data_processing") or {}
-            data_summary["prepared_data"] = {
-                key: prepared_data.get(key)
-                for key in (
-                    "data_folder",
-                    "save_folder",
-                    "verification_file",
-                    "split_ratio",
-                    "sentence_len",
-                    "splits",
-                    "skip_prep",
-                    "random_segment",
-                    "split_speaker",
-                    "stats",
-                    "csv_files",
-                    "prepare_status",
-                )
+            preparation = (current_record.get("extensions") or {}).get("data_preparation") or {}
+            preparation_parameters = current_record.get("parameters") or {}
+            preparation_stats = (current_record.get("metrics") or {}).get("summary") or {}
+            preparation_manifests = {
+                artifact.get("name"): artifact.get("path")
+                for artifact in current_record.get("artifacts") or []
+                if artifact.get("type") == "manifest"
             }
+            lifecycle = (current_record.get("extensions") or {}).get("data_lifecycle") or {}
+            data_summary["prepared_data"] = {
+                **preparation_parameters,
+                "verification_file": preparation.get("verification_file"),
+                "stats": preparation_stats,
+                "manifest_files": preparation_manifests,
+                "prepare_status": preparation.get("prepare_status"),
+            }
+            data_summary["data_lifecycle"] = lifecycle
             duration = (datetime.now() - run_started_at).total_seconds()
             record = current_record
             run_history = list(((record.get("extensions") or {}).get("data_processing") or {}).get("run_history") or [])
@@ -319,6 +350,9 @@ class DataProcessingAgent(BaseLangChainAgent):
                 execution_summary=summary,
                 data_summary=data_summary,
                 experiment_id=experiment_id,
+                dataset_profile=lifecycle.get("profile_before"),
+                processing_plan=lifecycle.get("plan"),
+                dataset_version=lifecycle.get("published_version"),
             )
 
             if self.verbose:
@@ -406,10 +440,23 @@ class DataProcessingAgent(BaseLangChainAgent):
                 summary={
                     "best_config": result.best_config,
                     "data_summary": result.data_summary,
+                    "dataset_profile": result.dataset_profile,
+                    "processing_plan": result.processing_plan,
+                    "dataset_version": result.dataset_version,
                     "execution_summary": result.execution_summary,
                     "final_answer": result.final_answer,
                     "total_steps": result.total_steps,
                 },
+                metrics={
+                    "data_quality": result.data_summary.get("quality_metrics", {}),
+                },
+                artifacts=[
+                    {
+                        "type": "dataset_version",
+                        "name": "published_dataset",
+                        "metadata": result.dataset_version,
+                    }
+                ] if result.dataset_version else [],
                 recommendations=[{
                     "action": "run_hpo",
                     "reason": "data processing round completed",
@@ -417,7 +464,6 @@ class DataProcessingAgent(BaseLangChainAgent):
                 }],
                 experiment_ids={"data_processing": result.experiment_id},
                 request_id=request.request_id,
-                runtime_result=result,
             )
         except Exception as exc:
             return AgentTaskResult(
@@ -608,6 +654,10 @@ def create_data_processing_agent(
     verbose: bool = True,
     config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
     experiments_dir: Optional[Union[str, Path]] = None,
+    task_type: str = "speaker_verification",
+    model_family: str = "ecapa_tdnn",
+    implementation: str = "speechbrain",
+    runner: str = "speechbrain",
 ) -> DataProcessingAgent:
     """
     创建数据处理智能体的便捷函数
@@ -628,4 +678,8 @@ def create_data_processing_agent(
         verbose=verbose,
         config_path=config_path,
         experiments_dir=experiments_dir,
+        task_type=task_type,
+        model_family=model_family,
+        implementation=implementation,
+        runner=runner,
     )

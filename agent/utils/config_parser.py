@@ -333,20 +333,25 @@ class ConfigParser:
             "info": []
         }
         
-        # 检查必需字段
-        required_fields = {
+        if not isinstance(config, dict) or not config:
+            return {
+                "valid": False,
+                "errors": ["配置必须是非空字典"],
+                "warnings": [],
+                "info": [],
+            }
+
+        # 只检查存在字段的通用类型；模型必需字段由 ModelAdapter 校验。
+        optional_fields = {
             'lr': (int, float),
             'batch_size': int,
             'number_of_epochs': int,
-            'embedding_model': dict,
-            'classifier': dict,
+            'data_folder': str,
+            'output_folder': str,
         }
         
-        for field, expected_type in required_fields.items():
-            if field not in config:
-                result["errors"].append(f"缺少必需字段: {field}")
-                result["valid"] = False
-            elif not isinstance(config[field], expected_type):
+        for field, expected_type in optional_fields.items():
+            if field in config and not isinstance(config[field], expected_type):
                 if isinstance(expected_type, tuple):
                     expected_type_name = " 或 ".join(t.__name__ for t in expected_type)
                 else:
@@ -372,26 +377,6 @@ class ConfigParser:
                         result["warnings"].append(
                             f"{name} {value} 超出推荐范围 [{min_val}, {max_val}]"
                         )
-        
-        # 检查模型结构
-        if 'embedding_model' in config and isinstance(config['embedding_model'], dict):
-            emb_fields = ['channels', 'kernel_sizes', 'lin_neurons']
-            for field in emb_fields:
-                if field not in config['embedding_model']:
-                    result["warnings"].append(
-                        f"embedding_model 中缺少字段: {field}"
-                    )
-        
-        # 检查数据类型一致性
-        if 'embedding_model' in config and isinstance(config['embedding_model'], dict):
-            list_fields = ['channels', 'kernel_sizes', 'dilations', 'groups']
-            for field in list_fields:
-                if field in config['embedding_model']:
-                    if not isinstance(config['embedding_model'][field], list):
-                        result["errors"].append(
-                            f"embedding_model.{field} 应该是列表类型"
-                        )
-                        result["valid"] = False
         
         return result
     

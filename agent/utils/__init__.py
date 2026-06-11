@@ -84,6 +84,7 @@ from .metrics import (
 
 from .reward import (
     compute_reward,
+    compute_objective_reward,
 )
 
 __all__ = [
@@ -158,4 +159,5 @@ __all__ = [
     'compute_metrics_from_scores',
     'compare_experiments',
     'compute_reward',
+    'compute_objective_reward',
 ]

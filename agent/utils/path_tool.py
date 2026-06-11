@@ -461,7 +461,7 @@ def get_file_size(file_path: Union[str, Path]) -> int:
     return -1
 
 
-def get_file_mtime(file_path: Union[str, Path]) -> datetime:
+def get_file_mtime(file_path: Union[str, Path]) -> Optional[datetime]:
     """
     获取文件最后修改时间
     
@@ -607,6 +607,8 @@ def join_paths(*paths: Union[str, Path]) -> Path:
     Returns:
         Path: 连接后的路径
     """
+    if not paths:
+        raise ValueError("at least one path is required")
     result = Path(paths[0])
     for path in paths[1:]:
         result = result / Path(path)
@@ -744,6 +746,7 @@ def copy_file(src_path: Union[str, Path],
     import shutil
     if dst.is_dir():
         dst = dst / src.name
+    dst.parent.mkdir(parents=True, exist_ok=True)
     
     shutil.copy2(src, dst)
     return dst
@@ -869,6 +872,8 @@ def cleanup_old_backups(directory: Union[str, Path],
     Returns:
         int: 删除的文件数量
     """
+    if keep_last_n < 0:
+        raise ValueError("keep_last_n must be non-negative")
     dir_path = Path(directory)
     if not dir_path.is_dir():
         return 0
