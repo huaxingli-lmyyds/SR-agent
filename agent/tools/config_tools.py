@@ -14,10 +14,9 @@ from threading import Lock
 # 导入 utils 模块
 from agent.utils import (
     ConfigParser,
-    get_config_file,
     backup_file,
-    ensure_dir,
-    get_experiments_dir,
+    get_experiment_configs_dir,
+    resolve_config_path,
     yaml_to_dict,
     format_nested_dict
 )
@@ -25,8 +24,6 @@ from agent.utils import (
 # 全局配置路径
 DEFAULT_CONFIG_NAME = "train_ecapa_tdnn.yaml"
 CONFIG_ENV_VAR = "SR_AGENT_CONFIG_PATH"
-CONFIG_PATH = str(get_config_file(DEFAULT_CONFIG_NAME))
-
 DATA_PROCESSING_KEYS = [
     "data_folder",
     "split_ratio",
@@ -77,7 +74,7 @@ _PARSER_CACHE_LOCK = Lock()
 
 def _get_parser(config_path: Optional[Union[str, Path]] = None) -> ConfigParser:
     """获取（或创建）指定配置路径的 ConfigParser 实例。"""
-    path_str = str(Path(config_path or CONFIG_PATH).resolve())
+    path_str = str(resolve_config_path(config_path, default_name=DEFAULT_CONFIG_NAME))
 
     with _PARSER_CACHE_LOCK:
         parser = _PARSER_CACHE.get(path_str)
@@ -89,7 +86,7 @@ def _get_parser(config_path: Optional[Union[str, Path]] = None) -> ConfigParser:
 
 def _invalidate_parser_cache(config_path: Optional[Union[str, Path]] = None) -> None:
     """在配置被外部修改后使缓存失效。"""
-    path_str = str(Path(config_path or CONFIG_PATH).resolve())
+    path_str = str(resolve_config_path(config_path, default_name=DEFAULT_CONFIG_NAME))
     with _PARSER_CACHE_LOCK:
         _PARSER_CACHE.pop(path_str, None)
 
@@ -97,13 +94,13 @@ def _invalidate_parser_cache(config_path: Optional[Union[str, Path]] = None) -> 
 def _resolve_config_path(config_path: Optional[Union[str, Path]] = None) -> str:
     """解析配置路径：参数优先，其次环境变量，最后默认路径。"""
     if config_path:
-        return str(Path(config_path).resolve())
+        return str(resolve_config_path(config_path))
 
     env_path = os.getenv(CONFIG_ENV_VAR)
     if env_path:
-        return str(Path(env_path).resolve())
+        return str(resolve_config_path(env_path))
 
-    return str(Path(CONFIG_PATH).resolve())
+    return str(resolve_config_path(default_name=DEFAULT_CONFIG_NAME))
 
 
 @tool
@@ -186,7 +183,7 @@ def UpdateConfig(
         # 创建备份
         backup_path = None
         if create_backup and persist:
-            backup_path = backup_file(path)
+            backup_path = backup_file(path, backup_dir=get_experiment_configs_dir())
         
         # 更新配置
         parser.update_config(updates, persist=persist, create_backup=False)
@@ -318,7 +315,7 @@ def ResetConfig(config_path: Optional[str] = None) -> str:
     try:
         path = _resolve_config_path(config_path)
         # 查找最初的备份
-        backup_dir = get_experiments_dir() / "configs"
+        backup_dir = get_experiment_configs_dir()
         if not backup_dir.exists():
             return "❌ 没有找到备份目录"
         
@@ -330,7 +327,7 @@ def ResetConfig(config_path: Optional[str] = None) -> str:
         original_backup = backups[0]
         
         # 备份当前配置
-        current_backup = backup_file(path)
+        current_backup = backup_file(path, backup_dir=get_experiment_configs_dir())
         
         # 恢复原始配置
         import shutil

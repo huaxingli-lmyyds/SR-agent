@@ -334,7 +334,15 @@ class MetricsCalculator:
 
 class MetricsComparator:
     """性能指标比较器"""
-    
+
+    @staticmethod
+    def _flat_metrics(experiment: Dict) -> Dict[str, Any]:
+        flattened: Dict[str, Any] = {}
+        for split_metrics in (experiment.get("metrics") or {}).values():
+            if isinstance(split_metrics, dict):
+                flattened.update(split_metrics)
+        return flattened
+
     @staticmethod
     def compare_experiments(experiments: List[Dict], 
                            primary_metric: str = "eer") -> Dict[str, Any]:
@@ -354,7 +362,7 @@ class MetricsComparator:
         # 收集所有有效实验
         valid_experiments = []
         for exp in experiments:
-            if exp.get('results') and exp.get('status') == 'success':
+            if exp.get("metrics") and exp.get('status') == 'success':
                 valid_experiments.append(exp)
         
         if not valid_experiments:
@@ -373,13 +381,13 @@ class MetricsComparator:
             comparison["experiments"][exp_id] = {
                 "timestamp": exp.get('timestamp'),
                 "duration_seconds": exp.get('duration_seconds'),
-                "results": exp.get('results', {})
+                "metrics": exp.get('metrics', {})
             }
         
         # 收集所有指标
         all_metrics = set()
         for exp in valid_experiments:
-            results = exp.get('results', {})
+            results = MetricsComparator._flat_metrics(exp)
             for key, value in results.items():
                 if value is not None and isinstance(value, (int, float)):
                     all_metrics.add(key)
@@ -388,7 +396,7 @@ class MetricsComparator:
         for metric in sorted(all_metrics):
             values = []
             for exp in valid_experiments:
-                results = exp.get('results', {})
+                results = MetricsComparator._flat_metrics(exp)
                 if metric in results and results[metric] is not None:
                     exp_id = exp.get('experiment_id', 'unknown')
                     values.append((exp_id, float(results[metric])))
@@ -454,8 +462,8 @@ class MetricsComparator:
             "metrics": {}
         }
         
-        baseline_results = baseline.get('results', {})
-        current_results = current.get('results', {})
+        baseline_results = MetricsComparator._flat_metrics(baseline)
+        current_results = MetricsComparator._flat_metrics(current)
         
         for metric in metrics:
             baseline_value = baseline_results.get(metric)

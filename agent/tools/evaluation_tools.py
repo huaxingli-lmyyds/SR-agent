@@ -1,220 +1,110 @@
-"""
-评估工具集合
-提供模型评估、指标计算、结果分析等功能
-使用 LangChain 工具接口，基于 utils 模块实现
-"""
+"""Model-agnostic evaluation tool backed by registered adapters."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
 from langchain_core.tools import tool
-from typing import Optional, List
-from pathlib import Path
-from datetime import datetime
-import re
 
-# 导入 utils 模块
+from agent.core.adapters import RUNNER_ADAPTERS
+from agent.core.contracts import OperationResult
+from agent.core.experiment_service import ExperimentService
 from agent.utils import (
-    get_config_file,
-    get_experiments_dir,
-    ensure_dir,
-    get_project_root,
     ExperimentTracker,
     MetricsCalculator,
     extract_scores_data,
-    compute_metrics_from_scores
+    get_experiment_artifact_dir,
+    resolve_config_path,
+    resolve_data_path,
+    resolve_optional_project_path,
 )
-
-# 全局路径
-VERIFICATION_CONFIG = str(get_config_file("verification_ecapa.yaml"))
+from agent.utils import runner
 
 
-def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
-    if not path_value:
-        return None
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return get_project_root() / path
-
-
-def _resolve_data_folder(path_value: Optional[str]) -> str:
-    if not path_value or path_value == "!PLACEHOLDER":
-        return str(get_project_root() / "datasets" / "voxceleb1")
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return str(path)
-
-    return str(_resolve_path(path_value).resolve())
-
-
-def _parse_evaluation_log(log_path: Path) -> dict:
-    metrics = {"eer": None, "min_dcf": None}
-    if not log_path.exists():
-        return metrics
-
-    content = log_path.read_text(encoding="utf-8", errors="ignore")
-
-    eer_match = re.search(r"EER\(%\)\s*=\s*([\d.e+-]+)", content, re.IGNORECASE)
-    if eer_match:
-        try:
-            metrics["eer"] = float(eer_match.group(1))
-        except ValueError:
-            pass
-
-    min_dcf_match = re.search(r"minDCF\s*=\s*([\d.e+-]+)", content, re.IGNORECASE)
-    if min_dcf_match:
-        try:
-            metrics["min_dcf"] = float(min_dcf_match.group(1))
-        except ValueError:
-            pass
-
-    return metrics
+def _checkpoint_path(record: dict) -> Optional[str]:
+    for artifact in record.get("artifacts") or []:
+        if artifact.get("type") == "checkpoint":
+            return artifact.get("path")
+    return None
 
 
 @tool
-def RunEvaluation(model_path: Optional[str] = None,
-                  verification_config: Optional[str] = None,
-                  data_folder: Optional[str] = None,
-                  experiment_id: Optional[str] = None) -> str:
-    """
-    运行 ECAPA-TDNN 模型的评估流程，计算 EER 和 minDCF 等指标。
-    
-    参数:
-        model_path: 模型路径，如果为 None 则使用配置文件中的预训练模型
-        verification_config: 评估配置文件路径，如果为 None 则使用默认配置
-        data_folder: 数据文件夹路径，如果为 None 则使用配置文件中的设置
-        experiment_id: 实验 ID，若未提供则默认使用最近实验
-    
-    Returns:
-        str: 评估结果或错误信息
-    """
-    try:
-        ver_config = verification_config if verification_config else VERIFICATION_CONFIG
+def RunEvaluation(
+    model_path: Optional[str] = None,
+    verification_config: Optional[str] = None,
+    data_folder: Optional[str] = None,
+    experiment_id: Optional[str] = None,
+) -> str:
+    """Evaluate a recorded model and return a structured operation result."""
+    tracker = ExperimentTracker()
+    if experiment_id is None:
+        recent = tracker.list_experiments(limit=1)
+        if not recent:
+            return OperationResult(
+                status="failed",
+                stage="evaluation",
+                error="no experiment record",
+            ).to_json()
+        experiment_id = recent[0]["experiment_id"]
 
-        tracker = ExperimentTracker()
-        if experiment_id is None:
-            recent = tracker.list_experiments(limit=1)
-            if not recent:
-                return "📋 暂无实验记录"
-            experiment_id = recent[0]["experiment_id"]
-
-        record = tracker.get_experiment(experiment_id)
-        if not record:
-            return f"❌ 实验不存在: {experiment_id}"
-
-        exp_dir = tracker.experiments_dir
-        eval_output_folder = exp_dir / "evaluation"
-
-        training_info = record.get("training", {})
-        if data_folder is None:
-            data_folder = training_info.get("data_folder")
-
-        if model_path is None:
-            record_model_paths = training_info.get("model_paths") or []
-            record_model_path = training_info.get("model_path")
-            if isinstance(record_model_paths, str):
-                model_path = record_model_paths
-            elif record_model_paths:
-                model_path = record_model_paths[0]
-            elif record_model_path:
-                model_path = record_model_path
-
-        data_folder = _resolve_data_folder(data_folder)
-
-        # 记录开始时间
-        start_time = datetime.now()
-
-        # 运行评估（非控制台调用）
-        from agent.utils import runner
-        eval_result = runner.run_evaluation(
-            config_path=ver_config,
-            model_path=model_path,
-            data_folder=data_folder,
-            overrides={"output_folder": str(eval_output_folder)},
-        )
-
-        if eval_result.get("status") == "failed":
-            return f"❌ 运行评估失败: {eval_result.get('error')}"
-
-        eer = eval_result.get("eer")
-        min_dcf = eval_result.get("min_dcf")
-        output_folder = eval_result.get("output_folder")
-        scores_path = eval_result.get("scores_path")
-
-        output_folder_path = eval_output_folder
-        eval_log_path = output_folder_path / "log.txt" if output_folder_path else None
-        log_metrics = _parse_evaluation_log(eval_log_path) if eval_log_path else {}
-        if log_metrics.get("eer") is not None:
-            eer = log_metrics["eer"]
-        if log_metrics.get("min_dcf") is not None:
-            min_dcf = log_metrics["min_dcf"]
-        
-        # 记录结束时间
-        end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
-        
-        # 尝试从 scores.txt 中读取结果
-        scores_data = None
-        scores_file = Path(scores_path) if scores_path else None
-        if scores_file and scores_file.exists():
-            scores_data = extract_scores_data(str(scores_file))
-
-        results_payload = {
-            "eer": eer,
-            "min_dcf": min_dcf,
-        }
-
-        if scores_data and not scores_data.get("error"):
-            metrics = MetricsCalculator.compute_all_metrics(
-                scores_data.get("genuine_scores", []),
-                scores_data.get("impostor_scores", []),
-            )
-            results_payload.update(metrics)
-
-        tracker.update_experiment(
+    record = tracker.get_experiment(experiment_id)
+    if not record:
+        return OperationResult(
+            status="failed",
+            stage="evaluation",
+            error=f"experiment not found: {experiment_id}",
             experiment_id=experiment_id,
-            evaluation={
-                "timestamp": start_time.isoformat(),
-                "duration_seconds": duration,
-                "status": "success",
-                "evaluation_log_path": str(eval_log_path) if eval_log_path else None,
-                "output_folder": str(output_folder_path) if output_folder_path else output_folder,
-                "model_path": model_path,
-                "results": results_payload
-            },
-            results=results_payload
-        )
+        ).to_json()
 
-        summary = f"""✅ 评估完成！
-实验 ID: {experiment_id}
-评估时长: {duration:.2f} 秒
+    model_path = model_path or _checkpoint_path(record)
+    resolved_model = resolve_optional_project_path(model_path)
+    model_path = str(resolved_model) if resolved_model is not None else None
+    data_folder = str(resolve_data_path(data_folder or (record.get("task") or {}).get("dataset")))
+    output_folder = get_experiment_artifact_dir(experiment_id, "evaluation", "hpo", create=True)
+    config_path = str(resolve_config_path(verification_config, default_name="verification_ecapa.yaml"))
 
-📊 性能指标:
-  - EER: {eer if eer is not None else 'N/A'}%
-  - minDCF: {min_dcf if min_dcf is not None else 'N/A'}"""
+    started_at = datetime.now()
+    raw = runner.run_evaluation(
+        config_path=config_path,
+        model_path=model_path,
+        data_folder=data_folder,
+        overrides={"output_folder": str(output_folder)},
+    )
 
-        if scores_data and not scores_data.get("error"):
-            summary += f"""
-  - 准确率: {results_payload.get('accuracy', 'N/A')}
-  - 精确率: {results_payload.get('precision', 'N/A')}
-  - 召回率: {results_payload.get('recall', 'N/A')}
-  - F1分数: {results_payload.get('f1', 'N/A')}"""
+    metrics = {"eer": raw.get("eer"), "min_dcf": raw.get("min_dcf")}
+    scores_path = raw.get("scores_path")
+    if scores_path and Path(scores_path).exists():
+        scores = extract_scores_data(scores_path)
+        if not scores.get("error"):
+            metrics.update(MetricsCalculator.compute_all_metrics(
+                scores.get("genuine_scores", []),
+                scores.get("impostor_scores", []),
+            ))
 
-        summary += f"""
+    result = RUNNER_ADAPTERS["speechbrain"].normalize_evaluation_result({
+        "status": raw.get("status", "failed"),
+        "error": raw.get("error"),
+        "metrics": metrics,
+        "evaluation_log_path": str(output_folder / "log.txt"),
+        "scores_path": scores_path,
+        "output_folder": raw.get("output_folder") or str(output_folder),
+    })
+    result.task = record.get("task") or {}
+    result.model = record.get("model") or {}
+    result.execution.update({
+        "runner": "speechbrain",
+        "output_folder": raw.get("output_folder") or str(output_folder),
+    })
+    result.parameters = {"model_path": model_path, "data_path": data_folder}
+    ExperimentService(tracker).record_result(
+        experiment_id,
+        result,
+        duration_seconds=(datetime.now() - started_at).total_seconds(),
+        actor={"type": "hpo_agent", "name": "model_evaluator"},
+    )
+    return result.to_json()
 
-📁 文件位置:
-    - 评估日志: {eval_log_path if eval_log_path else 'N/A'}
-    - 分数文件: {scores_file if scores_file and scores_file.exists() else 'N/A'}"""
 
-        if eer is not None:
-            summary += f"\n\n💡 EER 越低越好，最佳目标是 < 5%"
-
-        return summary
-    except Exception as e:
-        import traceback
-        return f"❌ 运行评估失败: {str(e)}\n{traceback.format_exc()}"
-
-
-# 导出所有工具
-__all__ = [
-    'RunEvaluation',
-]
+__all__ = ["RunEvaluation"]

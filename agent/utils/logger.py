@@ -8,13 +8,14 @@ from typing import Union, Optional, List, Any
 from datetime import datetime
 
 from agent.utils.agent_middleware import build_agent_logging_middleware
+from agent.utils.path_tool import resolve_project_path
 
 
 class Logger:
     """文本日志记录器类"""
 
     def __init__(self, log_path: Union[str, Path]):
-        self.log_path = Path(log_path)
+        self.log_path = resolve_project_path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def write(self, message: str) -> None:
@@ -51,7 +52,7 @@ class AgentLogger:
     """智能体日志记录器，提供中间件集成。"""
 
     def __init__(self, log_path: Union[str, Path], truncate_limit: int = 800):
-        self.log_path = Path(log_path)
+        self.log_path = resolve_project_path(log_path)
         self.truncate_limit = truncate_limit
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
 

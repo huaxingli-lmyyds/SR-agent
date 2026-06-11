@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
 import re
 
-from agent.utils import ExperimentTracker, get_experiments_dir
+from agent.utils import ExperimentTracker, get_experiment_dir
 
 
 def _get_record(experiment_id: Optional[str]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -54,16 +54,19 @@ def _parse_train_log(train_log_path: Path) -> List[Dict[str, Any]]:
 
 
 def _collect_epoch_data(record: Dict[str, Any]) -> List[Dict[str, Any]]:
-    training_info = record.get("training") or {}
-    epoch_data = training_info.get("epoch_data") or []
+    speechbrain = (record.get("extensions") or {}).get("speechbrain") or {}
+    epoch_data = speechbrain.get("epoch_data") or []
     if epoch_data:
         return epoch_data
 
-    train_log_path = training_info.get("train_log_path")
+    train_log_path = next((
+        item.get("path") for item in record.get("artifacts") or []
+        if item.get("type") == "log" and item.get("name") == "training_log"
+    ), None)
     if train_log_path:
         return _parse_train_log(Path(train_log_path))
 
-    exp_dir = get_experiments_dir() / record["experiment_id"]
+    exp_dir = get_experiment_dir(record["experiment_id"], "hpo")
     fallback_log = exp_dir / "train_log.txt"
     if fallback_log.exists():
         return _parse_train_log(fallback_log)

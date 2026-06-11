@@ -16,8 +16,11 @@ from .path_tool import (
     get_hpo_experiments_dir,
     get_data_processing_experiments_dir,
     get_manage_experiments_dir,
+    get_experiment_type_dir,
     ensure_dir,
-    list_directories
+    list_directories,
+    resolve_config_path,
+    resolve_config_value_path,
 )
 
 
@@ -26,13 +29,26 @@ class BaseExperimentRecord:
     """所有智能体实验记录的公共基类。"""
 
     experiment_type: str
+    schema_version: str = "2.0"
+    stage: str = ""
     experiment_id: str = ""
     timestamp: str = ""
+    updated_at: str = ""
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
     description: str = ""
     status: str = "created"
     duration_seconds: float = 0.0
     config_path: str = ""
-    results: Optional[Dict[str, Any]] = None
+    actor: Dict[str, Any] = field(default_factory=dict)
+    task: Dict[str, Any] = field(default_factory=dict)
+    model: Dict[str, Any] = field(default_factory=dict)
+    execution: Dict[str, Any] = field(default_factory=dict)
+    metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    extensions: Dict[str, Any] = field(default_factory=dict)
+    tags: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -44,8 +60,6 @@ class HPOExperimentRecord(BaseExperimentRecord):
     """超参数智能体实验记录。"""
 
     experiment_type: str = "hpo"
-    training: Dict[str, Any] = field(default_factory=dict)
-    evaluation: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -53,7 +67,6 @@ class DataProcessingExperimentRecord(BaseExperimentRecord):
     """数据处理智能体实验记录。"""
 
     experiment_type: str = "data_processing"
-    data_processing: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -61,11 +74,8 @@ class OrchestrationExperimentRecord(BaseExperimentRecord):
     """统筹智能体实验记录。"""
 
     experiment_type: str = "orchestration"
-    orchestration: Dict[str, Any] = field(default_factory=dict)
     linked_experiments: Dict[str, Any] = field(default_factory=dict)
-    a2a_messages: List[Dict[str, Any]] = field(default_factory=list)
-    data_processing_summary_history: List[Dict[str, Any]] = field(default_factory=list)
-    hpo_feedback_history: List[Dict[str, Any]] = field(default_factory=list)
+    agent_messages: List[Dict[str, Any]] = field(default_factory=list)
 
 
 ExperimentRecordDict = Dict[str, Any]
@@ -82,7 +92,7 @@ class ExperimentTracker:
             experiments_dir: 实验目录，如果为 None 则使用默认目录
         """
         if experiments_dir is not None:
-            self.experiments_dir = Path(experiments_dir)
+            self.experiments_dir = Path(experiments_dir).resolve()
         else:
             self.experiments_dir = get_hpo_experiments_dir()
         
@@ -100,7 +110,12 @@ class ExperimentTracker:
                          output_folder: Optional[str] = None,
                          description: str = "",
                          experiment_type: str = "hpo",
-                         extra_fields: Optional[Dict[str, Any]] = None) -> str:
+                         extra_fields: Optional[Dict[str, Any]] = None,
+                         stage: Optional[str] = None,
+                         actor: Optional[Dict[str, Any]] = None,
+                         task: Optional[Dict[str, Any]] = None,
+                         model: Optional[Dict[str, Any]] = None,
+                         execution: Optional[Dict[str, Any]] = None) -> str:
         """
         创建新实验
         
@@ -115,12 +130,18 @@ class ExperimentTracker:
         Returns:
             实验 ID
         """
+        config_path = str(resolve_config_path(config_path))
+        resolved_data_folder = resolve_config_value_path(data_folder)
+        resolved_output_folder = resolve_config_value_path(output_folder)
+        data_folder = str(resolved_data_folder) if resolved_data_folder is not None else ""
+        output_folder = str(resolved_output_folder) if resolved_output_folder is not None else None
+
         # 生成实验 ID（使用计数器避免同一秒内的冲突）
         base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         experiment_id = f"{base_id}_{self._counter}"
         self._counter += 1
         
-        experiments_dir = self._resolve_agent_experiments_dir(experiment_type)
+        experiments_dir = get_experiment_type_dir(experiment_type)
 
         # 创建实验目录
         exp_dir = ensure_dir(experiments_dir / experiment_id)
@@ -139,6 +160,11 @@ class ExperimentTracker:
             description=description,
             config_backup_path=str(config_backup),
             extra_fields=extra_fields,
+            stage=stage,
+            actor=actor,
+            task=task,
+            model=model,
+            execution=execution,
         )
         
         # 保存实验记录
@@ -154,7 +180,8 @@ class ExperimentTracker:
     def create_hpo_experiment(self, config_path: str, data_folder: str,
                               output_folder: Optional[str] = None,
                               description: str = "",
-                              extra_fields: Optional[Dict[str, Any]] = None) -> str:
+                              extra_fields: Optional[Dict[str, Any]] = None,
+                              **metadata) -> str:
         """创建超参数智能体实验记录。"""
         return self.create_experiment(
             config_path=config_path,
@@ -163,12 +190,14 @@ class ExperimentTracker:
             description=description,
             experiment_type="hpo",
             extra_fields=extra_fields,
+            **metadata,
         )
 
     def create_data_processing_experiment(self, config_path: str, data_folder: str,
                                           output_folder: Optional[str] = None,
                                           description: str = "",
-                                          extra_fields: Optional[Dict[str, Any]] = None) -> str:
+                                          extra_fields: Optional[Dict[str, Any]] = None,
+                                          **metadata) -> str:
         """创建数据处理智能体实验记录。"""
         return self.create_experiment(
             config_path=config_path,
@@ -177,12 +206,14 @@ class ExperimentTracker:
             description=description,
             experiment_type="data_processing",
             extra_fields=extra_fields,
+            **metadata,
         )
 
     def create_orchestration_experiment(self, config_path: str, data_folder: str,
                                         output_folder: Optional[str] = None,
                                         description: str = "",
-                                        extra_fields: Optional[Dict[str, Any]] = None) -> str:
+                                        extra_fields: Optional[Dict[str, Any]] = None,
+                                        **metadata) -> str:
         """创建统筹智能体实验记录。"""
         return self.create_experiment(
             config_path=config_path,
@@ -191,28 +222,31 @@ class ExperimentTracker:
             description=description,
             experiment_type="orchestration",
             extra_fields=extra_fields,
+            **metadata,
         )
     
     def update_experiment(self, experiment_id: str, 
-                         results: Optional[Dict] = None,
                          status: Optional[str] = None,
                          error: Optional[str] = None,
                          duration: Optional[float] = None,
-                         training: Optional[Dict] = None,
-                         evaluation: Optional[Dict] = None,
-                         data_processing: Optional[Dict] = None,
-                         orchestration: Optional[Dict] = None,
                          linked_experiments: Optional[Dict] = None,
-                         a2a_messages: Optional[List[Dict[str, Any]]] = None,
-                         data_processing_summary_history: Optional[List[Dict[str, Any]]] = None,
-                         hpo_feedback_history: Optional[List[Dict[str, Any]]] = None,
+                         agent_messages: Optional[List[Dict[str, Any]]] = None,
+                         stage: Optional[str] = None,
+                         actor: Optional[Dict[str, Any]] = None,
+                         task: Optional[Dict[str, Any]] = None,
+                         model: Optional[Dict[str, Any]] = None,
+                         execution: Optional[Dict[str, Any]] = None,
+                         metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+                         artifacts: Optional[List[Dict[str, Any]]] = None,
+                         parameters: Optional[Dict[str, Any]] = None,
+                         extensions: Optional[Dict[str, Any]] = None,
                          experiment_type: Optional[str] = None) -> bool:
         """
         更新实验信息
         
         参数:
             experiment_id: 实验 ID
-            results: 实验结果
+            metrics: 按数据切分保存的通用指标
             status: 实验状态
             error: 错误信息
             duration: 训练时长（秒）
@@ -226,36 +260,52 @@ class ExperimentTracker:
             return False
         
         # 更新字段
-        if results is not None:
-            record["results"] = results
+        now = datetime.now().isoformat()
+        record["updated_at"] = now
         if status is not None:
             record["status"] = status
+            if status == "running" and not record.get("started_at"):
+                record["started_at"] = now
+            if status in {"success", "failed", "cancelled"}:
+                record["completed_at"] = now
         if error is not None:
             record["error"] = error
+        elif status == "success":
+            record["error"] = None
         if duration is not None:
             record["duration_seconds"] = duration
-        if training is not None:
-            current_training = record.get("training") or {}
-            current_training.update(training)
-            record["training"] = current_training
-        if evaluation is not None:
-            record["evaluation"] = evaluation
-        if data_processing is not None:
-            current_data_processing = record.get("data_processing") or {}
-            current_data_processing.update(data_processing)
-            record["data_processing"] = current_data_processing
-        if orchestration is not None:
-            current_orchestration = record.get("orchestration") or {}
-            current_orchestration.update(orchestration)
-            record["orchestration"] = current_orchestration
+        extensions = dict(extensions or {})
+        if stage is not None:
+            record["stage"] = stage
+        for key, value in (
+            ("actor", actor),
+            ("task", task),
+            ("model", model),
+            ("execution", execution),
+            ("parameters", parameters),
+            ("extensions", extensions),
+        ):
+            if value:
+                current = dict(record.get(key) or {})
+                current.update(value)
+                record[key] = current
+        if metrics:
+            current_metrics = dict(record.get("metrics") or {})
+            for split, values in metrics.items():
+                current_split = dict(current_metrics.get(split) or {})
+                current_split.update(values)
+                current_metrics[split] = current_split
+            record["metrics"] = current_metrics
+        if artifacts:
+            existing = list(record.get("artifacts") or [])
+            by_key = {(item.get("type"), item.get("name"), item.get("path")): item for item in existing}
+            for item in artifacts:
+                by_key[(item.get("type"), item.get("name"), item.get("path"))] = item
+            record["artifacts"] = list(by_key.values())
         if linked_experiments is not None:
             record["linked_experiments"] = linked_experiments
-        if a2a_messages is not None:
-            record["a2a_messages"] = a2a_messages
-        if data_processing_summary_history is not None:
-            record["data_processing_summary_history"] = data_processing_summary_history
-        if hpo_feedback_history is not None:
-            record["hpo_feedback_history"] = hpo_feedback_history
+        if agent_messages is not None:
+            record["agent_messages"] = agent_messages
         
         # 保存更新后的记录
         record_path = record_dir / experiment_id / "experiment_record.json"
@@ -269,33 +319,26 @@ class ExperimentTracker:
 
     def update_hpo_experiment(self, experiment_id: str, **kwargs) -> bool:
         """更新超参数智能体实验记录。"""
-        return self.update_experiment(experiment_id, **kwargs)
+        return self.update_experiment(experiment_id, experiment_type="hpo", **kwargs)
 
-    def update_data_processing_experiment(self, experiment_id: str,
-                                          data_processing: Optional[Dict] = None,
-                                          **kwargs) -> bool:
+    def update_data_processing_experiment(self, experiment_id: str, **kwargs) -> bool:
         """更新数据处理智能体实验记录。"""
         return self.update_experiment(
             experiment_id,
-            data_processing=data_processing,
+            experiment_type="data_processing",
             **kwargs,
         )
 
     def update_orchestration_experiment(self, experiment_id: str,
-                                        orchestration: Optional[Dict] = None,
                                         linked_experiments: Optional[Dict] = None,
-                                        a2a_messages: Optional[List[Dict[str, Any]]] = None,
-                                        data_processing_summary_history: Optional[List[Dict[str, Any]]] = None,
-                                        hpo_feedback_history: Optional[List[Dict[str, Any]]] = None,
+                                        agent_messages: Optional[List[Dict[str, Any]]] = None,
                                         **kwargs) -> bool:
         """更新统筹智能体实验记录。"""
         return self.update_experiment(
             experiment_id,
-            orchestration=orchestration,
             linked_experiments=linked_experiments,
-            a2a_messages=a2a_messages,
-            data_processing_summary_history=data_processing_summary_history,
-            hpo_feedback_history=hpo_feedback_history,
+            agent_messages=agent_messages,
+            experiment_type="orchestration",
             **kwargs,
         )
     
@@ -372,8 +415,8 @@ class ExperimentTracker:
         # 过滤出有该指标的实验
         valid_exps = []
         for exp in successful_exps:
-            results = exp.get('results', {})
-            if results and metric in results and results[metric] is not None:
+            metric_value = self._metric_value(exp, metric)
+            if metric_value is not None:
                 valid_exps.append(exp)
         
         if not valid_exps:
@@ -381,7 +424,7 @@ class ExperimentTracker:
         
         # 排序
         valid_exps.sort(
-            key=lambda x: x['results'][metric],
+            key=lambda x: self._metric_value(x, metric),
             reverse=not minimize
         )
         
@@ -409,8 +452,8 @@ class ExperimentTracker:
         # 提取所有可能的指标
         all_metrics = set()
         for exp in experiments:
-            if exp.get('results'):
-                all_metrics.update(exp['results'].keys())
+            for split_metrics in (exp.get("metrics") or {}).values():
+                all_metrics.update(split_metrics.keys())
         
         # 构建比较结果
         comparison = {
@@ -426,17 +469,16 @@ class ExperimentTracker:
                 "status": exp.get('status'),
                 "timestamp": exp.get('timestamp'),
                 "duration_seconds": exp.get('duration_seconds'),
-                "results": exp.get('results', {})
+                "metrics": exp.get('metrics', {})
             }
         
         # 比较每个指标
         for metric in sorted(all_metrics):
             values = []
             for exp in experiments:
-                if exp.get('results') and metric in exp['results']:
-                    value = exp['results'][metric]
-                    if value is not None:
-                        values.append((exp['experiment_id'], value))
+                value = self._metric_value(exp, metric)
+                if value is not None:
+                    values.append((exp['experiment_id'], value))
             
             if values:
                 # 判断指标类型
@@ -462,6 +504,14 @@ class ExperimentTracker:
                 comparison["best_by_metric"][metric] = comp["best"]
         
         return comparison
+
+    @staticmethod
+    def _metric_value(record: Dict[str, Any], metric: str) -> Optional[Any]:
+        for split in ("test", "validation", "train", "summary"):
+            value = (record.get("metrics") or {}).get(split, {}).get(metric)
+            if value is not None:
+                return value
+        return None
     
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -626,58 +676,61 @@ class ExperimentTracker:
                        output_folder: Optional[str],
                        description: str,
                        config_backup_path: str,
-                       extra_fields: Optional[Dict[str, Any]] = None) -> ExperimentRecordDict:
+                       extra_fields: Optional[Dict[str, Any]] = None,
+                       stage: Optional[str] = None,
+                       actor: Optional[Dict[str, Any]] = None,
+                       task: Optional[Dict[str, Any]] = None,
+                       model: Optional[Dict[str, Any]] = None,
+                       execution: Optional[Dict[str, Any]] = None) -> ExperimentRecordDict:
         """根据实验类型生成对应结构的记录。"""
+        created_at = datetime.now().isoformat()
         base_kwargs = {
             "experiment_id": experiment_id,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": created_at,
+            "updated_at": created_at,
+            "started_at": None,
+            "completed_at": None,
             "description": description,
             "status": "created",
             "duration_seconds": 0,
             "config_path": config_path,
-            "results": None,
             "error": None,
+            "stage": stage or {
+                "data_processing": "data_preparation",
+                "orchestration": "orchestration",
+            }.get(experiment_type, "optimization"),
+            "actor": actor or {
+                "type": {
+                    "data_processing": "data_processing_agent",
+                    "orchestration": "coordinator",
+                }.get(experiment_type, "hpo_agent")
+            },
+            "task": task or {
+                "type": "speaker_verification",
+                "dataset": data_folder,
+                "primary_metric": "eer",
+                "metric_mode": "min",
+            },
+            "model": model or {
+                "family": "ecapa_tdnn",
+                "implementation": "speechbrain",
+                "config_path": config_path,
+            },
+            "execution": execution or {
+                "runner": "speechbrain",
+                "output_folder": output_folder,
+                "config_backup_path": config_backup_path,
+            },
         }
 
         if experiment_type == "data_processing":
             record = DataProcessingExperimentRecord(**base_kwargs).to_dict()
-            record["data_processing"] = {
-                "config_backup_path": config_backup_path,
-                "data_folder": data_folder,
-                "output_folder": output_folder,
-                "save_folder": output_folder,
-                "verification_file": None,
-                "split_ratio": None,
-                "sentence_len": None,
-                "skip_prep": None,
-                "stats": None,
-                "summary": None,
-            }
         elif experiment_type == "orchestration":
             record = OrchestrationExperimentRecord(**base_kwargs).to_dict()
-            record["orchestration"] = {
-                "config_backup_path": config_backup_path,
-                "data_folder": data_folder,
-                "output_folder": output_folder,
-                "manager_decision_history": [],
-                "rounds": 0,
-                "final_state": None,
-            }
             record["linked_experiments"] = {}
-            record["a2a_messages"] = []
-            record["data_processing_summary_history"] = []
-            record["hpo_feedback_history"] = []
+            record["agent_messages"] = []
         else:
             record = HPOExperimentRecord(**base_kwargs).to_dict()
-            record["training"] = {
-                "config_backup_path": config_backup_path,
-                "data_folder": data_folder,
-                "output_folder": output_folder,
-                "train_log_path": None,
-                "metrics": None,
-                "model_paths": []
-            }
-            record["evaluation"] = None
 
         if extra_fields:
             for key, value in extra_fields.items():
@@ -709,21 +762,14 @@ class ExperimentTracker:
             with open(self.history_file, 'w', encoding='utf-8') as f:
                 json.dump(history, f, indent=2, ensure_ascii=False)
 
-    def _resolve_agent_experiments_dir(self, experiment_type: str) -> Path:
-        if experiment_type == "data_processing":
-            return get_data_processing_experiments_dir()
-        if experiment_type == "orchestration":
-            return get_manage_experiments_dir()
-        return get_hpo_experiments_dir()
-
     def _get_history_file(self, experiment_type: Optional[str] = None) -> Path:
         if experiment_type is None:
             return self.history_file
-        return self._resolve_agent_experiments_dir(experiment_type) / "experiments_history.json"
+        return get_experiment_type_dir(experiment_type) / "experiments_history.json"
 
     def _load_record(self, experiment_id: str, experiment_type: Optional[str] = None) -> tuple[Optional[Dict], Path]:
         if experiment_type:
-            record_dir = self._resolve_agent_experiments_dir(experiment_type)
+            record_dir = get_experiment_type_dir(experiment_type)
             record_path = record_dir / experiment_id / "experiment_record.json"
             if record_path.exists():
                 with open(record_path, 'r', encoding='utf-8') as f:
@@ -732,7 +778,7 @@ class ExperimentTracker:
 
         candidate_dirs = [self.experiments_dir]
         for candidate_type in ("hpo", "data_processing", "orchestration"):
-            record_dir = self._resolve_agent_experiments_dir(candidate_type)
+            record_dir = get_experiment_type_dir(candidate_type)
             if record_dir not in candidate_dirs:
                 candidate_dirs.append(record_dir)
 

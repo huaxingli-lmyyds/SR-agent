@@ -10,6 +10,15 @@ import re
 import os
 import shutil
 
+from .path_tool import (
+    get_prep_cache_dir,
+    is_remote_path,
+    resolve_config_path,
+    resolve_config_value_path,
+    resolve_data_path,
+    resolve_project_path,
+)
+
 try:
     from recipes.voxceleb import train_speaker_embeddings as _TRAIN_RECIPE_MODULE
     _TRAIN_RECIPE_ERROR = None
@@ -47,6 +56,7 @@ def _load_hyperpyyaml_config(
         else:
             normalized_overrides = []
 
+        config_path = str(resolve_config_path(config_path))
         with open(config_path, encoding="utf-8") as fin:
             params = load_hyperpyyaml(fin, normalized_overrides)
         return params, None
@@ -77,8 +87,7 @@ def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
 
 
 def _get_prep_cache_dir(tag: str) -> Path:
-    base_dir = Path(__file__).resolve().parent.parent / "prep_cache"
-    cache_dir = base_dir / tag
+    cache_dir = get_prep_cache_dir(tag)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -125,6 +134,11 @@ def run_data_prep(
     try:
         from speechbrain.utils.data_utils import download_file
 
+        data_folder = str(resolve_data_path(data_folder))
+        save_folder = str(resolve_project_path(save_folder))
+        if source and not is_remote_path(source):
+            source = str(resolve_project_path(source))
+
         if _PREPARE_MODULE is None:
             return {
                 "status": "failed",
@@ -139,10 +153,6 @@ def run_data_prep(
         save_path.mkdir(parents=True, exist_ok=True)
         verification_local = save_path / os.path.basename(str(verification_file))
         download_file(str(verification_file), str(verification_local))
-        if signal == "prep_only":
-            save_folder = _get_prep_cache_dir("train")
-        
-
         prepare_module.prepare_voxceleb(
             data_folder=data_folder,
             save_folder=str(save_folder),
@@ -206,6 +216,7 @@ def run_evaluation(
         verification_module = _VERIFICATION_MODULE
         prepare_module = _PREPARE_MODULE
 
+        config_path = str(resolve_config_path(config_path))
         if not Path(config_path).exists():
             return {
                 "status": "failed",
@@ -246,6 +257,12 @@ def run_evaluation(
                 "output_folder": None,
                 "scores_path": None,
             }
+
+        params["data_folder"] = str(resolve_data_path(params.get("data_folder")))
+        for key in ("output_folder", "save_folder"):
+            resolved = resolve_config_value_path(params.get(key))
+            if resolved is not None:
+                params[key] = str(resolved)
 
         splits = ["train", "dev", "test"]
         cache_dir = _get_prep_cache_dir("eval")
@@ -377,6 +394,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         recipe = _TRAIN_RECIPE_MODULE
         prepare_module = _PREPARE_MODULE
 
+        config_path = str(resolve_config_path(config_path))
         if not Path(config_path).exists():
             return {
                 "status": "failed",
@@ -401,8 +419,15 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
 
         data_folder = hparams.get("data_folder")
         if not data_folder or data_folder == "!PLACEHOLDER":
-            data_folder = "../datasets/voxceleb1"
+            data_folder = str(resolve_data_path())
             hparams["data_folder"] = data_folder
+        else:
+            hparams["data_folder"] = str(resolve_data_path(data_folder))
+
+        for key in ("output_folder", "save_folder", "train_log"):
+            resolved = resolve_config_value_path(hparams.get(key))
+            if resolved is not None:
+                hparams[key] = str(resolved)
 
         splits = ["train", "dev"]
         cache_dir = _get_prep_cache_dir("train")

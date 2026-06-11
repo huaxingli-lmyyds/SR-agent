@@ -5,8 +5,8 @@
 
 # 导入智能体
 from .agents import (
-    ReActHPOAgent,
-    create_react_agent
+    HPOAgent,
+    create_hpo_agent
 )
 
 # 导入工具函数
@@ -38,6 +38,14 @@ from .utils import (
     get_recipes_dir,
     get_experiments_dir,
     get_results_dir,
+    get_logs_dir,
+    get_prep_cache_dir,
+    get_experiment_dir,
+    get_experiment_artifact_dir,
+    resolve_project_path,
+    resolve_config_path,
+    resolve_data_path,
+    resolve_config_value_path,
     get_config_file,
     get_train_script,
     get_eval_script,
@@ -59,8 +67,8 @@ __version__ = "1.0.0"
 
 __all__ = [
     # 智能体
-    'ReActHPOAgent',
-    'create_react_agent',
+    'HPOAgent',
+    'create_hpo_agent',
     # 工具
     'ReadConfig',
     'UpdateConfig',
@@ -80,6 +88,14 @@ __all__ = [
     'get_recipes_dir',
     'get_experiments_dir',
     'get_results_dir',
+    'get_logs_dir',
+    'get_prep_cache_dir',
+    'get_experiment_dir',
+    'get_experiment_artifact_dir',
+    'resolve_project_path',
+    'resolve_config_path',
+    'resolve_data_path',
+    'resolve_config_value_path',
     'get_config_file',
     'get_train_script',
     'get_eval_script',

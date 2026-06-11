@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Union, List, Optional, Dict, Any
 from datetime import datetime
+from urllib.parse import urlparse
 
 
 # ============================================================================
@@ -100,6 +101,22 @@ def get_results_dir() -> Path:
     return get_agent_dir() / "results"
 
 
+def get_logs_dir() -> Path:
+    """获取智能体全局日志目录。"""
+    return get_agent_dir() / "logs"
+
+
+def get_prep_cache_dir(cache_name: Optional[str] = None) -> Path:
+    """获取统一的数据准备缓存目录。"""
+    cache_dir = get_agent_dir() / "prep_cache"
+    return cache_dir / cache_name if cache_name else cache_dir
+
+
+def get_memory_dir() -> Path:
+    """获取智能体持久记忆目录。"""
+    return get_agent_dir() / "memory"
+
+
 # ============================================================================
 # 特定文件路径
 # ============================================================================
@@ -156,16 +173,6 @@ def get_system_prompt(prompt_name: str = "hpo_prompt.txt") -> Path:
     return get_agent_dir() / "prompts" / prompt_name
 
 
-def get_experiments_history_file() -> Path:
-    """
-    获取实验历史记录文件路径
-    
-    Returns:
-        Path: experiments_history.json 的绝对路径
-    """
-    return get_experiments_dir() / "experiments_history.json"
-
-
 def get_experiment_configs_dir() -> Path:
     """
     获取实验配置备份目录
@@ -174,6 +181,39 @@ def get_experiment_configs_dir() -> Path:
         Path: experiments/configs 目录的绝对路径
     """
     return get_experiments_dir() / "configs"
+
+
+def get_experiment_type_dir(experiment_type: str = "hpo") -> Path:
+    """根据实验类型返回实验根目录。"""
+    normalized_type = experiment_type.strip().lower()
+    if normalized_type in {"dp", "data", "data_processing"}:
+        return get_data_processing_experiments_dir()
+    if normalized_type in {"manage", "manager", "orchestration"}:
+        return get_manage_experiments_dir()
+    if normalized_type == "hpo":
+        return get_hpo_experiments_dir()
+    raise ValueError(f"不支持的实验类型: {experiment_type}")
+
+
+def get_experiment_dir(
+    experiment_id: str,
+    experiment_type: str = "hpo",
+    create: bool = False,
+) -> Path:
+    """获取分类型实验目录。"""
+    path = get_experiment_type_dir(experiment_type) / experiment_id
+    return ensure_dir(path) if create else path
+
+
+def get_experiment_artifact_dir(
+    experiment_id: str,
+    artifact_name: str,
+    experiment_type: str = "hpo",
+    create: bool = False,
+) -> Path:
+    """获取实验下的训练、评估等产物目录。"""
+    path = get_experiment_dir(experiment_id, experiment_type) / artifact_name
+    return ensure_dir(path) if create else path
 
 
 # ============================================================================
@@ -247,6 +287,73 @@ def is_absolute_path(path: Union[str, Path]) -> bool:
     return Path(path).is_absolute()
 
 
+def is_remote_path(path: object) -> bool:
+    """判断值是否为 HTTP/HTTPS 远程地址。"""
+    if not isinstance(path, str):
+        return False
+    return urlparse(path).scheme.lower() in {"http", "https"}
+
+
+def resolve_project_path(
+    path: Union[str, Path],
+    base_dir: Optional[Union[str, Path]] = None,
+) -> Path:
+    """将本地路径统一解析为绝对路径，默认相对项目根目录。"""
+    path_obj = Path(path).expanduser()
+    if path_obj.is_absolute():
+        return path_obj.resolve()
+    base = Path(base_dir).expanduser() if base_dir else get_project_root()
+    return (base / path_obj).resolve()
+
+
+def resolve_optional_project_path(
+    path: Optional[Union[str, Path]],
+    base_dir: Optional[Union[str, Path]] = None,
+) -> Optional[Path]:
+    """解析可选本地路径。"""
+    if path is None or str(path).strip() == "":
+        return None
+    return resolve_project_path(path, base_dir=base_dir)
+
+
+def resolve_config_path(
+    config_path: Optional[Union[str, Path]] = None,
+    default_name: str = "train_ecapa_tdnn.yaml",
+) -> Path:
+    """解析配置文件路径；文件名默认从项目 configs 目录查找。"""
+    if config_path is None or str(config_path).strip() == "":
+        return get_config_file(default_name).resolve()
+    path_obj = Path(config_path).expanduser()
+    if path_obj.is_absolute():
+        return path_obj.resolve()
+    if path_obj.parent == Path("."):
+        config_candidate = get_configs_dir() / path_obj
+        if config_candidate.exists():
+            return config_candidate.resolve()
+    return resolve_project_path(path_obj)
+
+
+def resolve_data_path(path: Optional[Union[str, Path]] = None) -> Path:
+    """解析数据目录；空值和 PLACEHOLDER 统一指向项目 datasets/voxceleb1。"""
+    if path is None or str(path).strip() in {"", "!PLACEHOLDER"}:
+        return (get_datasets_dir() / "voxceleb1").resolve()
+    return resolve_project_path(path)
+
+
+def resolve_config_value_path(
+    value: Optional[Union[str, Path]],
+    *,
+    default: Optional[Union[str, Path]] = None,
+) -> Optional[Union[str, Path]]:
+    """解析配置中的路径值；远程 URL 保持不变，本地值相对项目根目录。"""
+    selected = value if value not in (None, "", "!PLACEHOLDER") else default
+    if selected is None:
+        return None
+    if is_remote_path(selected):
+        return str(selected)
+    return resolve_project_path(selected)
+
+
 def to_absolute_path(path: Union[str, Path], base_dir: Optional[Union[str, Path]] = None) -> Path:
     """
     将路径转换为绝对路径
@@ -258,12 +365,7 @@ def to_absolute_path(path: Union[str, Path], base_dir: Optional[Union[str, Path]
     Returns:
         Path: 绝对路径
     """
-    path = Path(path)
-    if path.is_absolute():
-        return path.resolve()
-    
-    base = Path(base_dir) if base_dir else get_project_root()
-    return (base / path).resolve()
+    return resolve_project_path(path, base_dir=base_dir)
 
 
 def to_relative_path(path: Union[str, Path], base_dir: Optional[Union[str, Path]] = None) -> Path:
@@ -478,7 +580,7 @@ def get_parent_dir(file_path: Union[str, Path]) -> Path:
 # 日志和结果路径
 # ============================================================================
 
-def get_experiment_log_path(experiment_id: str) -> Path:
+def get_experiment_log_path(experiment_id: str, experiment_type: str = "hpo") -> Path:
     """
     获取实验日志文件路径
     
@@ -488,37 +590,7 @@ def get_experiment_log_path(experiment_id: str) -> Path:
     Returns:
         Path: 日志文件路径（位于实验目录下）
     """
-    return get_experiments_dir() / experiment_id / "experiment.log"
-
-
-def get_model_save_path(experiment_id: str, model_name: str = "model.ckpt") -> Path:
-    """
-    获取模型保存路径
-    
-    Args:
-        experiment_id: 实验 ID
-        model_name: 模型文件名
-    
-    Returns:
-        Path: 模型文件路径
-    """
-    exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
-    return exp_dir / model_name
-
-
-def get_training_result_path(experiment_id: str, result_name: str = "experiment_record.json") -> Path:
-    """
-    获取训练结果文件路径
-    
-    Args:
-        experiment_id: 实验 ID
-        result_name: 结果文件名
-    
-    Returns:
-        Path: 结果文件路径
-    """
-    exp_dir = ensure_dir(get_experiments_dir() / experiment_id)
-    return exp_dir / result_name
+    return get_experiment_dir(experiment_id, experiment_type) / "experiment.log"
 
 
 # ============================================================================
@@ -551,7 +623,7 @@ def normalize_path(path: Union[str, Path]) -> Path:
     Returns:
         Path: 规范化后的路径
     """
-    return Path(path).resolve()
+    return resolve_project_path(path)
 
 
 def get_path_info(path: Union[str, Path]) -> dict:
@@ -783,16 +855,6 @@ def get_all_config_files() -> List[Path]:
     return list_files(get_configs_dir(), pattern="*.yaml")
 
 
-def get_all_experiment_dirs() -> List[Path]:
-    """
-    获取所有实验目录
-    
-    Returns:
-        List[Path]: 实验目录路径列表
-    """
-    return list_directories(get_experiments_dir())
-
-
 def cleanup_old_backups(directory: Union[str, Path], 
                         pattern: str = "*.backup_*",
                         keep_last_n: int = 5) -> int:
@@ -829,45 +891,3 @@ def cleanup_old_backups(directory: Union[str, Path],
             print(f"删除备份文件失败: {backup}, 错误: {e}")
     
     return deleted_count
-
-
-# ============================================================================
-# 导出的主要路径常量（兼容性）
-# ============================================================================
-
-# 主配置文件路径
-CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
-
-# 训练脚本路径
-TRAIN_SCRIPT = str(get_train_script())
-
-# 评估脚本路径
-EVAL_SCRIPT = str(get_eval_script())
-
-# 系统提示词路径
-SYSTEM_PROMPT_PATH = str(get_system_prompt())
-
-# 实验记录文件路径
-EXPERIMENTS_FILE = str(get_experiments_history_file())
-
-
-if __name__ == "__main__":
-    # 测试代码
-    print("=" * 80)
-    print("路径工具测试")
-    print("=" * 80)
-    
-    print(f"\n项目根目录: {get_project_root()}")
-    print(f"Agent 目录: {get_agent_dir()}")
-    print(f"配置目录: {get_configs_dir()}")
-    print(f"训练脚本: {get_train_script()}")
-    
-    print(f"\n配置文件存在: {file_exists(get_config_file())}")
-    print(f"训练脚本存在: {file_exists(get_train_script())}")
-    
-    print(f"\n所有配置文件:")
-    for config in get_all_config_files():
-        print(f"  - {config.name}")
-    
-    print(f"\n路径信息示例:")
-    print_path_info(get_config_file())

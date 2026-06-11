@@ -13,19 +13,19 @@ import re
 
 # 导入 utils 模块
 from agent.utils import (
-    get_config_file,
-    get_experiments_dir,
-    ensure_dir,
     get_experiment_log_path,
-    get_project_root,
+    get_experiment_dir,
+    resolve_config_path,
+    resolve_data_path,
+    resolve_optional_project_path,
     ExperimentTracker,
 )
 from agent.utils.runner import run_training
+from agent.core.adapters import RUNNER_ADAPTERS
+from agent.core.contracts import OperationResult
+from agent.core.experiment_service import ExperimentService
 
 # 全局路径
-CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
-
-
 def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
     candidates: List[Path] = []
     ckpt_scores: Dict[Path, float] = {}
@@ -85,26 +85,6 @@ def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
     return [str(best_path)]
 
 
-def _resolve_path(path_value: Optional[str]) -> Optional[Path]:
-    if not path_value:
-        return None
-    path = Path(path_value)
-    if path.is_absolute():
-        return path
-    return get_project_root() / path
-
-
-def _resolve_data_folder(path_value: Optional[str]) -> str:
-    if not path_value or path_value == "!PLACEHOLDER":
-        return str(get_project_root() / "datasets" / "voxceleb1")
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return str(path)
-
-    return str(_resolve_path(path_value).resolve())
-
-
 def _find_output_folder(
     exp_dir: Path,
     output_folder_path: Optional[Path],
@@ -116,7 +96,7 @@ def _find_output_folder(
         candidates.append(output_folder_path)
 
     if config_output_folder:
-        resolved = _resolve_path(str(config_output_folder))
+        resolved = resolve_optional_project_path(str(config_output_folder))
         if resolved is not None:
             candidates.append(resolved)
 
@@ -196,20 +176,24 @@ def TrainModel(config_path: Optional[str] = None,
     """
     try:
         # 参数校验
-        config_path_str = config_path if config_path else CONFIG_PATH
+        config_path_str = str(resolve_config_path(config_path))
 
         # experiment_tracker 创建记录或复用已有记录
         start_time = datetime.now()
         tracker = ExperimentTracker()
         record = None
-        config_note = None
         if experiment_id:
             record = tracker.get_experiment(experiment_id)
             if record is None:
-                return f"experiment_id not found: {experiment_id}"
+                return OperationResult(
+                    status="failed",
+                    stage="training",
+                    error=f"experiment_id not found: {experiment_id}",
+                    experiment_id=experiment_id,
+                ).to_json()
 
-            training_info = record.get("training", {})
-            backup_path = training_info.get("config_backup_path")
+            execution_info = record.get("execution", {})
+            backup_path = execution_info.get("config_backup_path")
             record_config_path = record.get("config_path")
             if not config_path:
                 if backup_path and Path(backup_path).exists():
@@ -218,7 +202,12 @@ def TrainModel(config_path: Optional[str] = None,
                     config_path_str = record_config_path
 
         if not Path(config_path_str).exists():
-            return f"config_path not found: {config_path_str}"
+            return OperationResult(
+                status="failed",
+                stage="training",
+                error=f"config_path not found: {config_path_str}",
+                experiment_id=experiment_id,
+            ).to_json()
 
         # 使用 ConfigParser 读取配置（支持 YAML 引用解析）
         from agent.utils import ConfigParser
@@ -227,28 +216,28 @@ def TrainModel(config_path: Optional[str] = None,
 
         # 确定数据文件夹
         if data_folder:
-            df = _resolve_data_folder(str(data_folder))
+            df = str(resolve_data_path(data_folder))
         else:
-            df = _resolve_data_folder(str(config_data.get("data_folder")))
+            df = str(resolve_data_path(config_data.get("data_folder")))
 
         output_folder = config_data.get("output_folder")
         if record:
-            training_info = record.get("training", {})
-            if training_info.get("output_folder"):
-                output_folder = training_info.get("output_folder")
-            if training_info.get("data_folder"):
-                df = _resolve_data_folder(str(training_info.get("data_folder")))
+            execution_info = record.get("execution", {})
+            if execution_info.get("output_folder"):
+                output_folder = execution_info.get("output_folder")
+            if (record.get("task") or {}).get("dataset"):
+                df = str(resolve_data_path(record["task"]["dataset"]))
         else:
-            experiment_id = tracker.create_experiment(
+            experiment_id = tracker.create_hpo_experiment(
                 config_path=config_path_str,
                 data_folder=df,
                 output_folder=str(output_folder) if output_folder else None,
                 description=description or "",
             )
 
-        exp_dir = ensure_dir(tracker.experiments_dir / experiment_id)
+        exp_dir = get_experiment_dir(experiment_id, "hpo", create=True)
 
-        output_folder_path = _resolve_path(str(output_folder)) if output_folder else None
+        output_folder_path = resolve_optional_project_path(output_folder)
         if output_folder_path is None or exp_dir not in output_folder_path.parents:
             output_folder_path = exp_dir / "output"
             output_folder = str(output_folder_path)
@@ -294,46 +283,46 @@ def TrainModel(config_path: Optional[str] = None,
             training_metrics.update(final_metrics)
 
         # experiment_tracker 更新记录
-        tracker.update_experiment(
-            experiment_id=experiment_id,
-            status=status,
-            duration=duration,
-            error=error_msg,
-            results={"valid_error_rate": valid_error_rate},
-            training={
-                "output_folder": str(output_folder_path) if output_folder_path else None,
-                "data_folder": df,
-                "metrics": training_metrics,
-                "model_paths": model_paths,
-                "train_log_path": str(train_log_path) if train_log_path else None,
-                "epoch_data": epoch_data,
-                "final_metrics": final_metrics,
-            },
+        operation_result = RUNNER_ADAPTERS["speechbrain"].normalize_training_result({
+            "status": status,
+            "error": error_msg,
+            "output_folder": str(output_folder_path) if output_folder_path else None,
+            "metrics": training_metrics,
+            "model_paths": model_paths,
+            "train_log_path": str(train_log_path) if train_log_path else None,
+            "epoch_data": epoch_data,
+            "final_metrics": final_metrics,
+        })
+        operation_result.task = (record or {}).get("task") or {
+            "type": "speaker_verification",
+            "dataset": df,
+            "primary_metric": "eer",
+            "metric_mode": "min",
+        }
+        operation_result.model = (record or {}).get("model") or {
+            "family": "ecapa_tdnn",
+            "implementation": "speechbrain",
+            "config_path": config_path_str,
+        }
+        operation_result.execution.update({
+            "runner": "speechbrain",
+            "output_folder": output_folder,
+        })
+        operation_result.parameters = dict(overrides)
+        ExperimentService(tracker).record_result(
+            experiment_id,
+            operation_result,
+            duration_seconds=duration,
+            actor={"type": "hpo_agent", "name": "model_optimizer"},
         )
-
-        log_tail = ""
-        if train_log_path and Path(train_log_path).exists():
-            with open(train_log_path, "r", encoding="utf-8", errors="ignore") as fin:
-                lines = fin.readlines()
-                log_tail = "".join(lines[-20:])
-        else:
-            log_tail = "(train_log not found)"
-
-        result_lines = [
-            f"Experiment ID: {experiment_id}",
-            f"Valid ErrorRate: {valid_error_rate if valid_error_rate is not None else 'N/A'}",
-            f"Experiment dir: {exp_dir}",
-            "Training log (last 20 lines):",
-            log_tail.rstrip() or "(empty)",
-        ]
-        if config_note:
-            result_lines.append(f"Note: {config_note}")
-        if status == "failed" and error_msg:
-            result_lines.append(f"Error: {error_msg}")
-
-        return "\n".join(result_lines)
+        return operation_result.to_json()
     except Exception as e:
-        return f"run training failed: {str(e)}"
+        return OperationResult(
+            status="failed",
+            stage="training",
+            error=str(e),
+            experiment_id=experiment_id,
+        ).to_json()
 
 
 @tool
@@ -352,7 +341,7 @@ def EvaluateModel(experiment_id: Optional[str] = None) -> str:
         exp_dir = tracker.experiments_dir
         
         if experiment_id:
-            target_dir = exp_dir / experiment_id
+            target_dir = get_experiment_dir(experiment_id, "hpo")
             if not target_dir.exists():
                 return f"❌ 实验不存在: {experiment_id}"
         else:
@@ -372,14 +361,16 @@ def EvaluateModel(experiment_id: Optional[str] = None) -> str:
         if status != "success":
             return f"⚠️  实验未成功完成，无法评估 (状态: {status})"
 
-        training_info = record.get("training", {})
-        model_paths = training_info.get("model_paths") or []
-        output_folder = training_info.get("output_folder")
+        model_paths = [
+            item.get("path") for item in record.get("artifacts") or []
+            if item.get("type") == "checkpoint"
+        ]
+        output_folder = (record.get("execution") or {}).get("output_folder")
         if not model_paths:
             model_paths = _find_model_paths(output_folder, target_dir)
 
         model_path = model_paths[0] if model_paths else None
-        data_folder = training_info.get("data_folder")
+        data_folder = (record.get("task") or {}).get("dataset")
 
         if not model_path:
             return "⚠️  未找到模型参数文件，无法评估"
@@ -392,7 +383,7 @@ def EvaluateModel(experiment_id: Optional[str] = None) -> str:
         })
 
         updated = tracker.get_experiment(experiment_id) or {}
-        evaluation = updated.get("evaluation")
+        evaluation = {"status": updated.get("status"), "results": (updated.get("metrics") or {}).get("test")}
         if not evaluation:
             return "⚠️  评估未写入实验记录"
 
@@ -435,7 +426,7 @@ def AnalyzeResults(experiment_id: Optional[str] = None) -> str:
         exp_dir = tracker.experiments_dir
         
         if experiment_id:
-            target_dir = exp_dir / experiment_id
+            target_dir = get_experiment_dir(experiment_id, "hpo")
             if not target_dir.exists():
                 return f"❌ 实验不存在: {experiment_id}"
         else:
@@ -447,7 +438,7 @@ def AnalyzeResults(experiment_id: Optional[str] = None) -> str:
             experiment_id = target_dir.name
         
         # 查找日志文件
-        log_path = get_experiment_log_path(experiment_id)
+        log_path = get_experiment_log_path(experiment_id, "hpo")
         if not log_path.exists():
             log_files = list(target_dir.glob("*.log")) + list(target_dir.glob("*.txt"))
             if log_files:
@@ -474,11 +465,10 @@ def AnalyzeResults(experiment_id: Optional[str] = None) -> str:
             with open(record_path, 'r', encoding='utf-8') as f:
                 record = json.load(f)
             
-            if record.get('results'):
+            if record.get("metrics"):
                 summary += "\n保存的结果:\n"
-                for key, value in record['results'].items():
-                    if key != 'final_output':
-                        summary += f"  {key}: {value}\n"
+                for split, values in record["metrics"].items():
+                    summary += f"  {split}: {values}\n"
         
         return summary
     

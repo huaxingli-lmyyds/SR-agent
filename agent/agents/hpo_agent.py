@@ -10,11 +10,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from agent.utils import ExperimentTracker, get_agent_dir
+from agent.utils import ConfigParser, ExperimentTracker, get_agent_dir
 from agent.utils.reward import compute_reward
 from agent.utils.logger import AgentLogger
-from agent.utils.path_tool import get_config_file, get_hpo_experiments_dir
-from agent.memory import MemoryStore, MemoryUpdate, build_history_entry
+from agent.utils.path_tool import (
+    get_config_file,
+    get_hpo_experiments_dir,
+    get_logs_dir,
+    resolve_config_path,
+    resolve_config_value_path,
+    resolve_data_path,
+    resolve_optional_project_path,
+)
+from agent.memory import EpisodeMemory, MemoryQuery, MemoryScope, MemoryService
+from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.agents.base_agent import BaseLangChainAgent
 
 
@@ -27,9 +36,10 @@ class OptimizationResult:
     intermediate_steps: List[Any]
     best_config: Dict[str, Any]
     execution_summary: str
+    experiment_id: str
 
 
-class LangChainHPOAgent(BaseLangChainAgent):
+class HPOAgent(BaseLangChainAgent):
     """基于 LangChain v1.0 的超参数优化智能体"""
     
     def __init__(
@@ -62,12 +72,20 @@ class LangChainHPOAgent(BaseLangChainAgent):
             max_iterations=max_iterations,
             verbose=verbose,
         )
-        self.config_path = config_path
-        self.agent_logger = AgentLogger(get_agent_dir() / "logs" / "agent_HPO.log")
+        self.config_path = str(resolve_config_path(config_path))
+        self.agent_logger = AgentLogger(get_logs_dir() / "hpo_agent.log")
         self.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else get_hpo_experiments_dir()
         self.memory_key = memory_key or Path(config_path).stem or "default_model"
-        self.memory_store = MemoryStore(
-            file_path=Path(memory_path) if memory_path else None
+        memory_root = resolve_optional_project_path(memory_path) if memory_path else None
+        if memory_root is not None and memory_root.suffix:
+            memory_root = memory_root.parent
+        self.memory_service = MemoryService(root_dir=memory_root)
+        self.memory_store = self.memory_service
+        self.memory_scope = MemoryScope(
+            agent_type="hpo_agent",
+            task_type="speaker_verification",
+            model_family=self.memory_key,
+            tags=["optimization", "training", "evaluation"],
         )
         
         # 导入已修饰的工具
@@ -90,6 +108,9 @@ class LangChainHPOAgent(BaseLangChainAgent):
         summary: str,
         total_steps: int,
         intermediate_steps: Optional[List[Any]] = None,
+        experiment_id: Optional[str] = None,
+        status: str = "success",
+        error: Optional[str] = None,
     ) -> None:
         """Persist optimization summary without interrupting execution."""
         try:
@@ -97,32 +118,23 @@ class LangChainHPOAgent(BaseLangChainAgent):
             best_metrics = {k: v for k, v in best_config.items() if k in metric_keys}
             best_params = {k: v for k, v in best_config.items() if k not in metric_keys}
             changes, outcomes = self._extract_change_history(intermediate_steps or [])
-            history_entry = build_history_entry(
+            if error:
+                outcomes["error"] = error
+            self.memory_service.remember_episode(EpisodeMemory(
+                agent_type="hpo_agent",
                 objective=objective,
-                best_config=best_params,
-                best_metrics=best_metrics,
+                action={
+                    "best_config": best_params,
+                    "changes": changes,
+                    "total_steps": total_steps,
+                },
+                outcome={"best_metrics": best_metrics, **outcomes},
                 summary=summary,
-                total_steps=total_steps,
-                changes=changes,
-                outcomes=outcomes,
-            )
-            metadata = {
-                "last_updated": history_entry["timestamp"],
-                "config_path": self.config_path,
-                "last_objective": objective,
-                "last_best_config": best_params,
-                "last_best_metrics": history_entry["best_metrics"],
-                "last_summary": summary,
-                "last_total_steps": total_steps,
-                "last_changes": changes,
-                "last_outcomes": outcomes,
-            }
-            update = MemoryUpdate(
-                model_key=self.memory_key,
-                metadata=metadata,
-                history_entry=history_entry,
-            )
-            self.memory_store.update_model(update)
+                experiment_ids=[experiment_id] if experiment_id else [],
+                scope=self.memory_scope,
+                status=status,
+                importance=0.9 if status == "failed" or best_metrics else 0.7,
+            ))
         except Exception as exc:
             self.agent_logger.append(f"memory_update_failed error={exc}")
     
@@ -132,7 +144,7 @@ class LangChainHPOAgent(BaseLangChainAgent):
         try:
             return prompt_path.read_text(encoding="utf-8").strip()
         except OSError:
-            return "You are an ECAPA-TDNN hyperparameter optimization agent." 
+            return "You are a model-agnostic hyperparameter optimization agent."
 
     def _get_history_context(self, metric: str = "eer") -> str:
         """从实验历史中提取基线信息。"""
@@ -143,7 +155,7 @@ class LangChainHPOAgent(BaseLangChainAgent):
 
         best = best_list[0]
         exp_id = best.get("experiment_id", "N/A")
-        results = best.get("results", {})
+        results = (best.get("metrics") or {}).get("test") or (best.get("metrics") or {}).get("validation") or {}
         config = best.get("config", {})
 
         key_fields = ["lr", "batch_size", "number_of_epochs"]
@@ -163,7 +175,10 @@ class LangChainHPOAgent(BaseLangChainAgent):
     def _get_memory_context(self, max_chars: int = 800) -> str:
         """从记忆存储中提取精简上下文。"""
         try:
-            memory = self.memory_store.get_model(self.memory_key)
+            memory = self.memory_store.get_model(
+                self.memory_key,
+                dataset_key=self.memory_scope.dataset_key,
+            )
             if not memory:
                 return "记忆摘要: 暂无记录。"
 
@@ -265,12 +280,39 @@ class LangChainHPOAgent(BaseLangChainAgent):
         Returns:
             OptimizationResult 实例
         """
+        run_started_at = datetime.now()
+        tracker = ExperimentTracker(self.experiments_dir)
+        config_data = ConfigParser(self.config_path).load_config(resolve_references=True)
+        data_folder = str(resolve_data_path(config_data.get("data_folder")))
+        self.memory_scope.dataset_key = data_folder
+        output_folder = config_data.get("output_folder")
+        resolved_output = resolve_config_value_path(output_folder)
+        experiment_id = tracker.create_hpo_experiment(
+            config_path=self.config_path,
+            data_folder=data_folder,
+            output_folder=str(resolved_output) if resolved_output else None,
+            description="HPO agent optimization run",
+            extra_fields={
+                "extensions": {
+                    "optimization": {
+                        "target_eer": target_eer,
+                        "max_experiments": max_experiments,
+                    }
+                }
+            },
+        )
+
         # 构建优化目标
         history_context = self._get_history_context(metric="eer")
         memory_context = self._get_memory_context(max_chars=800)
 
         if custom_objective:
-            objective = f"{history_context}\n{memory_context}\n{custom_objective}"
+            objective = (
+                f"{history_context}\n{memory_context}\n"
+                f"本轮 HPO 实验 ID: {experiment_id}。调用 TrainModel、RunEvaluation、"
+                f"EvaluateModel 等实验工具时必须传入 experiment_id={experiment_id}。\n"
+                f"{custom_objective}"
+            )
         else:
             objective = f"""
         优化 ECAPA-TDNN 模型的超参数以提升性能。
@@ -283,6 +325,9 @@ class LangChainHPOAgent(BaseLangChainAgent):
         {history_context}
 
         {memory_context}
+
+        本轮 HPO 实验 ID: {experiment_id}。
+        调用 TrainModel、RunEvaluation、EvaluateModel 等实验工具时必须传入 experiment_id={experiment_id}。
 
         请开始优化，使用可用工具完成实验，并在最后提供最佳配置。
         约束：每轮最多只允许 1 次 UpdateConfig、1 次 TrainModel、1 次 RunEvaluation。
@@ -301,6 +346,15 @@ class LangChainHPOAgent(BaseLangChainAgent):
             print()
 
         self.agent_logger.append(f"objective={objective.strip()}")
+        tracker.update_hpo_experiment(
+            experiment_id=experiment_id,
+            status="running",
+            extensions={"optimization": {
+                "target_eer": target_eer,
+                "max_experiments": max_experiments,
+                "objective": objective,
+            }},
+        )
         
         # 执行智能体（直接 invoke，无需 AgentExecutor）
         try:
@@ -322,6 +376,23 @@ class LangChainHPOAgent(BaseLangChainAgent):
             
             # 生成总结
             summary = self._generate_summary(intermediate_steps, best_config)
+            duration = (datetime.now() - run_started_at).total_seconds()
+            record = tracker.get_experiment(experiment_id) or {}
+            run_history = list(((record.get("extensions") or {}).get("optimization") or {}).get("run_history") or [])
+            run_history.append(
+                {
+                    "started_at": run_started_at.isoformat(),
+                    "completed_at": datetime.now().isoformat(),
+                    "status": "success",
+                    "duration_seconds": duration,
+                    "target_eer": target_eer,
+                    "objective": objective,
+                    "best_config": best_config,
+                    "execution_summary": summary,
+                    "final_answer": final_answer,
+                    "total_steps": len(intermediate_steps),
+                }
+            )
             
             optimization_result = OptimizationResult(
                 objective=objective,
@@ -329,7 +400,8 @@ class LangChainHPOAgent(BaseLangChainAgent):
                 total_steps=len(intermediate_steps),
                 intermediate_steps=intermediate_steps,
                 best_config=best_config,
-                execution_summary=summary
+                execution_summary=summary,
+                experiment_id=experiment_id,
             )
 
             self._persist_memory(
@@ -337,8 +409,25 @@ class LangChainHPOAgent(BaseLangChainAgent):
                 best_config=best_config,
                 summary=summary,
                 total_steps=optimization_result.total_steps,
+                intermediate_steps=intermediate_steps,
+                experiment_id=experiment_id,
             )
-            
+
+            tracker.update_hpo_experiment(
+                experiment_id=experiment_id,
+                status="success",
+                duration=duration,
+                extensions={"optimization": {
+                    "target_eer": target_eer,
+                    "objective": objective,
+                    "best_config": best_config,
+                    "execution_summary": summary,
+                    "final_answer": final_answer,
+                    "total_steps": len(intermediate_steps),
+                    "run_history": run_history,
+                }},
+                parameters=best_config,
+            )
             if self.verbose:
                 print("\n" + "=" * 80)
                 print("📋 执行总结")
@@ -355,12 +444,85 @@ class LangChainHPOAgent(BaseLangChainAgent):
             return optimization_result
         
         except Exception as e:
+            duration = (datetime.now() - run_started_at).total_seconds()
+            record = tracker.get_experiment(experiment_id) or {}
+            run_history = list(((record.get("extensions") or {}).get("optimization") or {}).get("run_history") or [])
+            run_history.append(
+                {
+                    "started_at": run_started_at.isoformat(),
+                    "completed_at": datetime.now().isoformat(),
+                    "status": "failed",
+                    "duration_seconds": duration,
+                    "target_eer": target_eer,
+                    "objective": objective,
+                    "error": str(e),
+                }
+            )
+            tracker.update_hpo_experiment(
+                experiment_id=experiment_id,
+                status="failed",
+                error=str(e),
+                duration=duration,
+                extensions={"optimization": {
+                    "target_eer": target_eer,
+                    "objective": objective,
+                    "run_history": run_history,
+                }},
+            )
+            self._persist_memory(
+                objective=objective,
+                best_config={},
+                summary="HPO run failed.",
+                total_steps=0,
+                experiment_id=experiment_id,
+                status="failed",
+                error=str(e),
+            )
             if self.verbose:
                 print(f"\n❌ 执行失败: {str(e)}")
                 import traceback
                 traceback.print_exc()
             self.agent_logger.append(f"agent_run_end error={str(e)}")
             raise
+
+    def execute_task(self, request: AgentTaskRequest) -> AgentTaskResult:
+        """Execute a coordinator request through the structured agent protocol."""
+        if request.action != "optimize_hyperparameters":
+            return AgentTaskResult(
+                status="failed",
+                error=f"unsupported HPO action: {request.action}",
+                request_id=request.request_id,
+            )
+        try:
+            result = self.optimize_hyperparameters(
+                target_eer=float(request.context.get("target_eer", 0.02)),
+                max_experiments=request.budget.get("max_experiments"),
+                custom_objective=request.objective,
+            )
+            return AgentTaskResult(
+                status="success",
+                summary={
+                    "best_config": result.best_config,
+                    "execution_summary": result.execution_summary,
+                    "final_answer": result.final_answer,
+                    "total_steps": result.total_steps,
+                },
+                recommendations=[{
+                    "action": "review_result",
+                    "reason": "HPO round completed",
+                    "priority": "normal",
+                }],
+                experiment_ids={"hpo": result.experiment_id},
+                request_id=request.request_id,
+                runtime_result=result,
+            )
+        except Exception as exc:
+            return AgentTaskResult(
+                status="failed",
+                error=str(exc),
+                experiment_ids=request.experiment_ids,
+                request_id=request.request_id,
+            )
     
     def _extract_best_config(
         self,
@@ -503,6 +665,8 @@ class LangChainHPOAgent(BaseLangChainAgent):
         Returns:
             OptimizationResult 实例
         """
+        objective = f"{self._get_memory_context(max_chars=800)}\n\n{objective}"
+
         if self.verbose:
             print("=" * 80)
             print("🤖 执行自定义任务")
@@ -534,7 +698,8 @@ class LangChainHPOAgent(BaseLangChainAgent):
             total_steps=len(intermediate_steps),
             intermediate_steps=intermediate_steps,
             best_config=best_config,
-            execution_summary=summary
+            execution_summary=summary,
+            experiment_id="",
         )
 
         self._persist_memory(
@@ -557,17 +722,18 @@ class LangChainHPOAgent(BaseLangChainAgent):
             "num_tools": len(self.tools),
             "tool_names": [tool.name for tool in self.tools],
             "memory_key": self.memory_key,
-            "memory_path": str(self.memory_store.file_path)
+            "memory_path": str(self.memory_service.root_dir)
         }
 
 
-def create_react_agent(
+def create_hpo_agent(
     model_name: str = "GLM-4.7",
     temperature: float = 0.2,
     max_iterations: int = 10,
     verbose: bool = True,
+    config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
     experiments_dir: Optional[str] = None,
-) -> LangChainHPOAgent:
+) -> HPOAgent:
     """
     创建 LangChain v1.0 智能体的便捷函数
     
@@ -578,16 +744,13 @@ def create_react_agent(
         verbose: 是否显示详细输出
         
     Returns:
-        LangChainHPOAgent 实例
+        HPOAgent 实例
     """
-    return LangChainHPOAgent(
+    return HPOAgent(
         model_name=model_name,
         temperature=temperature,
         max_iterations=max_iterations,
         verbose=verbose,
+        config_path=config_path,
         experiments_dir=experiments_dir,
     )
-
-
-# 兼容性别名
-ReActHPOAgent = LangChainHPOAgent

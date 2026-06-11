@@ -11,6 +11,8 @@ import json
 # 导入路径工具
 from .path_tool import (
     get_config_file,
+    resolve_config_path,
+    get_experiment_configs_dir,
     backup_file,
     yaml_to_dict,
     format_nested_dict
@@ -122,10 +124,7 @@ class ConfigParser:
         参数:
             config_path: 配置文件路径，如果为 None 则使用默认配置
         """
-        if config_path:
-            self.config_path = Path(config_path)
-        else:
-            self.config_path = get_config_file("train_ecapa_tdnn.yaml")
+        self.config_path = resolve_config_path(config_path)
 
         self._config_cache_raw = None
         self._config_cache = None
@@ -213,7 +212,10 @@ class ConfigParser:
             # 创建备份
             backup_path = None
             if create_backup:
-                backup_path = backup_file(self.config_path)
+                backup_path = backup_file(
+                    self.config_path,
+                    backup_dir=get_experiment_configs_dir(),
+                )
             
             # 保存配置
             yaml_parser = YAML()

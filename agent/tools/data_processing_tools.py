@@ -7,27 +7,18 @@
 from langchain_core.tools import tool
 from typing import Optional, List, Any
 from pathlib import Path
-import os
 import json
 
-from agent.utils import ConfigParser, get_config_file
-from agent.utils.path_tool import get_datasets_dir, get_project_root
+from agent.utils import ConfigParser, ExperimentTracker
+from agent.core.contracts import Artifact, OperationResult
+from agent.utils.path_tool import (
+    get_experiment_artifact_dir,
+    is_remote_path,
+    resolve_config_path,
+    resolve_config_value_path,
+    resolve_data_path,
+)
 from agent.utils import runner
-
-CONFIG_PATH = str(get_config_file("train_ecapa_tdnn.yaml"))
-
-
-def _resolve_data_folder(path_value: Optional[str]) -> str:
-    if not path_value or path_value == "!PLACEHOLDER":
-        return str(get_datasets_dir() / "voxceleb1")
-
-    path = Path(path_value)
-    if path.is_absolute():
-        return str(path)
-
-    project_root = get_project_root()
-    return str((project_root / path).resolve())
-
 
 def _parse_bool(value: Optional[str]) -> Optional[bool]:
     if value is None:
@@ -87,6 +78,7 @@ def _count_csv_rows(path: Path) -> Optional[int]:
 @tool
 def PrepareVoxCelebData(
     config_path: Optional[str] = None,
+    experiment_id: Optional[str] = None,
     split_ratio: Optional[str] = None,
     sentence_len: Optional[str] = None,
     skip_prep: Optional[str] = None,
@@ -98,6 +90,7 @@ def PrepareVoxCelebData(
 
     参数:
         config_path: 配置文件路径
+        experiment_id: 数据处理实验 ID，用于保存本次数据准备结果
         split_ratio: 训练/验证比例（JSON 列表或 "90,10"）
         sentence_len: 片段长度（秒）
         skip_prep: 是否跳过准备
@@ -108,7 +101,8 @@ def PrepareVoxCelebData(
         str: 数据准备结果与统计摘要
     """
     try:
-        cfg_path = config_path if config_path else CONFIG_PATH
+        tracker = ExperimentTracker()
+        cfg_path = str(resolve_config_path(config_path))
         parser = ConfigParser(cfg_path)
         config_data = parser.load_config(resolve_references=True)
 
@@ -128,18 +122,41 @@ def PrepareVoxCelebData(
         if split_speaker_val is None:
             split_speaker_val = False
 
-        df = _resolve_data_folder(config_data.get("data_folder"))
+        df = str(resolve_data_path(config_data.get("data_folder")))
 
         sf = config_data.get("save_folder")
         if not sf:
-            return "❌ 无法确定 save_folder，请在配置中设置"
+            return OperationResult(
+                status="failed",
+                stage="data_preparation",
+                error="save_folder is not configured",
+                experiment_id=experiment_id,
+            ).to_json()
+        if experiment_id:
+            sf = str(get_experiment_artifact_dir(
+                experiment_id,
+                "data",
+                "data_processing",
+                create=True,
+            ))
+        else:
+            resolved_save_folder = resolve_config_value_path(sf)
+            sf = str(resolved_save_folder) if resolved_save_folder is not None else None
 
         vf = config_data.get("verification_file")
         if not vf:
-            return "❌ 无法确定 verification_file，请在配置中设置"
+            return OperationResult(
+                status="failed",
+                stage="data_preparation",
+                error="verification_file is not configured",
+                experiment_id=experiment_id,
+            ).to_json()
 
         splits_val = config_data.get("splits") or ["train", "dev"]
         source_val = config_data.get("voxceleb_source")
+        if source_val and not is_remote_path(source_val):
+            resolved_source = resolve_config_value_path(source_val)
+            source_val = str(resolved_source) if resolved_source is not None else None
         amp_th_val = config_data.get("amp_th") or 5e-04
 
         prep_result = runner.run_data_prep(
@@ -158,7 +175,30 @@ def PrepareVoxCelebData(
         )
 
         if prep_result.get("status") != "success":
-            return f"❌ 数据准备失败: {prep_result.get('error')}"
+            if experiment_id:
+                tracker.update_experiment(
+                    experiment_id=experiment_id,
+                    experiment_type="data_processing",
+                    stage="data_preparation",
+                    status="failed",
+                    error=prep_result.get("error"),
+                    parameters={
+                        "data_folder": df,
+                        "save_folder": sf,
+                        "verification_file": str(vf),
+                        "split_ratio": split_ratio_val,
+                        "sentence_len": sentence_len_val,
+                        "skip_prep": skip_prep_val,
+                        "random_segment": random_segment_val,
+                        "split_speaker": split_speaker_val,
+                    },
+                )
+            return OperationResult(
+                status="failed",
+                stage="data_preparation",
+                error=prep_result.get("error"),
+                experiment_id=experiment_id,
+            ).to_json()
 
         sf_path = Path(prep_result.get("save_folder") or sf)
         verification_local = prep_result.get("verification_local")
@@ -171,29 +211,83 @@ def PrepareVoxCelebData(
             "train": _count_csv_rows(train_csv),
             "dev": _count_csv_rows(dev_csv),
         }
+        csv_files = {
+            "train": str(train_csv),
+            "dev": str(dev_csv),
+        }
 
-        summary = (
-            "✅ 数据准备完成！\n"
-            f"数据目录: {df}\n"
-            f"保存目录: {sf_path}\n"
-            f"验证列表: {verification_local}\n"
-            f"拆分比例: {split_ratio_val}\n"
-            f"片段长度: {sentence_len_val}s\n"
-            f"随机切片: {random_segment_val}\n"
-            f"按说话人划分: {split_speaker_val}\n"
-            f"跳过准备: {skip_prep_val}\n\n"
-            "📊 CSV 统计:\n"
-            f"  - train: {stats['train']}\n"
-            f"  - dev: {stats['dev']}\n"
-            "📁 CSV 路径:\n"
-            f"  - train: {train_csv}\n"
-            f"  - dev: {dev_csv}\n"
-        )
+        if experiment_id:
+            tracker.update_experiment(
+                experiment_id=experiment_id,
+                experiment_type="data_processing",
+                stage="data_preparation",
+                status="success",
+                parameters={
+                    "data_folder": df,
+                    "save_folder": str(sf_path),
+                    "output_folder": str(sf_path),
+                    "verification_file": str(verification_local) if verification_local else None,
+                    "split_ratio": split_ratio_val,
+                    "sentence_len": sentence_len_val,
+                    "splits": splits_val,
+                    "skip_prep": skip_prep_val,
+                    "random_segment": random_segment_val,
+                    "split_speaker": split_speaker_val,
+                    "amp_th": amp_th_val,
+                },
+                metrics={"summary": stats},
+                artifacts=[
+                    {"type": "manifest", "name": name, "path": path}
+                    for name, path in csv_files.items()
+                ],
+                extensions={
+                    "data_preparation": {
+                        "verification_file": str(verification_local) if verification_local else None,
+                        "prepare_status": "success",
+                    }
+                },
+            )
 
-        return summary
+        return OperationResult(
+            status="success",
+            stage="data_preparation",
+            task={"type": "speaker_verification", "dataset": df},
+            execution={"runner": "speechbrain", "output_folder": str(sf_path)},
+            metrics={"summary": stats},
+            artifacts=[
+                Artifact("manifest", name, path)
+                for name, path in csv_files.items()
+            ],
+            parameters={
+                "data_folder": df,
+                "save_folder": str(sf_path),
+                "verification_file": str(verification_local) if verification_local else None,
+                "split_ratio": split_ratio_val,
+                "sentence_len": sentence_len_val,
+                "skip_prep": skip_prep_val,
+                "random_segment": random_segment_val,
+                "split_speaker": split_speaker_val,
+            },
+            extensions={"data_preparation": {"prepare_status": "success"}},
+            experiment_id=experiment_id,
+        ).to_json()
     except Exception as e:
-        import traceback
-        return f"❌ 数据准备失败: {str(e)}\n{traceback.format_exc()}"
+        if experiment_id:
+            tracker = ExperimentTracker()
+            tracker.update_experiment(
+                experiment_id=experiment_id,
+                experiment_type="data_processing",
+                stage="data_preparation",
+                status="failed",
+                error=str(e),
+                extensions={"data_preparation": {"prepare_status": "failed"}},
+            )
+        return OperationResult(
+            status="failed",
+            stage="data_preparation",
+            error=str(e),
+            experiment_id=experiment_id,
+        ).to_json()
 
 
 __all__ = [

@@ -1,17 +1,15 @@
 """
 智能体模块
-包含基于 ReAct 框架的声纹识别超参数优化智能体
+包含模型无关的超参数优化、数据处理和协调智能体
 """
 
-from .react_agent import (
-    LangChainHPOAgent,
-    ReActHPOAgent,  # 兼容性别名
-    create_react_agent,
+from .hpo_agent import (
+    HPOAgent,
+    create_hpo_agent,
     OptimizationResult
 )
 from .data_processing_agent import (
     DataProcessingAgent,
-    DataProcessingHPOAgent,
     DataProcessingResult,
     create_data_processing_agent,
 )
@@ -20,17 +18,27 @@ from .orchestrator import (
     OrchestratedPipeline,
     OrchestrationResult,
 )
+from .communication import (
+    AgentMessage,
+    AgentTaskRequest,
+    AgentTaskResult,
+    MessageService,
+    MessageType,
+)
 
 __all__ = [
-    'LangChainHPOAgent',
-    'ReActHPOAgent',
-    'create_react_agent',
+    'HPOAgent',
+    'create_hpo_agent',
     'OptimizationResult',
     'DataProcessingAgent',
-    'DataProcessingHPOAgent',
     'DataProcessingResult',
     'create_data_processing_agent',
     'CoordinatorAgent',
     'OrchestratedPipeline',
     'OrchestrationResult',
+    'AgentMessage',
+    'AgentTaskRequest',
+    'AgentTaskResult',
+    'MessageService',
+    'MessageType',
 ]

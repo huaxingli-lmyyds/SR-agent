@@ -11,16 +11,11 @@ from agent.utils.reward import compute_reward
 
 
 def _normalize_metrics(record: Dict[str, Any]) -> Dict[str, Any]:
-    evaluation = record.get("evaluation") or {}
-    eval_results = evaluation.get("results") or {}
-    results = record.get("results") or {}
-
-    metrics = {
-        "eer": eval_results.get("eer", results.get("eer")),
-        "min_dcf": eval_results.get("min_dcf", results.get("min_dcf")),
+    metrics = record.get("metrics") or {}
+    return {
+        "eer": (metrics.get("test") or {}).get("eer", (metrics.get("validation") or {}).get("eer")),
+        "min_dcf": (metrics.get("test") or {}).get("min_dcf"),
     }
-
-    return metrics
 
 
 @tool
