@@ -129,3 +129,13 @@ docstring-code-format = true
 
 [tool.codespell]
 skip = "./tests/tmp,./**/result,*.csv,*train.txt,*test.txt"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "unit: pure unit and contract tests",
+    "integration: component integration tests without GPU or external services",
+    "gpu: tests that require GPU resources",
+    "slow: long-running tests",
+]

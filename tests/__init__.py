@@ -1,0 +1,1 @@
+"""Non-GPU architecture tests."""

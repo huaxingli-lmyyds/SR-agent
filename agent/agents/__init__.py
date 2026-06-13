@@ -1,60 +1,41 @@
-"""
-智能体模块
-包含模型无关的超参数优化、数据处理和协调智能体
-"""
+"""Agent implementations and coordination primitives with lazy exports."""
 
-from .hpo_agent import (
-    HPOAgent,
-    create_hpo_agent,
-    OptimizationResult
-)
-from .data_processing_agent import (
-    DataProcessingAgent,
-    DataProcessingResult,
-    create_data_processing_agent,
-)
-from .orchestrator import (
-    CoordinatorAgent,
-    OrchestratedPipeline,
-    OrchestrationResult,
-)
-from .communication import (
-    AgentMessage,
-    AgentTaskRequest,
-    AgentTaskResult,
-    MessageService,
-    MessageType,
-)
-from .coordination import (
-    AgentRegistration,
-    AgentRegistry,
-    CompletionDecision,
-    CompletionPolicy,
-    CoordinatedAgent,
-    TaskDispatcher,
-    TaskExecutionRecord,
-)
+from importlib import import_module
+from typing import Dict, Tuple
 
-__all__ = [
-    'HPOAgent',
-    'create_hpo_agent',
-    'OptimizationResult',
-    'DataProcessingAgent',
-    'DataProcessingResult',
-    'create_data_processing_agent',
-    'CoordinatorAgent',
-    'OrchestratedPipeline',
-    'OrchestrationResult',
-    'AgentMessage',
-    'AgentTaskRequest',
-    'AgentTaskResult',
-    'MessageService',
-    'MessageType',
-    'AgentRegistration',
-    'AgentRegistry',
-    'CompletionDecision',
-    'CompletionPolicy',
-    'CoordinatedAgent',
-    'TaskDispatcher',
-    'TaskExecutionRecord',
-]
+_EXPORTS: Dict[str, Tuple[str, str]] = {
+    "HPOAgent": ("agent.agents.hpo_agent", "HPOAgent"),
+    "create_hpo_agent": ("agent.agents.hpo_agent", "create_hpo_agent"),
+    "OptimizationResult": ("agent.agents.hpo_agent", "OptimizationResult"),
+    "DataProcessingAgent": ("agent.agents.data_processing_agent", "DataProcessingAgent"),
+    "DataProcessingResult": ("agent.agents.data_processing_agent", "DataProcessingResult"),
+    "create_data_processing_agent": ("agent.agents.data_processing_agent", "create_data_processing_agent"),
+    "CoordinatorAgent": ("agent.agents.orchestrator", "CoordinatorAgent"),
+    "OrchestratedPipeline": ("agent.agents.orchestrator", "OrchestratedPipeline"),
+    "OrchestrationResult": ("agent.agents.orchestrator", "OrchestrationResult"),
+    "AgentMessage": ("agent.agents.communication", "AgentMessage"),
+    "AgentTaskRequest": ("agent.agents.communication", "AgentTaskRequest"),
+    "AgentTaskResult": ("agent.agents.communication", "AgentTaskResult"),
+    "MessageService": ("agent.agents.communication", "MessageService"),
+    "MessageType": ("agent.agents.communication", "MessageType"),
+    "AgentRegistration": ("agent.agents.coordination", "AgentRegistration"),
+    "AgentRegistry": ("agent.agents.coordination", "AgentRegistry"),
+    "CompletionDecision": ("agent.agents.coordination", "CompletionDecision"),
+    "CompletionPolicy": ("agent.agents.coordination", "CompletionPolicy"),
+    "CoordinatedAgent": ("agent.agents.coordination", "CoordinatedAgent"),
+    "TaskDispatcher": ("agent.agents.coordination", "TaskDispatcher"),
+    "TaskExecutionRecord": ("agent.agents.coordination", "TaskExecutionRecord"),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
+
+
+__all__ = list(_EXPORTS)

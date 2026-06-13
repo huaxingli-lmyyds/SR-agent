@@ -7,6 +7,7 @@ agent/logs/
 
 read/
 
+
 # Agent experiments
 agent/experiments/
 agent/experiments_hpo_version1/
@@ -18,12 +19,13 @@ agent/experiment*.zip
 datasets.zip
 *.md
 *_*.md
+!TESTING_GUIDE.md
 !MODEL_AGNOSTIC_EXPERIMENT_REFACTOR.md
 !DATA_PROCESSING_EXTENSION.md
 !AGENT_OPTIMIZATION_ROADMAP.md
 !COORDINATION_REFACTOR.md
 !SYSTEM_ARCHITECTURE.md
-
+agent/log.zip
 
 # Test files and reports
 agent/tests/

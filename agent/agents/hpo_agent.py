@@ -95,7 +95,6 @@ class HPOAgent(BaseLangChainAgent):
         if memory_root is not None and memory_root.suffix:
             memory_root = memory_root.parent
         self.memory_service = MemoryService(root_dir=memory_root)
-        self.memory_store = self.memory_service
         self.memory_scope = MemoryScope(
             agent_type="hpo_agent",
             task_type=self.task_type,
@@ -201,7 +200,7 @@ class HPOAgent(BaseLangChainAgent):
     def _get_memory_context(self, max_chars: int = 800) -> str:
         """从记忆存储中提取精简上下文。"""
         try:
-            memory = self.memory_store.get_model(
+            memory = self.memory_service.get_model(
                 self.model_family,
                 dataset_key=self.memory_scope.dataset_key,
                 task_type=self.task_type,

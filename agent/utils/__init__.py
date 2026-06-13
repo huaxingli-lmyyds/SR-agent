@@ -3,6 +3,8 @@
 提供路径管理、配置解析、实验跟踪、日志记录和性能指标分析等功能
 """
 
+from importlib import import_module
+
 from .path_tool import (
     get_project_root,
     get_agent_dir,
@@ -61,16 +63,6 @@ from .experiment_tracker import (
     get_experiment_stats
 )
 
-from .logger import (
-    Logger,
-    get_logger,
-    AgentLogger,
-)
-
-from .agent_middleware import (
-    build_agent_logging_middleware,
-)
-
 from .metrics import (
     MetricsExtractor,
     MetricsCalculator,
@@ -86,6 +78,26 @@ from .reward import (
     compute_reward,
     compute_objective_reward,
 )
+
+_OPTIONAL_EXPORTS = {
+    "Logger": ("agent.utils.logger", "Logger"),
+    "get_logger": ("agent.utils.logger", "get_logger"),
+    "AgentLogger": ("agent.utils.logger", "AgentLogger"),
+    "build_agent_logging_middleware": (
+        "agent.utils.agent_middleware",
+        "build_agent_logging_middleware",
+    ),
+}
+
+
+def __getattr__(name):
+    try:
+        module_name, attribute = _OPTIONAL_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
 
 __all__ = [
     # path_tool
