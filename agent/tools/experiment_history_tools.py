@@ -100,40 +100,47 @@ def _metric_mode(records: List[Optional[Dict[str, Any]]], metric: str) -> str:
 
 @tool
 def CompareHPOExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "eer", mode: Optional[str] = None) -> str:
+    """Compare HPO experiments using a selected metric and optimization mode."""
     return _compare(ExperimentTracker(get_hpo_experiments_dir()), experiment_ids, metric, mode)
 
 
 @tool
 def GetHPOExperimentResults(experiment_id: Optional[str] = None) -> str:
+    """Return a structured summary of one HPO experiment."""
     record = _record(ExperimentTracker(get_hpo_experiments_dir()), experiment_id)
     return json.dumps(_summary(record) if record else {"error": "experiment not found"}, ensure_ascii=False, default=str)
 
 
 @tool
 def ListHPOExperiments(n: int = 10) -> str:
+    """List recent HPO experiments as structured summaries."""
     records = ExperimentTracker(get_hpo_experiments_dir()).list_experiments(limit=n)
     return json.dumps([_summary(record) for record in records], ensure_ascii=False, default=str)
 
 
 @tool
 def CompareDataProcessingExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "error_count", mode: Optional[str] = None) -> str:
+    """Compare data-processing experiments using a selected metric."""
     return _compare(ExperimentTracker(get_data_processing_experiments_dir()), experiment_ids, metric, mode)
 
 
 @tool
 def GetDataProcessingExperimentResults(experiment_id: Optional[str] = None) -> str:
+    """Return a structured summary of one data-processing experiment."""
     record = _record(ExperimentTracker(get_data_processing_experiments_dir()), experiment_id)
     return json.dumps(_summary(record) if record else {"error": "experiment not found"}, ensure_ascii=False, default=str)
 
 
 @tool
 def ListDataProcessingExperiments(n: int = 10) -> str:
+    """List recent data-processing experiments as structured summaries."""
     records = ExperimentTracker(get_data_processing_experiments_dir()).list_experiments(limit=n)
     return json.dumps([_summary(record) for record in records], ensure_ascii=False, default=str)
 
 
 @tool
 def CompareOrchestrationExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "rounds", mode: Optional[str] = None) -> str:
+    """Compare orchestration experiments using metrics or message counts."""
     tracker = ExperimentTracker(get_manage_experiments_dir())
     if metric == "messages":
         records = [tracker.get_experiment(item) for item in experiment_ids] if experiment_ids else tracker.list_experiments(limit=5)
@@ -146,12 +153,14 @@ def CompareOrchestrationExperiments(experiment_ids: Optional[List[str]] = None, 
 
 @tool
 def GetOrchestrationExperimentResults(experiment_id: Optional[str] = None) -> str:
+    """Return a structured summary of one orchestration experiment."""
     record = _record(ExperimentTracker(get_manage_experiments_dir()), experiment_id)
     return json.dumps(_summary(record) if record else {"error": "experiment not found"}, ensure_ascii=False, default=str)
 
 
 @tool
 def ListOrchestrationExperiments(n: int = 10) -> str:
+    """List recent orchestration experiments as structured summaries."""
     records = ExperimentTracker(get_manage_experiments_dir()).list_experiments(limit=n)
     return json.dumps([_summary(record) for record in records], ensure_ascii=False, default=str)
 

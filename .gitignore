@@ -25,6 +25,7 @@ datasets.zip
 !COORDINATION_REFACTOR.md
 !SYSTEM_ARCHITECTURE.md
 agent/log.zip
+result_of_stage_1/
 
 # Test files and reports
 agent/tests/
