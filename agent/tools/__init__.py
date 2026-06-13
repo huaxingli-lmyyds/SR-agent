@@ -20,7 +20,16 @@ from .training_tools import (
 from .experiment_history_tools import (
     GetExperimentResults,
     ListExperiments,
-    CompareExperiments
+    CompareExperiments,
+    CompareHPOExperiments,
+    GetHPOExperimentResults,
+    ListHPOExperiments,
+    CompareDataProcessingExperiments,
+    GetDataProcessingExperimentResults,
+    ListDataProcessingExperiments,
+    CompareOrchestrationExperiments,
+    GetOrchestrationExperimentResults,
+    ListOrchestrationExperiments,
 )
 
 from .evaluation_tools import (
@@ -72,6 +81,15 @@ __all__ = [
     'GetExperimentResults',
     'ListExperiments', 
     'CompareExperiments',
+    'CompareHPOExperiments',
+    'GetHPOExperimentResults',
+    'ListHPOExperiments',
+    'CompareDataProcessingExperiments',
+    'GetDataProcessingExperimentResults',
+    'ListDataProcessingExperiments',
+    'CompareOrchestrationExperiments',
+    'GetOrchestrationExperimentResults',
+    'ListOrchestrationExperiments',
     
     # evaluation_tools
     'RunEvaluation',

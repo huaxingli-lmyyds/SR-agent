@@ -165,7 +165,14 @@ def ListOrchestrationExperiments(n: int = 10) -> str:
     return json.dumps([_summary(record) for record in records], ensure_ascii=False, default=str)
 
 
+# Backward-compatible names refer to the original HPO experiment history tools.
+CompareExperiments = CompareHPOExperiments
+GetExperimentResults = GetHPOExperimentResults
+ListExperiments = ListHPOExperiments
+
+
 __all__ = [
+    "CompareExperiments", "GetExperimentResults", "ListExperiments",
     "CompareHPOExperiments", "GetHPOExperimentResults", "ListHPOExperiments",
     "CompareDataProcessingExperiments", "GetDataProcessingExperimentResults", "ListDataProcessingExperiments",
     "CompareOrchestrationExperiments", "GetOrchestrationExperimentResults", "ListOrchestrationExperiments",
