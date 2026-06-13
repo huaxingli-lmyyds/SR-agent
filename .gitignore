@@ -1,6 +1,5 @@
 /datasets/
 **/.env
-test*.py
 agent/agents/test*.py
 agent/prep_cache/
 agent/logs/
@@ -57,6 +56,9 @@ __pycache__/
 *$py.class
 test*_*.py
 **/test.py
+
+# Keep project architecture tests under version control.
+!tests/**/*.py
 
 # C extensions
 *.so
