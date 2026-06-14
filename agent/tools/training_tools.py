@@ -23,6 +23,7 @@ from agent.utils import (
 from agent.core.adapters import get_model_adapter, get_runner_adapter, get_task_adapter
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
+from agent.hpo import FailurePolicy, HPOService
 
 # 全局路径
 def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
@@ -166,7 +167,8 @@ def TrainModel(config_path: Optional[str] = None,
                task_type: Optional[str] = None,
                model_family: Optional[str] = None,
                implementation: Optional[str] = None,
-               runner: Optional[str] = None) -> str:
+               runner: Optional[str] = None,
+               experiments_dir: Optional[str] = None) -> str:
     """
     运行 ECAPA-TDNN 模型的训练脚本。
     训练完成后会自动保存实验记录，包括配置、训练日志和结果。
@@ -186,7 +188,7 @@ def TrainModel(config_path: Optional[str] = None,
 
         # experiment_tracker 创建记录或复用已有记录
         start_time = datetime.now()
-        tracker = ExperimentTracker()
+        tracker = ExperimentTracker(experiments_dir)
         record = None
         if experiment_id:
             record = tracker.get_experiment(experiment_id)
@@ -261,7 +263,15 @@ def TrainModel(config_path: Optional[str] = None,
                 execution={"runner": runner_name, "output_folder": str(output_folder) if output_folder else None},
             )
 
-        exp_dir = get_experiment_dir(experiment_id, "hpo", create=True)
+        if experiments_dir:
+            exp_dir = Path(experiments_dir).resolve() / experiment_id
+            exp_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            exp_dir = get_experiment_dir(experiment_id, "hpo", create=True)
+        if trial_id:
+            hpo_service = HPOService(tracker)
+            study = hpo_service.load_study(experiment_id)
+            hpo_service.record_trial(study, trial_id, status="running")
 
         output_folder_path = resolve_optional_project_path(output_folder)
         if trial_id:
@@ -280,9 +290,19 @@ def TrainModel(config_path: Optional[str] = None,
         trial_budget = json.loads(budget_json) if budget_json else {}
         if not isinstance(trial_parameters, dict) or not isinstance(trial_budget, dict):
             raise ValueError("parameters_json and budget_json must be JSON objects")
+        data_fraction = trial_budget.get("data_fraction")
+        if data_fraction is not None and not 0 < float(data_fraction) <= 1:
+            raise ValueError("budget data_fraction must be in (0, 1]")
+        max_duration = trial_budget.get("max_duration_seconds")
+        if max_duration is not None and float(max_duration) <= 0:
+            raise ValueError("budget max_duration_seconds must be positive")
         overrides.update(trial_parameters)
         if trial_budget.get("epochs") is not None:
             overrides["number_of_epochs"] = trial_budget["epochs"]
+        if data_fraction is not None:
+            overrides["_hpo_data_fraction"] = float(data_fraction)
+        if max_duration is not None:
+            overrides["_hpo_max_duration_seconds"] = float(max_duration)
         train_result = runner_adapter.run_training(config_path_str, overrides)
 
         end_time = datetime.now()
@@ -346,6 +366,9 @@ def TrainModel(config_path: Optional[str] = None,
             "trial_id": trial_id,
             "budget": trial_budget,
         })
+        for artifact in operation_result.artifacts:
+            if trial_id:
+                artifact.metadata["trial_id"] = trial_id
         operation_result.parameters = dict(overrides)
         ExperimentService(tracker).record_result(
             experiment_id,
@@ -366,8 +389,42 @@ def TrainModel(config_path: Optional[str] = None,
                     }
                 }},
             )
+        if trial_id and study is not None:
+            trial_metrics: Dict[str, Any] = {}
+            for split_metrics in operation_result.metrics.values():
+                trial_metrics.update(split_metrics or {})
+            failure = FailurePolicy().classify(error_msg) if status == "failed" else None
+            HPOService(tracker).record_trial(
+                study,
+                trial_id,
+                status="completed" if status == "success" else "failed",
+                metrics=trial_metrics,
+                intermediate_metrics=epoch_data,
+                cost={
+                    "duration_seconds": duration,
+                    "failure_category": failure.category if failure else None,
+                    "recoverable": failure.recoverable if failure else None,
+                },
+                artifacts=[artifact.to_dict() for artifact in operation_result.artifacts],
+                stop_reason=error_msg,
+            )
         return operation_result.to_json()
     except Exception as e:
+        if trial_id and locals().get("study") is not None and locals().get("tracker") is not None:
+            try:
+                failure = FailurePolicy().classify(str(e))
+                HPOService(tracker).record_trial(
+                    study,
+                    trial_id,
+                    status="failed",
+                    cost={
+                        "failure_category": failure.category,
+                        "recoverable": failure.recoverable,
+                    },
+                    stop_reason=str(e),
+                )
+            except Exception:
+                pass
         return OperationResult(
             status="failed",
             stage="training",

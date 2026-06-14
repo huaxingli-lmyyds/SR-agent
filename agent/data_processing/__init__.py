@@ -1,5 +1,7 @@
 """Model-agnostic data processing domain APIs."""
 
+from importlib import import_module
+
 from .contracts import (
     DataIssue,
     DataOperation,
@@ -19,6 +21,26 @@ from .service import (
     profile_from_dict,
     publish_dataset_version,
 )
+_WORKFLOW_EXPORTS = {
+    "DataProcessingDecisionPolicy": (
+        "agent.data_processing.workflow",
+        "DataProcessingDecisionPolicy",
+    ),
+    "DataProcessingWorkflow": (
+        "agent.data_processing.workflow",
+        "DataProcessingWorkflow",
+    ),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _WORKFLOW_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "DatasetSpec",
@@ -38,4 +60,6 @@ __all__ = [
     "publish_dataset_version",
     "profile_from_dict",
     "plan_from_dict",
+    "DataProcessingDecisionPolicy",
+    "DataProcessingWorkflow",
 ]

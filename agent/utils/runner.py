@@ -416,8 +416,11 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 "error": f"Config not found: {config_path}",
             }
 
+        data_fraction = None
         if isinstance(overrides, dict):
-            normalized_overrides: Union[List[str], Dict[str, Any]] = overrides
+            normalized_overrides: Union[List[str], Dict[str, Any]] = dict(overrides)
+            data_fraction = normalized_overrides.pop("_hpo_data_fraction", None)
+            normalized_overrides.pop("_hpo_max_duration_seconds", None)
         elif isinstance(overrides, list):
             normalized_overrides = overrides
         else:
@@ -496,6 +499,11 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             sb.utils.distributed.run_on_main(hparams["prepare_rir_data"])
 
         train_data, valid_data, _ = recipe.dataio_prep(hparams)
+        if data_fraction is not None and float(data_fraction) < 1.0:
+            from torch.utils.data import Subset
+
+            sample_count = max(1, int(len(train_data) * float(data_fraction)))
+            train_data = Subset(train_data, range(sample_count))
 
         sb.core.create_experiment_directory(
             experiment_directory=hparams["output_folder"],

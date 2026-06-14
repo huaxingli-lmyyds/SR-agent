@@ -12,16 +12,33 @@ from agent.utils import ExperimentTracker, get_experiment_artifact_dir
 
 from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, Trial, TrialBudget
 from .policies import EarlyStoppingPolicy, StopDecision
-from .strategies import RandomSearchStrategy, SuccessiveHalvingStrategy
+from .strategies import STRATEGIES, CandidateStrategy, SuccessiveHalvingStrategy
 
 TRIAL_STATUSES = {"suggested", "running", "completed", "promoted", "stopped", "failed"}
+TERMINAL_TRIAL_STATUSES = {"completed", "promoted", "stopped", "failed"}
+TRIAL_TRANSITIONS = {
+    "suggested": {"running", "failed", "stopped"},
+    "running": {"completed", "failed", "stopped"},
+    "completed": {"promoted", "failed"},
+    "promoted": set(),
+    "stopped": set(),
+    "failed": set(),
+}
 
 
 class HPOService:
     def __init__(self, tracker: Optional[ExperimentTracker] = None) -> None:
         self.tracker = tracker or ExperimentTracker()
-        self.random_strategy = RandomSearchStrategy()
         self.halving_strategy = SuccessiveHalvingStrategy()
+
+    @staticmethod
+    def register_strategy(strategy: CandidateStrategy) -> None:
+        """Register a candidate generator without changing scheduler code."""
+        STRATEGIES.register(strategy)
+
+    @staticmethod
+    def available_strategies() -> List[str]:
+        return STRATEGIES.names()
 
     def create_study(
         self,
@@ -34,21 +51,42 @@ class HPOService:
         reduction_factor: int = 3,
         random_seed: int = 0,
         max_trials: Optional[int] = None,
+        initial_trial_count: Optional[int] = None,
+        promotion_limits: Optional[List[int]] = None,
+        max_training_runs: Optional[int] = None,
+        min_completed_per_rung: int = 1,
     ) -> HPOStudy:
         if self.tracker.get_experiment(experiment_id) is None:
             raise ValueError(f"HPO experiment not found: {experiment_id}")
         if not search_space.parameters:
             raise ValueError("search space must contain at least one parameter")
+        parameter_names = [parameter.name for parameter in search_space.parameters]
+        if len(parameter_names) != len(set(parameter_names)):
+            raise ValueError("search space parameter names must be unique")
         if not objectives:
             raise ValueError("study must contain at least one objective")
         if not budgets:
             raise ValueError("study must contain at least one budget rung")
-        if strategy not in {"random_search", "successive_halving"}:
-            raise ValueError(f"unsupported HPO strategy: {strategy}")
+        candidate_strategy = STRATEGIES.get(strategy)
+        candidate_strategy.validate(search_space)
         if reduction_factor < 2:
             raise ValueError("reduction_factor must be at least 2")
         if max_trials is not None and max_trials <= 0:
             raise ValueError("max_trials must be positive")
+        if initial_trial_count is not None and initial_trial_count <= 0:
+            raise ValueError("initial_trial_count must be positive")
+        if max_training_runs is not None and max_training_runs <= 0:
+            raise ValueError("max_training_runs must be positive")
+        if min_completed_per_rung <= 0:
+            raise ValueError("min_completed_per_rung must be positive")
+        if any(limit < 0 for limit in (promotion_limits or [])):
+            raise ValueError("promotion_limits must be non-negative")
+        effective_run_limit = max_training_runs or max_trials
+        if initial_trial_count is not None and effective_run_limit is not None:
+            if initial_trial_count > effective_run_limit:
+                raise ValueError("initial_trial_count cannot exceed max_training_runs")
+        if len(promotion_limits or []) > max(len(budgets) - 1, 0):
+            raise ValueError("promotion_limits cannot exceed the number of promotion rungs")
         for objective in objectives:
             if objective.mode not in {"min", "max"}:
                 raise ValueError(f"unsupported objective mode: {objective.mode}")
@@ -57,6 +95,8 @@ class HPOService:
                 raise ValueError("budget epochs must be positive")
             if budget.data_fraction is not None and not 0 < budget.data_fraction <= 1:
                 raise ValueError("budget data_fraction must be in (0, 1]")
+            if budget.max_duration_seconds is not None and budget.max_duration_seconds <= 0:
+                raise ValueError("budget max_duration_seconds must be positive")
         now = datetime.now().isoformat()
         study = HPOStudy(
             study_id=f"study_{uuid4().hex[:10]}",
@@ -67,6 +107,10 @@ class HPOService:
             budgets=budgets,
             reduction_factor=reduction_factor,
             max_trials=max_trials,
+            initial_trial_count=initial_trial_count,
+            promotion_limits=list(promotion_limits or []),
+            max_training_runs=max_training_runs or max_trials,
+            min_completed_per_rung=min_completed_per_rung,
             random_seed=random_seed,
             created_at=now,
             updated_at=now,
@@ -76,15 +120,24 @@ class HPOService:
 
     def suggest_trials(self, study: HPOStudy, count: int) -> List[Trial]:
         existing_trials = self.list_trials(study.experiment_id)
-        if study.max_trials is not None:
-            count = min(count, max(study.max_trials - len(existing_trials), 0))
+        initial_trials = [trial for trial in existing_trials if trial.rung == 0]
+        initial_limit = (
+            study.initial_trial_count or study.max_trials
+            if study.strategy == "successive_halving"
+            else study.max_training_runs or study.max_trials
+        )
+        if initial_limit is not None:
+            count = min(count, max(initial_limit - len(initial_trials), 0))
+        count = min(count, self.remaining_training_runs(study))
         if count <= 0:
             return []
-        candidates = self.random_strategy.suggest(
+        candidates = STRATEGIES.get(study.strategy).suggest(
             study.search_space,
             count,
             seed=study.random_seed + len(existing_trials),
             existing=[trial.parameters for trial in existing_trials],
+            history=existing_trials,
+            objective=study.objectives[0],
         )
         now = datetime.now().isoformat()
         budget = study.budgets[0]
@@ -121,12 +174,29 @@ class HPOService:
         if status not in TRIAL_STATUSES:
             raise ValueError(f"unsupported trial status: {status}")
         trial = self.load_trial(study.experiment_id, trial_id)
+        if status != trial.status and status not in TRIAL_TRANSITIONS.get(trial.status, set()):
+            raise ValueError(f"invalid trial transition: {trial.status} -> {status}")
         trial.status = status
         trial.metrics.update(metrics or {})
         trial.intermediate_metrics = intermediate_metrics or trial.intermediate_metrics
         trial.cost.update(cost or {})
         trial.artifacts.extend(artifacts or [])
         trial.stop_reason = stop_reason
+        trial.updated_at = datetime.now().isoformat()
+        self.save_trial(study.experiment_id, trial)
+        self._refresh_study(study)
+        return trial
+
+    def retry_trial(self, study: HPOStudy, trial_id: str, reason: str) -> Trial:
+        """Explicitly reopen a failed trial for a bounded scheduler retry."""
+        if self.remaining_training_runs(study) <= 0:
+            raise ValueError("max_training_runs exhausted")
+        trial = self.load_trial(study.experiment_id, trial_id)
+        if trial.status != "failed":
+            raise ValueError(f"only failed trials can be retried, got: {trial.status}")
+        trial.status = "suggested"
+        trial.stop_reason = reason
+        trial.cost["retry_count"] = int(trial.cost.get("retry_count", 0)) + 1
         trial.updated_at = datetime.now().isoformat()
         self.save_trial(study.experiment_id, trial)
         self._refresh_study(study)
@@ -141,21 +211,73 @@ class HPOService:
         self._refresh_study(study)
         return study
 
+    def completion_errors(self, study: HPOStudy) -> List[str]:
+        """Return reasons why a study cannot be considered successfully complete."""
+        objective = study.objectives[0]
+        trials = self.list_trials(study.experiment_id)
+        completed = [
+            trial for trial in trials
+            if trial.status in {"completed", "promoted"}
+            and isinstance(trial.metrics.get(objective.metric), (int, float))
+        ]
+        errors: List[str] = []
+        if not completed:
+            errors.append("no completed trial with a valid primary metric")
+        active = [trial.trial_id for trial in trials if trial.status in {"suggested", "running"}]
+        if active:
+            errors.append(f"trials without terminal status: {', '.join(active)}")
+        if study.best_trial_id is None:
+            errors.append("best_trial_id is missing")
+        return errors
+
+    def complete_study(self, study: HPOStudy, stop_reason: Optional[str] = None) -> HPOStudy:
+        errors = self.completion_errors(study)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return self.finish_study(study, "completed", stop_reason)
+
     def promote_trials(self, study: HPOStudy) -> List[Trial]:
         objective = study.objectives[0]
+        trials = self.list_trials(study.experiment_id)
+        completed_by_rung: Dict[int, List[Trial]] = {}
+        for trial in trials:
+            if trial.status == "completed":
+                completed_by_rung.setdefault(trial.rung, []).append(trial)
+        eligible_rungs = []
+        for rung, items in completed_by_rung.items():
+            if rung + 1 >= len(study.budgets) or len(items) < study.min_completed_per_rung:
+                continue
+            limit = study.promotion_limits[rung] if rung < len(study.promotion_limits) else None
+            destination_count = len([trial for trial in trials if trial.rung == rung + 1])
+            if limit is None or destination_count < limit:
+                eligible_rungs.append(rung)
+        if not eligible_rungs:
+            return []
+        source_rung = min(eligible_rungs)
+        destination_rung = source_rung + 1
+        already_at_destination = len([trial for trial in trials if trial.rung == destination_rung])
+        promotion_limit = (
+            study.promotion_limits[source_rung]
+            if source_rung < len(study.promotion_limits)
+            else None
+        )
+        remaining_for_rung = (
+            max(promotion_limit - already_at_destination, 0)
+            if promotion_limit is not None else None
+        )
         candidates = self.halving_strategy.promote(
-            self.list_trials(study.experiment_id),
+            trials,
             objective,
             study.reduction_factor,
+            rung=source_rung,
+            limit=remaining_for_rung,
         )
         promoted: List[Trial] = []
-        remaining = None
-        if study.max_trials is not None:
-            remaining = max(study.max_trials - len(self.list_trials(study.experiment_id)), 0)
+        remaining = self.remaining_training_runs(study)
         for candidate in candidates:
             if remaining is not None and len(promoted) >= remaining:
                 break
-            next_rung = candidate.rung + 1
+            next_rung = destination_rung
             if next_rung >= len(study.budgets):
                 continue
             now = datetime.now().isoformat()
@@ -176,6 +298,14 @@ class HPOService:
             promoted.append(trial)
         self._save_study(study)
         return promoted
+
+    def remaining_training_runs(self, study: HPOStudy) -> int:
+        limit = study.max_training_runs or study.max_trials
+        if limit is None:
+            return 2**31 - 1
+        trials = self.list_trials(study.experiment_id)
+        retry_count = sum(int(trial.cost.get("retry_count", 0)) for trial in trials)
+        return max(limit - len(trials) - retry_count, 0)
 
     def early_stop(
         self,
@@ -299,6 +429,10 @@ def study_from_dict(data: Dict[str, Any]) -> HPOStudy:
         budgets=[TrialBudget(**item) for item in data.get("budgets") or []],
         reduction_factor=data.get("reduction_factor", 3),
         max_trials=data.get("max_trials"),
+        initial_trial_count=data.get("initial_trial_count"),
+        promotion_limits=data.get("promotion_limits") or [],
+        max_training_runs=data.get("max_training_runs"),
+        min_completed_per_rung=data.get("min_completed_per_rung", 1),
         constraints=data.get("constraints") or [],
         trial_ids=data.get("trial_ids") or [],
         best_trial_id=data.get("best_trial_id"),

@@ -28,10 +28,96 @@ def test_hpo_study_trial_lifecycle_without_training(
         max_trials=2,
     )
     trials = service.suggest_trials(study, 2)
+    service.record_trial(study, trials[0].trial_id, status="running")
     service.record_trial(study, trials[0].trial_id, status="completed", metrics={"eer": 0.04})
+    service.record_trial(study, trials[1].trial_id, status="running")
     service.record_trial(study, trials[1].trial_id, status="completed", metrics={"eer": 0.03})
     loaded = service.load_study(experiment_id)
 
     assert len(trials) == 2
     assert loaded.best_trial_id == trials[1].trial_id
     assert service.best_metric_value(loaded) == 0.03
+
+
+def test_hpo_quotas_promotion_and_strict_completion(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([SearchParameter("lr", "categorical", choices=[0.1, 0.2, 0.3])]),
+        [Objective("eer", "min")],
+        [TrialBudget("small", epochs=1), TrialBudget("large", epochs=2)],
+        initial_trial_count=3,
+        promotion_limits=[1],
+        max_training_runs=4,
+        min_completed_per_rung=2,
+    )
+    trials = service.suggest_trials(study, 10)
+    assert len(trials) == 3
+    for index, trial in enumerate(trials):
+        service.record_trial(study, trial.trial_id, status="running")
+        service.record_trial(study, trial.trial_id, status="completed", metrics={"eer": 0.1 + index})
+
+    promoted = service.promote_trials(study)
+    assert len(promoted) == 1
+    assert promoted[0].rung == 1
+    assert service.remaining_training_runs(study) == 0
+
+    try:
+        service.complete_study(study)
+        assert False, "active promoted trial must block completion"
+    except ValueError as exc:
+        assert "terminal status" in str(exc)
+
+    service.record_trial(study, promoted[0].trial_id, status="running")
+    service.record_trial(study, promoted[0].trial_id, status="completed", metrics={"eer": 0.05})
+    assert service.complete_study(study).status == "completed"
+
+
+def test_grid_search_strategy_is_selected_by_service(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([
+            SearchParameter("model_family", "categorical", choices=["ecapa", "resnet"]),
+            SearchParameter("batch_size", "categorical", choices=[16, 32]),
+        ]),
+        [Objective("eer", "min")],
+        [TrialBudget("full", epochs=1)],
+        strategy="grid_search",
+        max_training_runs=4,
+    )
+
+    trials = service.suggest_trials(study, 10)
+
+    assert len(trials) == 4
+    assert len({tuple(sorted(trial.parameters.items())) for trial in trials}) == 4

@@ -160,19 +160,6 @@ def get_eval_script(script_name: str = "voxceleb/speaker_verification_cosine.py"
     return get_recipes_dir() / script_name
 
 
-def get_system_prompt(prompt_name: str = "hpo_prompt.txt") -> Path:
-    """
-    获取系统提示词文件路径
-    
-    Args:
-        prompt_name: 提示词文件名，默认为 hpo_prompt.txt
-    
-    Returns:
-        Path: 提示词文件的绝对路径
-    """
-    return get_agent_dir() / "prompts" / prompt_name
-
-
 def get_experiment_configs_dir() -> Path:
     """
     获取实验配置备份目录

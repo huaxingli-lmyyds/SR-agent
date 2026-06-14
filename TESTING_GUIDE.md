@@ -10,9 +10,10 @@
 - `tests/unit/test_memory.py`：按任务、模型和数据集隔离记忆。
 - `tests/unit/test_experiment_tracker.py`：实验生命周期和历史最佳范围过滤。
 - `tests/unit/test_data_processing.py`：通用数据检查、计划执行和版本发布。
-- `tests/unit/test_execution_trace.py`：消息式工具调用转换为统一执行轨迹。
+- `tests/unit/test_hpo_strategies.py`：验证随机、网格、自适应和自动策略选择。
 - `tests/integration/test_fake_runner_tool_boundary.py`：使用 Fake Runner 检测评估工具与实验记录字段传递。
 - `tests/integration/test_hpo_service.py`：不训练情况下检测 HPO Study 和 Trial 生命周期。
+- `tests/unit/test_langgraph_workflows.py`：验证数据处理图和注册表驱动协调图。
 
 ## 隔离原则
 
@@ -42,8 +43,8 @@ python -m pytest tests/unit -q
 python -m pytest tests/integration -q
 ```
 
-安装 LangChain 相关依赖后，工具包装层和消息轨迹测试会自动从 `skipped`
-变为正常执行；未安装时不会影响纯架构测试。
+安装 LangGraph 和 LangChain 相关依赖后，工作流与工具边界测试会自动从
+`skipped` 变为正常执行；未安装时不会影响纯服务和策略测试。
 
 同时执行静态语法检查：
 

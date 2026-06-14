@@ -102,7 +102,6 @@ SR-agent/
 │   │   ├── training_tools.py      # 通用训练入口与结果分析
 │   │   ├── evaluation_tools.py    # 通用评估入口
 │   │   ├── training_diagnostics_tools.py
-│   │   ├── hpo_tools.py
 │   │   ├── experiment_history_tools.py
 │   │   └── reward_tools.py
 │   ├── utils/
@@ -114,7 +113,6 @@ SR-agent/
 │   │   ├── reward.py              # 目标指标到最大化奖励的转换
 │   │   ├── logger.py
 │   │   └── agent_middleware.py
-│   └── prompts/                    # 专业智能体系统提示词
 └── speechbrain/                    # 官方 SpeechBrain 库代码，不属于项目业务层
 ```
 
@@ -373,12 +371,57 @@ CoordinatorAgent(
 - 路径工具补充空路径拼接、目标父目录创建、负数备份保留数等边界校验。
 - 日志写入增加线程锁，工具中间件会记录工具异常后继续抛出，避免并发日志交叉和失败缺少记录。
 
-## 11. 后续建议
+## 11. LangGraph 工作流层
+
+三个业务智能体均使用 LangGraph 描述执行流程：
+
+- HPO 图：`advise -> suggest -> select_trial -> run_trial -> record_result -> promote/complete`。
+- 数据处理图：`advise -> inspect -> plan -> execute -> publish/fail`。
+- 协调图：`plan -> select_agent -> dispatch -> complete`。
+
+职责边界：
+
+- LangGraph 只承担节点顺序、条件边、循环和状态传递。
+- `HPOService`、数据处理服务和 `CompletionPolicy` 保留硬约束，直接调用服务也无法绕过规则。
+- `DecisionPolicy` 提供确定性分支判断，可通过构造参数替换。
+- LLM 仅作为可选只读 advisor 输出搜索、参数调整和诊断建议，不能决定流程分支、直接执行工具或修改领域状态。
+- 新专业智能体通过 `CoordinatorAgent.register_agent()` 或注入 `AgentRegistry` 加入；协调图自动发现注册项。
+- 专业智能体统一继承 `LangGraphAgent`，只公开 `execute_task(AgentTaskRequest) -> AgentTaskResult`；旧的 `optimize_*` 方法、专用结果对象和手工 HPO 生命周期工具已删除。
+- 新智能体实现自身 `run_workflow()` 并声明唯一 `action`，公共基类负责动作校验、异常转换和统一结果边界。
+
+## 12. 单机可靠 HPO 闭环
+
+默认 HPO 执行现在由 `HPOScheduler` 控制，固定执行
+`suggest -> train -> evaluate -> record -> promote -> complete` 状态流。LLM
+只负责搜索空间、预算和诊断建议，不能改变 Trial 状态或直接调用训练工具。
+
+关键保证：
+
+- `TrainModel` 自动将 Trial 更新为 running/completed/failed，并记录指标、耗时、失败类别和产物。
+- Study 只有在存在有效主指标、最佳 Trial，且所有 Trial 均为终态时才能成功完成。
+- `initial_trial_count`、`promotion_limits`、`max_training_runs` 分别管理初始候选、各 rung 晋升和总运行配额。
+- 晋升仅比较同一 rung，并受 `min_completed_per_rung` 约束。
+- `data_fraction` 进入训练数据子集，SpeechBrain Runner 使用独立进程执行 `max_duration_seconds` 超时终止。
+- 评估通过 `trial_id` 精确选择 checkpoint。
+- `FailurePolicy` 与 `RetryPolicy` 对可恢复失败进行分类和有界重试。
+
+HPO 候选生成策略通过 `HPOService.register_strategy()` 扩展，当前内置：
+
+- `random_search`：适合连续空间与小规模快速探索。
+- `grid_search`：枚举离散参数和模型候选，适合组合数可控的空间。
+- `adaptive_search`：围绕当前最佳 Trial 继续探索，失败或无历史时回退到随机搜索。
+- `successive_halving`：随机生成初始候选，再按同一 rung 指标逐级晋升。
+- `auto`：由 `HPOPlanningPolicy` 根据搜索空间、总训练额度和预算 rung 确定性选择上述策略。
+
+搜索空间可包含 `model_family`、`implementation` 和 `runner`，执行节点会按 Trial
+选择对应模型与 Runner，其余参数作为模型配置覆盖项。LLM 不直接应用修改，只输出可审计的
+搜索空间收缩、参数调整、模型候选和失败诊断建议，供下一次请求采纳。
+
+## 13. 后续建议
 
 下一阶段应优先完成：
 
-1. 使用通用 `OrchestrationGoal` 替换协调器入口中的 `target_eer`。
-2. 将 `RunnerAdapter` 的实现拆到独立 `runners/` 目录。
-3. 为训练日志解析增加 Runner 专属解析器，移除训练工具中的 SpeechBrain 日志正则。
-4. 增加协议级单元测试，校验所有 Request、Result 和 ExperimentRecord 均可 JSON 序列化。
-5. 增加 `BudgetPolicy` 与 `DecisionPolicy`，避免只依赖大模型决定调用次数和后续动作。
+1. 将 `RunnerAdapter` 的实现拆到独立 `runners/` 目录。
+2. 为训练日志解析增加 Runner 专属解析器，移除训练工具中的 SpeechBrain 日志正则。
+3. 增加协议级单元测试，校验所有 Request、Result 和 ExperimentRecord 均可 JSON 序列化。
+4. 接入贝叶斯优化或 TPE 时，实现新的 `CandidateStrategy` 并注册，不修改 LangGraph。

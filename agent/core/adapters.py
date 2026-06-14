@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import multiprocessing
 from pathlib import Path
+from queue import Empty
 from typing import Any, Dict, Protocol, TypeVar
 
 from .contracts import Artifact, OperationResult
@@ -70,7 +72,33 @@ class SpeechBrainRunnerAdapter:
 
     def run_training(self, config_path: str, overrides: Dict[str, Any]) -> Dict[str, Any]:
         from agent.utils.runner import run_training
-        return run_training(config_path, overrides)
+        timeout = overrides.get("_hpo_max_duration_seconds")
+        if timeout is None:
+            return run_training(config_path, overrides)
+        context = multiprocessing.get_context("spawn")
+        queue = context.Queue()
+        process = context.Process(
+            target=_run_speechbrain_training_process,
+            args=(queue, config_path, overrides),
+        )
+        process.start()
+        process.join(float(timeout))
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            return {
+                "status": "failed",
+                "valid_error_rate": None,
+                "error": f"TimeoutError: training exceeded {timeout} seconds",
+            }
+        try:
+            return queue.get(timeout=1.0)
+        except Empty:
+            return {
+                "status": "failed",
+                "valid_error_rate": None,
+                "error": f"training process exited with code {process.exitcode}",
+            }
 
     def run_evaluation(
         self,
@@ -129,6 +157,12 @@ class SpeechBrainRunnerAdapter:
 
 TASK_ADAPTERS = {"speaker_verification": SpeakerVerificationTaskAdapter()}
 MODEL_ADAPTERS = {"ecapa_tdnn": SpeechBrainEcapaAdapter()}
+def _run_speechbrain_training_process(queue: Any, config_path: str, overrides: Dict[str, Any]) -> None:
+    from agent.utils.runner import run_training
+
+    queue.put(run_training(config_path, overrides))
+
+
 RUNNER_ADAPTERS = {"speechbrain": SpeechBrainRunnerAdapter()}
 
 

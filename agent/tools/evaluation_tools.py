@@ -11,6 +11,7 @@ from langchain_core.tools import tool
 from agent.core.adapters import get_runner_adapter, get_task_adapter
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
+from agent.hpo import HPOService
 from agent.utils import (
     ExperimentTracker,
     MetricsCalculator,
@@ -22,9 +23,16 @@ from agent.utils import (
 )
 
 
-def _checkpoint_path(record: dict) -> Optional[str]:
+def _checkpoint_path(record: dict, trial_id: Optional[str] = None) -> Optional[str]:
     for artifact in record.get("artifacts") or []:
-        if artifact.get("type") == "checkpoint":
+        metadata = artifact.get("metadata") or {}
+        path = str(artifact.get("path") or "")
+        matches_trial = (
+            trial_id is None
+            or metadata.get("trial_id") == trial_id
+            or f"/trials/{trial_id}/" in path.replace("\\", "/")
+        )
+        if artifact.get("type") == "checkpoint" and matches_trial:
             return artifact.get("path")
     return None
 
@@ -34,9 +42,12 @@ def _run_evaluation(
     verification_config: Optional[str] = None,
     data_folder: Optional[str] = None,
     experiment_id: Optional[str] = None,
+    trial_id: Optional[str] = None,
+    experiments_dir: Optional[str] = None,
+    runner: Optional[str] = None,
 ) -> str:
     """Evaluate a recorded model and return a structured operation result."""
-    tracker = ExperimentTracker()
+    tracker = ExperimentTracker(experiments_dir)
     if experiment_id is None:
         recent = tracker.list_experiments(limit=1)
         if not recent:
@@ -56,14 +67,17 @@ def _run_evaluation(
             experiment_id=experiment_id,
         ).to_json()
 
-    model_path = model_path or _checkpoint_path(record)
+    model_path = model_path or _checkpoint_path(record, trial_id)
     resolved_model = resolve_optional_project_path(model_path)
     model_path = str(resolved_model) if resolved_model is not None else None
     if model_path is None:
         return OperationResult(
             status="failed",
             stage="evaluation",
-            error="no checkpoint artifact or model_path was provided",
+            error=(
+                f"no checkpoint artifact found for trial_id={trial_id}"
+                if trial_id else "no checkpoint artifact or model_path was provided"
+            ),
             experiment_id=experiment_id,
         ).to_json()
     data_folder = str(resolve_data_path(data_folder or (record.get("task") or {}).get("dataset")))
@@ -73,9 +87,12 @@ def _run_evaluation(
         record.get("experiment_type") or "hpo",
         create=True,
     )
+    if trial_id:
+        output_folder = output_folder / trial_id
+        output_folder.mkdir(parents=True, exist_ok=True)
     task = record.get("task") or {}
     execution = record.get("execution") or {}
-    runner_name = execution.get("runner") or (record.get("model") or {}).get("implementation") or "speechbrain"
+    runner_name = runner or execution.get("runner") or (record.get("model") or {}).get("implementation") or "speechbrain"
     runner_adapter = get_runner_adapter(runner_name)
     task_adapter = get_task_adapter(task.get("type") or "speaker_verification")
     config_candidate = verification_config or execution.get("evaluation_config_path")
@@ -118,7 +135,11 @@ def _run_evaluation(
     result.execution.update({
         "runner": runner_name,
         "output_folder": raw.get("output_folder") or str(output_folder),
+        "trial_id": trial_id,
     })
+    for artifact in result.artifacts:
+        if trial_id:
+            artifact.metadata["trial_id"] = trial_id
     result.parameters = {"model_path": model_path, "data_path": data_folder}
     ExperimentService(tracker).record_result(
         experiment_id,
@@ -126,6 +147,20 @@ def _run_evaluation(
         duration_seconds=(datetime.now() - started_at).total_seconds(),
         actor={"type": "hpo_agent", "name": "model_evaluator"},
     )
+    if trial_id:
+        service = HPOService(tracker)
+        study = service.load_study(experiment_id)
+        trial_metrics = {}
+        for split_metrics in result.metrics.values():
+            trial_metrics.update(split_metrics or {})
+        service.record_trial(
+            study,
+            trial_id,
+            status="completed" if result.status == "success" else "failed",
+            metrics=trial_metrics,
+            artifacts=[artifact.to_dict() for artifact in result.artifacts],
+            stop_reason=result.error,
+        )
     return result.to_json()
 
 
@@ -135,6 +170,9 @@ def RunEvaluation(
     verification_config: Optional[str] = None,
     data_folder: Optional[str] = None,
     experiment_id: Optional[str] = None,
+    trial_id: Optional[str] = None,
+    experiments_dir: Optional[str] = None,
+    runner: Optional[str] = None,
 ) -> str:
     """Evaluate through a registered runner and always return OperationResult JSON."""
     try:
@@ -143,6 +181,9 @@ def RunEvaluation(
             verification_config=verification_config,
             data_folder=data_folder,
             experiment_id=experiment_id,
+            trial_id=trial_id,
+            experiments_dir=experiments_dir,
+            runner=runner,
         )
     except Exception as exc:
         return OperationResult(

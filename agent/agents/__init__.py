@@ -4,14 +4,13 @@ from importlib import import_module
 from typing import Dict, Tuple
 
 _EXPORTS: Dict[str, Tuple[str, str]] = {
+    "AdvisoryAgentBase": ("agent.agents.base_agent", "AdvisoryAgentBase"),
+    "LangGraphAgent": ("agent.agents.base_agent", "LangGraphAgent"),
     "HPOAgent": ("agent.agents.hpo_agent", "HPOAgent"),
     "create_hpo_agent": ("agent.agents.hpo_agent", "create_hpo_agent"),
-    "OptimizationResult": ("agent.agents.hpo_agent", "OptimizationResult"),
     "DataProcessingAgent": ("agent.agents.data_processing_agent", "DataProcessingAgent"),
-    "DataProcessingResult": ("agent.agents.data_processing_agent", "DataProcessingResult"),
     "create_data_processing_agent": ("agent.agents.data_processing_agent", "create_data_processing_agent"),
     "CoordinatorAgent": ("agent.agents.orchestrator", "CoordinatorAgent"),
-    "OrchestratedPipeline": ("agent.agents.orchestrator", "OrchestratedPipeline"),
     "OrchestrationResult": ("agent.agents.orchestrator", "OrchestrationResult"),
     "AgentMessage": ("agent.agents.communication", "AgentMessage"),
     "AgentTaskRequest": ("agent.agents.communication", "AgentTaskRequest"),
@@ -25,6 +24,8 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "CoordinatedAgent": ("agent.agents.coordination", "CoordinatedAgent"),
     "TaskDispatcher": ("agent.agents.coordination", "TaskDispatcher"),
     "TaskExecutionRecord": ("agent.agents.coordination", "TaskExecutionRecord"),
+    "OrchestrationWorkflow": ("agent.agents.orchestration_workflow", "OrchestrationWorkflow"),
+    "OrchestrationDecisionPolicy": ("agent.agents.orchestration_workflow", "OrchestrationDecisionPolicy"),
 }
 
 

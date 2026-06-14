@@ -85,6 +85,10 @@ class HPOStudy:
     budgets: List[TrialBudget]
     reduction_factor: int = 3
     max_trials: Optional[int] = None
+    initial_trial_count: Optional[int] = None
+    promotion_limits: List[int] = field(default_factory=list)
+    max_training_runs: Optional[int] = None
+    min_completed_per_rung: int = 1
     constraints: List[Dict[str, Any]] = field(default_factory=list)
     trial_ids: List[str] = field(default_factory=list)
     best_trial_id: Optional[str] = None

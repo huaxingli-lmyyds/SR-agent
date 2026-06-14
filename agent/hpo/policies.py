@@ -3,13 +3,109 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import prod
 from typing import Any, Dict, List, Optional
+
+from .contracts import SearchSpace, TrialBudget
 
 
 @dataclass
 class StopDecision:
     should_stop: bool
     reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FailureDecision:
+    category: str
+    recoverable: bool
+    retry_delay_seconds: float = 0.0
+
+
+class FailurePolicy:
+    """Classify common execution failures and decide whether to retry."""
+
+    RECOVERABLE_MARKERS = (
+        "timeout",
+        "temporar",
+        "connection",
+        "resource busy",
+        "out of memory",
+        "cuda",
+        "worker",
+    )
+    NON_RECOVERABLE_MARKERS = (
+        "config",
+        "not found",
+        "invalid",
+        "unsupported",
+        "unknown adapter",
+        "missing",
+    )
+
+    def classify(self, error: Optional[str]) -> FailureDecision:
+        text = str(error or "").lower()
+        if any(marker in text for marker in self.NON_RECOVERABLE_MARKERS):
+            return FailureDecision("configuration", False)
+        if "timeout" in text:
+            return FailureDecision("timeout", True)
+        if "out of memory" in text or "cuda" in text:
+            return FailureDecision("resource", True)
+        if any(marker in text for marker in self.RECOVERABLE_MARKERS):
+            return FailureDecision("transient", True)
+        return FailureDecision("execution", False)
+
+
+class RetryPolicy:
+    """Bound retries for recoverable trial execution failures."""
+
+    def __init__(self, max_retries: int = 1, retry_delay_seconds: float = 0.0) -> None:
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+        self.max_retries = max_retries
+        self.retry_delay_seconds = retry_delay_seconds
+
+    def should_retry(self, attempt: int, failure: FailureDecision) -> bool:
+        return failure.recoverable and attempt <= self.max_retries
+
+
+class HPOPlanningPolicy:
+    """Select an optimization strategy from validated request characteristics."""
+
+    def select_strategy(
+        self,
+        requested: str,
+        search_space: SearchSpace,
+        budgets: List[TrialBudget],
+        max_training_runs: int,
+        available: List[str],
+    ) -> str:
+        if requested != "auto":
+            if requested not in available:
+                raise ValueError(f"unsupported HPO strategy: {requested}")
+            return requested
+        if len(budgets) > 1 and max_training_runs > 1:
+            return "successive_halving"
+        cardinality = self.grid_cardinality(search_space)
+        if cardinality is not None and cardinality <= max_training_runs:
+            return "grid_search"
+        return "adaptive_search" if max_training_runs >= 5 else "random_search"
+
+    @staticmethod
+    def grid_cardinality(search_space: SearchSpace) -> Optional[int]:
+        sizes = []
+        for parameter in search_space.parameters:
+            if parameter.choices:
+                sizes.append(len(parameter.choices))
+            elif (
+                parameter.parameter_type == "int"
+                and parameter.low is not None
+                and parameter.high is not None
+            ):
+                sizes.append(int(parameter.high) - int(parameter.low) + 1)
+            else:
+                return None
+        return prod(sizes)
 
 
 class EarlyStoppingPolicy:
