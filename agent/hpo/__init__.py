@@ -2,14 +2,35 @@
 
 from importlib import import_module
 
-from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, Trial, TrialBudget
-from .policies import EarlyStoppingPolicy, FailureDecision, FailurePolicy, HPOPlanningPolicy, RetryPolicy, StopDecision
+from .contracts import (
+    HPOStudy,
+    Objective,
+    OptimizationCampaign,
+    SearchParameter,
+    SearchSpace,
+    StrategyDecisionRecord,
+    StrategyProposal,
+    Trial,
+    TrialBudget,
+)
+from .policies import (
+    EarlyStoppingPolicy,
+    FailureDecision,
+    FailurePolicy,
+    HPOPlanningPolicy,
+    RetryPolicy,
+    StopDecision,
+    StrategyDecisionPolicy,
+)
 from .service import HPOService, search_space_from_dict
+from .campaign import CampaignPolicy
+from .feedback import HPOFeedbackAnalyzer
 from .strategies import (
     AdaptiveSearchStrategy,
     CandidateStrategy,
     CandidateStrategyRegistry,
     GridSearchStrategy,
+    OptunaTPEStrategy,
     RandomSearchStrategy,
     SuccessiveHalvingStrategy,
 )
@@ -39,9 +60,13 @@ __all__ = [
     "TrialBudget",
     "Trial",
     "HPOStudy",
+    "OptimizationCampaign",
+    "StrategyProposal",
+    "StrategyDecisionRecord",
     "RandomSearchStrategy",
     "GridSearchStrategy",
     "AdaptiveSearchStrategy",
+    "OptunaTPEStrategy",
     "CandidateStrategy",
     "CandidateStrategyRegistry",
     "SuccessiveHalvingStrategy",
@@ -51,10 +76,13 @@ __all__ = [
     "FailurePolicy",
     "RetryPolicy",
     "HPOPlanningPolicy",
+    "StrategyDecisionPolicy",
     "DecisionPolicy",
     "HPOScheduler",
     "HPOGraphState",
     "SchedulerResult",
     "HPOService",
+    "CampaignPolicy",
+    "HPOFeedbackAnalyzer",
     "search_space_from_dict",
 ]

@@ -12,16 +12,13 @@ import shutil
 
 # 导入路径工具
 from .path_tool import (
-    get_experiments_dir,
     get_hpo_experiments_dir,
-    get_data_processing_experiments_dir,
-    get_manage_experiments_dir,
     get_experiment_type_dir,
     ensure_dir,
-    list_directories,
     resolve_config_path,
     resolve_config_value_path,
 )
+from .experiment_versioning import sync_experiment_catalog
 
 
 @dataclass
@@ -175,6 +172,7 @@ class ExperimentTracker:
         record_path = exp_dir / "experiment_record.json"
         with open(record_path, 'w', encoding='utf-8') as f:
             json.dump(experiment_record, f, indent=2, ensure_ascii=False)
+        sync_experiment_catalog(experiments_dir, exp_dir, experiment_record)
         
         # 更新历史记录
         self._update_history(experiment_record)
@@ -319,6 +317,7 @@ class ExperimentTracker:
         record_path = record_dir / experiment_id / "experiment_record.json"
         with open(record_path, 'w', encoding='utf-8') as f:
             json.dump(record, f, indent=2, ensure_ascii=False)
+        sync_experiment_catalog(record_dir, record_dir / experiment_id, record)
         
         # 更新历史记录
         self._update_history(record)

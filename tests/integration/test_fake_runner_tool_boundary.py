@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("langchain_core")
 
-from agent.core.adapters import RUNNER_ADAPTERS, register_runner_adapter
+from agent.runners import RUNNER_ADAPTERS, register_runner_adapter
 from agent.hpo import HPOService, Objective, SearchParameter, SearchSpace, TrialBudget
 from agent.tools import evaluation_tools, training_tools
 from agent.utils.experiment_tracker import ExperimentTracker
@@ -34,7 +34,7 @@ def test_evaluation_tool_uses_registered_runner_and_records_result(
     )
     previous = RUNNER_ADAPTERS.get("fake")
     register_runner_adapter(FakeRunnerAdapter())
-    monkeypatch.setattr(evaluation_tools, "ExperimentTracker", lambda: tracker)
+    monkeypatch.setattr(evaluation_tools, "ExperimentTracker", lambda *args, **kwargs: tracker)
     monkeypatch.setattr(
         evaluation_tools,
         "get_experiment_artifact_dir",
@@ -74,6 +74,8 @@ def test_training_tool_applies_budget_and_synchronizes_trial(
     monkeypatch,
 ) -> None:
     captured = {}
+    processed_dataset = tmp_path / "processed_dataset"
+    processed_dataset.mkdir()
 
     class CapturingRunner(FakeRunnerAdapter):
         def __init__(self):
@@ -119,6 +121,7 @@ def test_training_tool_applies_budget_and_synchronizes_trial(
             "parameters_json": json.dumps(trial.parameters),
             "budget_json": json.dumps(trial.budget.to_dict()),
             "runner": "capturing",
+            "data_folder": str(processed_dataset),
         }))
     finally:
         if previous is None:
@@ -133,3 +136,5 @@ def test_training_tool_applies_budget_and_synchronizes_trial(
     assert captured["number_of_epochs"] == 2
     assert captured["_hpo_data_fraction"] == 0.25
     assert captured["_hpo_max_duration_seconds"] == 10
+    assert captured["data_folder"] == str(processed_dataset)
+    assert payload["task"]["dataset"] == str(processed_dataset)

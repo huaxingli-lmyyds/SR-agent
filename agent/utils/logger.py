@@ -4,7 +4,7 @@
 """
 
 from pathlib import Path
-from typing import Union, Optional, List, Any
+from typing import Union, List, Any
 from datetime import datetime
 from threading import Lock
 

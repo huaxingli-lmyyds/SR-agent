@@ -21,6 +21,7 @@ from .service import (
     profile_from_dict,
     publish_dataset_version,
 )
+from .handoff import build_data_handoff, resolve_data_handoff
 _WORKFLOW_EXPORTS = {
     "DataProcessingDecisionPolicy": (
         "agent.data_processing.workflow",
@@ -60,6 +61,8 @@ __all__ = [
     "publish_dataset_version",
     "profile_from_dict",
     "plan_from_dict",
+    "resolve_data_handoff",
+    "build_data_handoff",
     "DataProcessingDecisionPolicy",
     "DataProcessingWorkflow",
 ]

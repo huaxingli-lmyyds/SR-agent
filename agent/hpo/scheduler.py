@@ -8,13 +8,15 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .contracts import HPOStudy, Trial
+from .contracts import HPOStudy, StrategyProposal, Trial
+from .feedback import HPOFeedbackAnalyzer
 from .policies import FailurePolicy, RetryPolicy
 from .service import HPOService
 
 
 TrialExecutor = Callable[[Trial, int], Dict[str, Any]]
 StrategyAdvisor = Callable[[HPOStudy], Dict[str, Any]]
+StrategyReviewer = Callable[[HPOStudy, Dict[str, Any]], Optional[StrategyProposal]]
 
 
 @dataclass
@@ -23,6 +25,7 @@ class SchedulerResult:
     trials: List[Trial]
     errors: List[str]
     advice: Dict[str, Any]
+    strategy_reviews: List[Dict[str, Any]]
 
 
 class HPOGraphState(TypedDict, total=False):
@@ -34,6 +37,7 @@ class HPOGraphState(TypedDict, total=False):
     errors: List[str]
     advice: Dict[str, Any]
     route: str
+    completed_since_review: int
 
 
 class DecisionPolicy:
@@ -65,7 +69,7 @@ class DecisionPolicy:
 
     def should_suggest(self, study: HPOStudy, service: HPOService) -> bool:
         return (
-            study.strategy in {"random_search", "grid_search", "adaptive_search"}
+            study.strategy != "successive_halving"
             and service.remaining_training_runs(study) > 0
         )
 
@@ -82,6 +86,8 @@ class HPOScheduler:
         failure_policy: Optional[FailurePolicy] = None,
         retry_policy: Optional[RetryPolicy] = None,
         strategy_advisor: Optional[StrategyAdvisor] = None,
+        strategy_reviewer: Optional[StrategyReviewer] = None,
+        review_interval_trials: int = 3,
     ) -> None:
         self.service = service
         self.executor = executor
@@ -89,6 +95,8 @@ class HPOScheduler:
         self.failure_policy = failure_policy or FailurePolicy()
         self.retry_policy = retry_policy or RetryPolicy()
         self.strategy_advisor = strategy_advisor
+        self.strategy_reviewer = strategy_reviewer
+        self.review_interval_trials = max(int(review_interval_trials), 1)
         self._study: Optional[HPOStudy] = None
         self.graph = self._build_graph()
 
@@ -99,6 +107,7 @@ class HPOScheduler:
         graph.add_node("select_trial", self._select_trial)
         graph.add_node("run_trial", self._run_trial)
         graph.add_node("record_result", self._record_result)
+        graph.add_node("review_strategy", self._review_strategy)
         graph.add_node("promote", self._promote)
         graph.add_node("complete", self._complete)
 
@@ -118,8 +127,9 @@ class HPOScheduler:
         graph.add_conditional_edges(
             "record_result",
             lambda state: state["route"],
-            {"retry": "run_trial", "next": "select_trial"},
+            {"retry": "run_trial", "review": "review_strategy"},
         )
+        graph.add_edge("review_strategy", "select_trial")
         graph.add_conditional_edges(
             "promote",
             lambda state: state["route"],
@@ -142,6 +152,7 @@ class HPOScheduler:
                 "attempt": 1,
                 "errors": [],
                 "advice": {},
+                "completed_since_review": 0,
             },
             config={"recursion_limit": max(50, int(study.max_training_runs or 1) * 8)},
         )
@@ -151,6 +162,7 @@ class HPOScheduler:
             trials=self.service.list_trials(study.experiment_id),
             errors=state.get("errors", []),
             advice=state.get("advice", {}),
+            strategy_reviews=current.strategy_reviews,
         )
 
     def _advise(self, state: HPOGraphState) -> Dict[str, Any]:
@@ -161,9 +173,12 @@ class HPOScheduler:
         return {"advice": dict(advice or {})}
 
     def _suggest(self, state: HPOGraphState) -> Dict[str, Any]:
+        count = self.decision_policy.initial_count(self.study)
+        if self.study.strategy != "successive_halving":
+            count = min(count, self.review_interval_trials)
         created = self.service.suggest_trials(
             self.study,
-            self.decision_policy.initial_count(self.study),
+            count,
         )
         return {"route": "next" if created else "complete"}
 
@@ -202,7 +217,8 @@ class HPOScheduler:
                 cost={**(result.get("cost") or {}), "attempts": attempt},
                 artifacts=result.get("artifacts") or [],
             )
-            return {"route": "next", "last_error": None}
+            completed = int(state.get("completed_since_review", 0)) + 1
+            return {"route": "review", "last_error": None, "completed_since_review": completed}
 
         error = str(result.get("error") or "trial execution failed")
         failure = self.failure_policy.classify(error)
@@ -242,14 +258,40 @@ class HPOScheduler:
         )
         errors = list(state.get("errors") or [])
         errors.append(f"{trial_id}: {failure.category}: {error}")
-        return {"route": "next", "errors": errors}
+        completed = int(state.get("completed_since_review", 0)) + 1
+        return {"route": "review", "errors": errors, "completed_since_review": completed}
+
+    def _review_strategy(self, state: HPOGraphState) -> Dict[str, Any]:
+        completed = int(state.get("completed_since_review", 0))
+        if completed < self.review_interval_trials:
+            return {}
+        proposal = None
+        if self.strategy_reviewer:
+            feedback = HPOFeedbackAnalyzer().analyze(
+                self.study,
+                self.service.list_trials(self.study.experiment_id),
+            )
+            try:
+                proposal = self.strategy_reviewer(self.study, feedback)
+            except Exception as exc:
+                proposal = StrategyProposal(
+                    action="invalid_proposal",
+                    reason_codes=["runtime_review_error"],
+                    evidence={"error": f"{type(exc).__name__}: {exc}"},
+                )
+        self.service.review_strategy(self.study, proposal, trigger=f"after_{completed}_trials")
+        return {"completed_since_review": 0}
 
     def _promote(self, state: HPOGraphState) -> Dict[str, Any]:
         promoted = self.service.promote_trials(self.study)
+        if promoted:
+            self.service.review_strategy(self.study, trigger=f"after_rung_{promoted[0].rung - 1}")
         return {"route": "next" if promoted else "complete"}
 
     def _complete(self, state: HPOGraphState) -> Dict[str, Any]:
         errors = list(state.get("errors") or [])
+        if int(state.get("completed_since_review", 0)) > 0:
+            self.service.review_strategy(self.study, trigger="final_trials")
         try:
             self._study = self.service.complete_study(self.study, "langgraph_completed")
         except ValueError as exc:
@@ -264,5 +306,6 @@ __all__ = [
     "HPOScheduler",
     "SchedulerResult",
     "StrategyAdvisor",
+    "StrategyReviewer",
     "TrialExecutor",
 ]

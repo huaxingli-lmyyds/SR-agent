@@ -20,14 +20,15 @@ class ExperimentService:
         experiment_type: Optional[str] = None,
         duration_seconds: Optional[float] = None,
         actor: Optional[Dict[str, Any]] = None,
+        update_status: bool = True,
     ) -> bool:
         result.experiment_id = experiment_id
         return self.tracker.update_experiment(
             experiment_id,
             experiment_type=experiment_type,
-            status=result.status,
-            error=result.error,
-            duration=duration_seconds,
+            status=result.status if update_status else None,
+            error=result.error if update_status else None,
+            duration=duration_seconds if update_status else None,
             stage=result.stage,
             actor=actor,
             task=result.task,

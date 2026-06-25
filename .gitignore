@@ -5,6 +5,8 @@ agent/prep_cache/
 agent/logs/
 
 read/
+!read/
+tests/tmp/
 
 
 # Agent experiments
@@ -15,6 +17,7 @@ agent/test*.py
 agent/experiment.zip
 agent/experiments_*/
 agent/experiment*.zip
+experiment_archives/
 datasets.zip
 *.md
 *_*.md
@@ -25,6 +28,8 @@ datasets.zip
 !AGENT_OPTIMIZATION_ROADMAP.md
 !COORDINATION_REFACTOR.md
 !SYSTEM_ARCHITECTURE.md
+!AAAI_SUBMISSION_READINESS_AUDIT.md
+!read/SYSTEM_INTERFACE_AUDIT_AND_AAAI_INNOVATION.md
 agent/log.zip
 result_of_stage_1/
 

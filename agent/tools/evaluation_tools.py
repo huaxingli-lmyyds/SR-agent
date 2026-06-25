@@ -8,7 +8,7 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from agent.core.adapters import get_runner_adapter, get_task_adapter
+from agent.core.adapters import resolve_adapter_bundle
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
 from agent.hpo import HPOService
@@ -45,6 +45,9 @@ def _run_evaluation(
     trial_id: Optional[str] = None,
     experiments_dir: Optional[str] = None,
     runner: Optional[str] = None,
+    task_type: Optional[str] = None,
+    model_family: Optional[str] = None,
+    implementation: Optional[str] = None,
 ) -> str:
     """Evaluate a recorded model and return a structured operation result."""
     tracker = ExperimentTracker(experiments_dir)
@@ -92,13 +95,21 @@ def _run_evaluation(
         output_folder.mkdir(parents=True, exist_ok=True)
     task = record.get("task") or {}
     execution = record.get("execution") or {}
-    runner_name = runner or execution.get("runner") or (record.get("model") or {}).get("implementation") or "speechbrain"
-    runner_adapter = get_runner_adapter(runner_name)
-    task_adapter = get_task_adapter(task.get("type") or "speaker_verification")
-    config_candidate = verification_config or execution.get("evaluation_config_path")
-    if config_candidate is None and runner_name != "speechbrain":
-        config_candidate = record.get("config_path")
-    config_path = str(resolve_config_path(config_candidate, default_name="verification_ecapa.yaml"))
+    model = record.get("model") or {}
+    task_type = task_type or task.get("type") or "speaker_verification"
+    model_family = model_family or model.get("family") or "ecapa_tdnn"
+    implementation = implementation or model.get("implementation") or "speechbrain"
+    runner_name = runner or execution.get("runner") or implementation
+    adapters = resolve_adapter_bundle(task_type, model_family, implementation, runner_name)
+    task_adapter, model_adapter, runner_adapter = adapters.task, adapters.model, adapters.runner
+    config_candidate = (
+        verification_config
+        or execution.get("evaluation_config_path")
+        or getattr(model_adapter, "default_evaluation_config", None)
+        or getattr(runner_adapter, "default_evaluation_config", None)
+        or record.get("config_path")
+    )
+    config_path = str(resolve_config_path(config_candidate))
 
     started_at = datetime.now()
     raw = runner_adapter.run_evaluation(
@@ -130,8 +141,18 @@ def _run_evaluation(
         "scores_path": scores_path,
         "output_folder": raw.get("output_folder") or str(output_folder),
     })
-    result.task = record.get("task") or {}
-    result.model = record.get("model") or {}
+    result.task = {
+        **task,
+        "type": task_type,
+        "dataset": data_folder,
+        "primary_metric": task_adapter.primary_metric,
+        "metric_mode": task_adapter.metric_mode,
+    }
+    result.model = {
+        **model,
+        "family": model_family,
+        "implementation": implementation,
+    }
     result.execution.update({
         "runner": runner_name,
         "output_folder": raw.get("output_folder") or str(output_folder),
@@ -146,6 +167,7 @@ def _run_evaluation(
         result,
         duration_seconds=(datetime.now() - started_at).total_seconds(),
         actor={"type": "hpo_agent", "name": "model_evaluator"},
+        update_status=trial_id is None,
     )
     if trial_id:
         service = HPOService(tracker)
@@ -173,6 +195,9 @@ def RunEvaluation(
     trial_id: Optional[str] = None,
     experiments_dir: Optional[str] = None,
     runner: Optional[str] = None,
+    task_type: Optional[str] = None,
+    model_family: Optional[str] = None,
+    implementation: Optional[str] = None,
 ) -> str:
     """Evaluate through a registered runner and always return OperationResult JSON."""
     try:
@@ -184,6 +209,9 @@ def RunEvaluation(
             trial_id=trial_id,
             experiments_dir=experiments_dir,
             runner=runner,
+            task_type=task_type,
+            model_family=model_family,
+            implementation=implementation,
         )
     except Exception as exc:
         return OperationResult(

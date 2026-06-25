@@ -65,6 +65,7 @@ class DataOperation:
 class DataProcessingPlan:
     dataset: DatasetSpec
     operations: List[DataOperation] = field(default_factory=list)
+    rejected_operations: List[Dict[str, Any]] = field(default_factory=list)
     validation_rules: List[Dict[str, Any]] = field(default_factory=list)
     target_goal: str = ""
 
@@ -81,6 +82,8 @@ class DataOperationResult:
     operation: str
     input_dataset_version: Optional[str] = None
     output_dataset_version: Optional[str] = None
+    output_dataset_uri: Optional[str] = None
+    consumer_ready: bool = False
     before_metrics: Dict[str, Any] = field(default_factory=dict)
     after_metrics: Dict[str, Any] = field(default_factory=dict)
     artifacts: List[Dict[str, Any]] = field(default_factory=list)
@@ -96,6 +99,10 @@ class DatasetVersion:
     dataset_id: str
     version: str
     source_uri: str
+    output_uri: Optional[str] = None
+    consumer_uri: Optional[str] = None
+    consumption_status: str = "source_unchanged"
+    consumption_reason: Optional[str] = None
     parent_version: Optional[str] = None
     operations: List[Dict[str, Any]] = field(default_factory=list)
     quality_metrics: Dict[str, Any] = field(default_factory=dict)

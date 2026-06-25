@@ -166,6 +166,80 @@ class AdaptiveSearchStrategy:
         return suggestions
 
 
+class OptunaTPEStrategy:
+    """Use Optuna TPE for candidate sampling while keeping lifecycle state in HPOService."""
+
+    strategy_name = "tpe"
+
+    @staticmethod
+    def is_available() -> bool:
+        try:
+            import optuna  # noqa: F401
+        except ImportError:
+            return False
+        return True
+
+    @staticmethod
+    def validate(search_space: SearchSpace) -> None:
+        for parameter in search_space.parameters:
+            _validate_sampled_parameter(parameter)
+        _import_optuna()
+
+    def suggest(
+        self,
+        search_space: SearchSpace,
+        count: int,
+        *,
+        seed: int = 0,
+        existing: Optional[List[Dict[str, Any]]] = None,
+        history: Optional[List[Trial]] = None,
+        objective: Optional[Objective] = None,
+    ) -> List[Dict[str, Any]]:
+        optuna = _import_optuna()
+        sampler = optuna.samplers.TPESampler(
+            seed=seed,
+            multivariate=False,
+            n_startup_trials=5,
+        )
+        study = optuna.create_study(
+            direction="maximize" if objective and objective.mode == "max" else "minimize",
+            sampler=sampler,
+        )
+        for item in history or []:
+            if not objective or not isinstance(item.metrics.get(objective.metric), (int, float)):
+                continue
+            params, distributions = _optuna_history(item.parameters, search_space, optuna)
+            if not params:
+                continue
+            try:
+                study.add_trial(optuna.trial.create_trial(
+                    params=params,
+                    distributions=distributions,
+                    value=float(item.metrics[objective.metric]),
+                ))
+            except ValueError:
+                # Revised search boundaries can make older Trial parameters incompatible.
+                continue
+
+        seen = {_signature(item) for item in (existing or [])}
+        suggestions: List[Dict[str, Any]] = []
+        attempts = 0
+        while len(suggestions) < count and attempts < max(100, count * 50):
+            attempts += 1
+            trial = study.ask()
+            candidate: Dict[str, Any] = {}
+            for parameter in search_space.parameters:
+                if _condition_matches(parameter.condition, candidate):
+                    candidate[parameter.name] = _optuna_suggest(trial, parameter)
+            signature = _signature(candidate)
+            if signature in seen or not _constraints_match(candidate, search_space.constraints):
+                study.tell(trial, state=optuna.trial.TrialState.FAIL)
+                continue
+            seen.add(signature)
+            suggestions.append(candidate)
+        return suggestions
+
+
 class CandidateStrategyRegistry:
     def __init__(self) -> None:
         self._strategies: Dict[str, CandidateStrategy] = {}
@@ -176,19 +250,32 @@ class CandidateStrategyRegistry:
     def get(self, name: str) -> CandidateStrategy:
         candidate_name = "random_search" if name == "successive_halving" else name
         try:
-            return self._strategies[candidate_name]
+            strategy = self._strategies[candidate_name]
         except KeyError as exc:
             available = ", ".join(sorted([*self._strategies, "successive_halving"]))
             raise ValueError(f"unsupported HPO strategy: {name}; available: {available}") from exc
+        if not self._is_available(strategy):
+            raise ValueError(f"HPO strategy is unavailable because an optional dependency is missing: {name}")
+        return strategy
 
     def names(self) -> List[str]:
-        return sorted([*self._strategies, "successive_halving"])
+        available = [
+            name for name, strategy in self._strategies.items()
+            if self._is_available(strategy)
+        ]
+        return sorted([*available, "successive_halving"])
+
+    @staticmethod
+    def _is_available(strategy: CandidateStrategy) -> bool:
+        check = getattr(strategy, "is_available", None)
+        return bool(check()) if callable(check) else True
 
 
 STRATEGIES = CandidateStrategyRegistry()
 STRATEGIES.register(RandomSearchStrategy())
 STRATEGIES.register(GridSearchStrategy())
 STRATEGIES.register(AdaptiveSearchStrategy())
+STRATEGIES.register(OptunaTPEStrategy())
 
 
 class SuccessiveHalvingStrategy:
@@ -233,6 +320,58 @@ def _sample_parameter(parameter: SearchParameter, rng: random.Random) -> Any:
     if parameter.parameter_type == "float":
         return float(value)
     raise ValueError(f"unsupported parameter type: {parameter.parameter_type}")
+
+
+def _import_optuna():
+    try:
+        import optuna
+    except ImportError as exc:
+        raise RuntimeError(
+            "the tpe strategy requires Optuna; install the project dependencies or run: pip install optuna"
+        ) from exc
+    return optuna
+
+
+def _optuna_suggest(trial: Any, parameter: SearchParameter) -> Any:
+    if parameter.parameter_type == "categorical":
+        return trial.suggest_categorical(parameter.name, parameter.choices)
+    if parameter.parameter_type == "int":
+        return trial.suggest_int(
+            parameter.name,
+            int(parameter.low),
+            int(parameter.high),
+            log=parameter.scale == "log",
+        )
+    return trial.suggest_float(
+        parameter.name,
+        float(parameter.low),
+        float(parameter.high),
+        log=parameter.scale == "log",
+    )
+
+
+def _optuna_history(parameters: Dict[str, Any], search_space: SearchSpace, optuna: Any) -> tuple:
+    params: Dict[str, Any] = {}
+    distributions: Dict[str, Any] = {}
+    for parameter in search_space.parameters:
+        if parameter.name not in parameters or not _condition_matches(parameter.condition, parameters):
+            continue
+        params[parameter.name] = parameters[parameter.name]
+        if parameter.parameter_type == "categorical":
+            distributions[parameter.name] = optuna.distributions.CategoricalDistribution(parameter.choices)
+        elif parameter.parameter_type == "int":
+            distributions[parameter.name] = optuna.distributions.IntDistribution(
+                int(parameter.low),
+                int(parameter.high),
+                log=parameter.scale == "log",
+            )
+        else:
+            distributions[parameter.name] = optuna.distributions.FloatDistribution(
+                float(parameter.low),
+                float(parameter.high),
+                log=parameter.scale == "log",
+            )
+    return params, distributions
 
 
 def _validate_sampled_parameter(parameter: SearchParameter) -> None:

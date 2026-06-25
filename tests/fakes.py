@@ -9,6 +9,7 @@ from agent.core.contracts import Artifact, OperationResult
 @dataclass
 class FakeRunnerAdapter:
     runner: str = "fake"
+    default_evaluation_config: str | None = None
 
     def run_training(self, config_path: str, overrides: Dict[str, Any]) -> Dict[str, Any]:
         return {

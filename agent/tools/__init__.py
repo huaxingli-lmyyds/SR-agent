@@ -1,104 +1,69 @@
-"""
-工具模块
-提供 LangChain 工具函数，用于配置修改、训练执行、结果分析等操作
-"""
+"""LangChain tool package with lazy public exports."""
 
-from .config_tools import (
-    ReadConfig,
-    UpdateConfig,
-    ListConfigParameters,
-    GetConfigStructure,
-    ResetConfig
-)
+from importlib import import_module
+from typing import Dict, Tuple
 
-from .training_tools import (
-    TrainModel,
-    EvaluateModel,
-    AnalyzeResults
-)
 
-from .experiment_history_tools import (
-    GetExperimentResults,
-    ListExperiments,
-    CompareExperiments,
-    CompareHPOExperiments,
-    GetHPOExperimentResults,
-    ListHPOExperiments,
-    CompareDataProcessingExperiments,
-    GetDataProcessingExperimentResults,
-    ListDataProcessingExperiments,
-    CompareOrchestrationExperiments,
-    GetOrchestrationExperimentResults,
-    ListOrchestrationExperiments,
-)
+_EXPORTS: Dict[str, Tuple[str, str]] = {
+    "ReadConfig": ("agent.tools.config_tools", "ReadConfig"),
+    "UpdateConfig": ("agent.tools.config_tools", "UpdateConfig"),
+    "ListConfigParameters": ("agent.tools.config_tools", "ListConfigParameters"),
+    "GetConfigStructure": ("agent.tools.config_tools", "GetConfigStructure"),
+    "ResetConfig": ("agent.tools.config_tools", "ResetConfig"),
+    "TrainModel": ("agent.tools.training_tools", "TrainModel"),
+    "EvaluateModel": ("agent.tools.training_tools", "EvaluateModel"),
+    "AnalyzeResults": ("agent.tools.training_tools", "AnalyzeResults"),
+    "RunEvaluation": ("agent.tools.evaluation_tools", "RunEvaluation"),
+    "GetExperimentResults": ("agent.tools.experiment_history_tools", "GetExperimentResults"),
+    "ListExperiments": ("agent.tools.experiment_history_tools", "ListExperiments"),
+    "CompareExperiments": ("agent.tools.experiment_history_tools", "CompareExperiments"),
+    "CompareHPOExperiments": ("agent.tools.experiment_history_tools", "CompareHPOExperiments"),
+    "GetHPOExperimentResults": ("agent.tools.experiment_history_tools", "GetHPOExperimentResults"),
+    "ListHPOExperiments": ("agent.tools.experiment_history_tools", "ListHPOExperiments"),
+    "CompareDataProcessingExperiments": (
+        "agent.tools.experiment_history_tools",
+        "CompareDataProcessingExperiments",
+    ),
+    "GetDataProcessingExperimentResults": (
+        "agent.tools.experiment_history_tools",
+        "GetDataProcessingExperimentResults",
+    ),
+    "ListDataProcessingExperiments": (
+        "agent.tools.experiment_history_tools",
+        "ListDataProcessingExperiments",
+    ),
+    "CompareOrchestrationExperiments": (
+        "agent.tools.experiment_history_tools",
+        "CompareOrchestrationExperiments",
+    ),
+    "GetOrchestrationExperimentResults": (
+        "agent.tools.experiment_history_tools",
+        "GetOrchestrationExperimentResults",
+    ),
+    "ListOrchestrationExperiments": (
+        "agent.tools.experiment_history_tools",
+        "ListOrchestrationExperiments",
+    ),
+    "PrepareVoxCelebData": ("agent.tools.speechbrain_data_tools", "PrepareVoxCelebData"),
+    "InspectDataset": ("agent.tools.dataset_tools", "InspectDataset"),
+    "BuildDataProcessingPlan": ("agent.tools.dataset_tools", "BuildDataProcessingPlan"),
+    "ExecuteDataProcessingPlan": ("agent.tools.dataset_tools", "ExecuteDataProcessingPlan"),
+    "PublishDatasetVersion": ("agent.tools.dataset_tools", "PublishDatasetVersion"),
+    "ListDataProcessors": ("agent.tools.dataset_tools", "ListDataProcessors"),
+    "AnalyzeTrainingCurves": ("agent.tools.training_diagnostics_tools", "AnalyzeTrainingCurves"),
+    "DiagnoseFitStatus": ("agent.tools.training_diagnostics_tools", "DiagnoseFitStatus"),
+    "ScoreExperiment": ("agent.tools.reward_tools", "ScoreExperiment"),
+}
 
-from .evaluation_tools import (
-    RunEvaluation
-)
 
-from .data_processing_tools import (
-    PrepareVoxCelebData
-)
-from .dataset_tools import (
-    InspectDataset,
-    BuildDataProcessingPlan,
-    ExecuteDataProcessingPlan,
-    PublishDatasetVersion,
-    ListDataProcessors,
-)
+def __getattr__(name: str):
+    try:
+        module_name, attribute = _EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
 
-from .training_diagnostics_tools import (
-    AnalyzeTrainingCurves,
-    DiagnoseFitStatus,
-)
 
-from .reward_tools import (
-    ScoreExperiment,
-)
-
-__all__ = [
-    # config_tools
-    'ReadConfig',
-    'UpdateConfig',
-    'ListConfigParameters',
-    'GetConfigStructure',
-    'ResetConfig',
-    
-    # training_tools
-    'TrainModel',
-    'EvaluateModel',
-    'AnalyzeResults',
-    
-    # experiment_history_tools
-    'GetExperimentResults',
-    'ListExperiments', 
-    'CompareExperiments',
-    'CompareHPOExperiments',
-    'GetHPOExperimentResults',
-    'ListHPOExperiments',
-    'CompareDataProcessingExperiments',
-    'GetDataProcessingExperimentResults',
-    'ListDataProcessingExperiments',
-    'CompareOrchestrationExperiments',
-    'GetOrchestrationExperimentResults',
-    'ListOrchestrationExperiments',
-    
-    # evaluation_tools
-    'RunEvaluation',
-
-    # data_processing_tools
-    'PrepareVoxCelebData',
-    'InspectDataset',
-    'BuildDataProcessingPlan',
-    'ExecuteDataProcessingPlan',
-    'PublishDatasetVersion',
-    'ListDataProcessors',
-
-    # training_diagnostics_tools
-    'AnalyzeTrainingCurves',
-    'DiagnoseFitStatus',
-
-    # reward_tools
-    'ScoreExperiment',
-
-]
+__all__ = list(_EXPORTS)

@@ -10,7 +10,7 @@ def _load_env() -> None:
 
     dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
     api_key = os.getenv("ZHIPUAI_API_KEY")
-    api_base = os.getenv("ZHIU_API_BASE_URL")
+    api_base = os.getenv("ZHIPUAI_API_BASE_URL") or os.getenv("ZHIU_API_BASE_URL")
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
     if api_base:

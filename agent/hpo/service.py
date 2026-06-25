@@ -10,8 +10,9 @@ from uuid import uuid4
 
 from agent.utils import ExperimentTracker, get_experiment_artifact_dir
 
-from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, Trial, TrialBudget
-from .policies import EarlyStoppingPolicy, StopDecision
+from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, StrategyProposal, Trial, TrialBudget
+from .feedback import HPOFeedbackAnalyzer
+from .policies import EarlyStoppingPolicy, StopDecision, StrategyDecisionPolicy
 from .strategies import STRATEGIES, CandidateStrategy, SuccessiveHalvingStrategy
 
 TRIAL_STATUSES = {"suggested", "running", "completed", "promoted", "stopped", "failed"}
@@ -58,6 +59,54 @@ class HPOService:
     ) -> HPOStudy:
         if self.tracker.get_experiment(experiment_id) is None:
             raise ValueError(f"HPO experiment not found: {experiment_id}")
+        self.validate_study_plan(
+            search_space,
+            objectives,
+            budgets,
+            strategy=strategy,
+            reduction_factor=reduction_factor,
+            max_trials=max_trials,
+            initial_trial_count=initial_trial_count,
+            promotion_limits=promotion_limits,
+            max_training_runs=max_training_runs,
+            min_completed_per_rung=min_completed_per_rung,
+        )
+        now = datetime.now().isoformat()
+        study = HPOStudy(
+            study_id=f"study_{uuid4().hex[:10]}",
+            experiment_id=experiment_id,
+            strategy=strategy,
+            search_space=search_space,
+            objectives=objectives,
+            budgets=budgets,
+            reduction_factor=reduction_factor,
+            max_trials=max_trials,
+            initial_trial_count=initial_trial_count,
+            promotion_limits=list(promotion_limits or []),
+            max_training_runs=max_training_runs or max_trials,
+            min_completed_per_rung=min_completed_per_rung,
+            random_seed=random_seed,
+            created_at=now,
+            updated_at=now,
+        )
+        self._save_study(study)
+        return study
+
+    def validate_study_plan(
+        self,
+        search_space: SearchSpace,
+        objectives: List[Objective],
+        budgets: List[TrialBudget],
+        *,
+        strategy: str = "successive_halving",
+        reduction_factor: int = 3,
+        max_trials: Optional[int] = None,
+        initial_trial_count: Optional[int] = None,
+        promotion_limits: Optional[List[int]] = None,
+        max_training_runs: Optional[int] = None,
+        min_completed_per_rung: int = 1,
+    ) -> None:
+        """Validate a proposed Study plan without creating records or artifacts."""
         if not search_space.parameters:
             raise ValueError("search space must contain at least one parameter")
         parameter_names = [parameter.name for parameter in search_space.parameters]
@@ -97,26 +146,6 @@ class HPOService:
                 raise ValueError("budget data_fraction must be in (0, 1]")
             if budget.max_duration_seconds is not None and budget.max_duration_seconds <= 0:
                 raise ValueError("budget max_duration_seconds must be positive")
-        now = datetime.now().isoformat()
-        study = HPOStudy(
-            study_id=f"study_{uuid4().hex[:10]}",
-            experiment_id=experiment_id,
-            strategy=strategy,
-            search_space=search_space,
-            objectives=objectives,
-            budgets=budgets,
-            reduction_factor=reduction_factor,
-            max_trials=max_trials,
-            initial_trial_count=initial_trial_count,
-            promotion_limits=list(promotion_limits or []),
-            max_training_runs=max_training_runs or max_trials,
-            min_completed_per_rung=min_completed_per_rung,
-            random_seed=random_seed,
-            created_at=now,
-            updated_at=now,
-        )
-        self._save_study(study)
-        return study
 
     def suggest_trials(self, study: HPOStudy, count: int) -> List[Trial]:
         existing_trials = self.list_trials(study.experiment_id)
@@ -131,7 +160,8 @@ class HPOService:
         count = min(count, self.remaining_training_runs(study))
         if count <= 0:
             return []
-        candidates = STRATEGIES.get(study.strategy).suggest(
+        candidate_strategy = study.candidate_strategy or study.strategy
+        candidates = STRATEGIES.get(candidate_strategy).suggest(
             study.search_space,
             count,
             seed=study.random_seed + len(existing_trials),
@@ -158,6 +188,67 @@ class HPOService:
         study.updated_at = now
         self._save_study(study)
         return trials
+
+    def review_strategy(
+        self,
+        study: HPOStudy,
+        proposal: Optional[StrategyProposal] = None,
+        *,
+        trigger: str = "periodic",
+    ) -> Dict[str, Any]:
+        """Analyze feedback and safely update only subsequent candidate generation."""
+        trials = self.list_trials(study.experiment_id)
+        analyzer = HPOFeedbackAnalyzer()
+        feedback = analyzer.analyze(study, trials)
+        if proposal is None:
+            proposal = analyzer.propose(study, feedback, self.available_strategies())
+        original_proposal = proposal
+        blocked_fields = []
+        if proposal is not None and (proposal.max_training_runs is not None or proposal.budgets is not None):
+            if proposal.max_training_runs is not None:
+                blocked_fields.append({"field": "max_training_runs", "reason": "runtime reviews cannot change Study run quota"})
+            if proposal.budgets is not None:
+                blocked_fields.append({"field": "budgets", "reason": "runtime reviews cannot change active Study rung budgets"})
+            proposal = StrategyProposal(
+                action=proposal.action,
+                requested_strategy=proposal.requested_strategy,
+                search_space=proposal.search_space,
+                reason_codes=proposal.reason_codes,
+                evidence=proposal.evidence,
+                expected_effect=proposal.expected_effect,
+                confidence=proposal.confidence,
+            )
+        decision = StrategyDecisionPolicy().review(
+            proposal,
+            base_strategy=study.candidate_strategy or study.strategy,
+            base_search_space=study.search_space,
+            base_budgets=study.budgets,
+            hard_max_training_runs=int(study.max_training_runs or study.max_trials or 1),
+            objectives=study.objectives,
+            available_strategies=self.available_strategies(),
+            validate_plan=self.validate_study_plan,
+        )
+        if blocked_fields:
+            decision.proposal_id = original_proposal.proposal_id
+            decision.proposal = original_proposal.to_dict()
+            decision.rejected_fields.extend(blocked_fields)
+            decision.decision = "approved_with_changes" if decision.accepted_fields else "rejected"
+            decision.reason_codes = ["runtime_proposal_partially_approved" if decision.accepted_fields else "runtime_proposal_rejected"]
+        study.candidate_strategy = decision.adopted_strategy
+        study.search_space = search_space_from_dict(decision.adopted_search_space)
+        review = {
+            "trigger": trigger,
+            "feedback": feedback,
+            "proposal": original_proposal.to_dict() if original_proposal else None,
+            "decision": decision.to_dict(),
+            "applied_candidate_strategy": study.candidate_strategy,
+            "applied_search_space": study.search_space.to_dict(),
+            "created_at": datetime.now().isoformat(),
+        }
+        study.strategy_reviews.append(review)
+        study.updated_at = datetime.now().isoformat()
+        self._save_study(study)
+        return review
 
     def record_trial(
         self,
@@ -303,9 +394,12 @@ class HPOService:
         limit = study.max_training_runs or study.max_trials
         if limit is None:
             return 2**31 - 1
+        return max(limit - self.training_runs_used(study), 0)
+
+    def training_runs_used(self, study: HPOStudy) -> int:
         trials = self.list_trials(study.experiment_id)
         retry_count = sum(int(trial.cost.get("retry_count", 0)) for trial in trials)
-        return max(limit - len(trials) - retry_count, 0)
+        return len(trials) + retry_count
 
     def early_stop(
         self,
@@ -427,6 +521,7 @@ def study_from_dict(data: Dict[str, Any]) -> HPOStudy:
         search_space=search_space_from_dict(data["search_space"]),
         objectives=[Objective(**item) for item in data.get("objectives") or []],
         budgets=[TrialBudget(**item) for item in data.get("budgets") or []],
+        candidate_strategy=data.get("candidate_strategy"),
         reduction_factor=data.get("reduction_factor", 3),
         max_trials=data.get("max_trials"),
         initial_trial_count=data.get("initial_trial_count"),
@@ -434,6 +529,7 @@ def study_from_dict(data: Dict[str, Any]) -> HPOStudy:
         max_training_runs=data.get("max_training_runs"),
         min_completed_per_rung=data.get("min_completed_per_rung", 1),
         constraints=data.get("constraints") or [],
+        strategy_reviews=data.get("strategy_reviews") or [],
         trial_ids=data.get("trial_ids") or [],
         best_trial_id=data.get("best_trial_id"),
         status=data.get("status", "created"),

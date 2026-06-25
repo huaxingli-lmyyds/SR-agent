@@ -93,12 +93,20 @@ def InspectDataset(
 def BuildDataProcessingPlan(
     profile_json: str,
     target_goal: str = "",
+    requested_operations_json: Optional[str] = None,
     experiment_id: Optional[str] = None,
 ) -> str:
-    """Build an auditable processing plan from a dataset quality profile."""
+    """Build a plan, optionally including an explicit JSON array of operations."""
     try:
         profile = profile_from_dict(_payload(profile_json))
-        plan = build_processing_plan(profile, target_goal)
+        requested_operations = None
+        if requested_operations_json:
+            requested_operations = json.loads(requested_operations_json)
+            if not isinstance(requested_operations, list) or not all(
+                isinstance(item, dict) for item in requested_operations
+            ):
+                raise ValueError("requested_operations_json must be a JSON array of objects")
+        plan = build_processing_plan(profile, target_goal, requested_operations)
         plan_data = plan.to_dict()
         _update_lifecycle(experiment_id, lifecycle={"plan": plan_data})
         return json.dumps(plan_data, ensure_ascii=False, default=str)
@@ -111,11 +119,17 @@ def BuildDataProcessingPlan(
 def ExecuteDataProcessingPlan(
     plan_json: str,
     experiment_id: Optional[str] = None,
+    output_root: Optional[str] = None,
 ) -> str:
     """Execute registered operations in a processing plan and validate results."""
     try:
         plan = plan_from_dict(_payload(plan_json))
-        results = execute_plan(plan)
+        resolved_output = Path(output_root) if output_root else (
+            Path(get_experiment_artifact_dir(
+                experiment_id, "processed", "data_processing", create=True
+            )) if experiment_id else None
+        )
+        results = execute_plan(plan, output_root=resolved_output)
         result_data = [result.to_dict() for result in results]
         final_metrics = results[-1].after_metrics if results else {}
         failed = next((result for result in results if result.status == "failed"), None)

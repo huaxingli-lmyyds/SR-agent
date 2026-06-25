@@ -17,7 +17,6 @@ from agent.utils import (
     backup_file,
     get_experiment_configs_dir,
     resolve_config_path,
-    yaml_to_dict,
     format_nested_dict
 )
 

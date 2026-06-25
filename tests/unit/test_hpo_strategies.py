@@ -3,11 +3,13 @@ from agent.hpo import (
     GridSearchStrategy,
     HPOPlanningPolicy,
     Objective,
+    OptunaTPEStrategy,
     SearchParameter,
     SearchSpace,
     Trial,
     TrialBudget,
 )
+from agent.hpo.strategies import CandidateStrategyRegistry
 
 
 def test_grid_search_enumerates_unique_combinations() -> None:
@@ -45,11 +47,12 @@ def test_auto_planning_selects_strategy_deterministically() -> None:
     policy = HPOPlanningPolicy()
     grid = SearchSpace([SearchParameter("batch_size", "categorical", choices=[16, 32])])
     continuous = SearchSpace([SearchParameter("lr", "float", low=1e-5, high=1e-2)])
-    available = ["random_search", "grid_search", "adaptive_search", "successive_halving"]
+    available = ["random_search", "grid_search", "adaptive_search", "tpe", "successive_halving"]
 
     assert policy.select_strategy("auto", grid, [TrialBudget("full")], 2, available) == "grid_search"
     assert policy.select_strategy("auto", continuous, [TrialBudget("full")], 3, available) == "random_search"
     assert policy.select_strategy("auto", continuous, [TrialBudget("full")], 5, available) == "adaptive_search"
+    assert policy.select_strategy("auto", continuous, [TrialBudget("full")], 8, available) == "tpe"
     assert policy.select_strategy(
         "auto",
         continuous,
@@ -57,3 +60,46 @@ def test_auto_planning_selects_strategy_deterministically() -> None:
         5,
         available,
     ) == "successive_halving"
+
+
+def test_optuna_tpe_uses_completed_history_and_returns_unique_candidates() -> None:
+    import pytest
+
+    pytest.importorskip("optuna")
+    space = SearchSpace([
+        SearchParameter("lr", "float", low=1e-5, high=1e-2, scale="log"),
+        SearchParameter("batch_size", "categorical", choices=[16, 32, 64]),
+    ])
+    history = [
+        Trial(
+            f"trial_{index}",
+            {"lr": 1e-4 * (index + 1), "batch_size": [16, 32, 64][index % 3]},
+            TrialBudget("full"),
+            status="completed",
+            metrics={"eer": 0.2 - index * 0.01},
+        )
+        for index in range(6)
+    ]
+
+    suggestions = OptunaTPEStrategy().suggest(
+        space,
+        3,
+        seed=7,
+        existing=[trial.parameters for trial in history],
+        history=history,
+        objective=Objective("eer", "min"),
+    )
+
+    assert len(suggestions) == 3
+    assert len({tuple(sorted(item.items())) for item in suggestions}) == 3
+
+
+def test_registry_hides_unavailable_optional_strategy(monkeypatch) -> None:
+    registry = CandidateStrategyRegistry()
+    strategy = OptunaTPEStrategy()
+    registry.register(strategy)
+    monkeypatch.setattr(strategy, "is_available", lambda: False)
+
+    assert "tpe" not in registry.names()
+    with __import__("pytest").raises(ValueError, match="optional dependency"):
+        registry.get("tpe")

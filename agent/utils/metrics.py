@@ -5,10 +5,8 @@
 """
 
 from pathlib import Path
-from typing import Union, Dict, List, Optional, Any, Tuple
-import json
+from typing import Union, Dict, List, Optional, Any
 import re
-from collections import defaultdict
 
 
 class MetricsExtractor:
@@ -198,15 +196,10 @@ class MetricsCalculator:
         genuine_arr = np.asarray(genuine_scores, dtype=float)
         impostor_arr = np.asarray(impostor_scores, dtype=float)
         all_scores = np.concatenate([genuine_arr, impostor_arr])
-        all_labels = np.concatenate([
-            np.ones(len(genuine_arr)),
-            np.zeros(len(impostor_arr))
-        ])
         
         # 排序
         sorted_indices = np.argsort(all_scores)
         sorted_scores = all_scores[sorted_indices]
-        sorted_labels = all_labels[sorted_indices]
         
         # 计算不同阈值下的 FAR 和 FRR
         far_list = []
@@ -540,7 +533,6 @@ class MetricsVisualizer:
         """
         try:
             import matplotlib.pyplot as plt
-            import numpy as np
         except ImportError:
             print("需要安装 matplotlib: pip install matplotlib")
             return

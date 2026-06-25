@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, Union
 from agent.agents.base_agent import LangGraphAgent
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.data_processing.workflow import DataProcessingWorkflow
+from agent.data_processing.handoff import build_data_handoff
 from agent.memory import EpisodeMemory, MemoryScope, MemoryService
 from agent.utils import ConfigParser, ExperimentTracker
 from agent.utils.path_tool import (
@@ -60,7 +61,8 @@ class DataProcessingAgent(LangGraphAgent):
     def run_workflow(self, request: AgentTaskRequest) -> AgentTaskResult:
         started_at = datetime.now()
         config = ConfigParser(self.config_path).load_config(resolve_references=True)
-        data_folder = str(resolve_data_path(config.get("data_folder")))
+        requested_dataset = request.context.get("dataset_uri") or request.context.get("data_folder")
+        data_folder = str(resolve_data_path(requested_dataset or config.get("data_folder")))
         self.memory_scope.dataset_key = data_folder
         output = resolve_config_value_path(config.get("save_folder") or config.get("output_folder"))
         experiment_id = request.experiment_ids.get("data_processing") or self.tracker.create_data_processing_experiment(
@@ -76,6 +78,18 @@ class DataProcessingAgent(LangGraphAgent):
         workflow = DataProcessingWorkflow(
             strategy_advisor=self._planning_advice if self.enable_llm_advisor else None,
         )
+        processing_config = config.get("data_processing") if isinstance(config.get("data_processing"), dict) else {}
+        context_processing = (
+            request.context.get("data_processing")
+            if isinstance(request.context.get("data_processing"), dict)
+            else {}
+        )
+        requested_operations = (
+            request.context.get("data_operations")
+            or context_processing.get("operations")
+            or processing_config.get("operations")
+            or []
+        )
         self.tracker.update_data_processing_experiment(
             str(experiment_id),
             status="running",
@@ -83,6 +97,8 @@ class DataProcessingAgent(LangGraphAgent):
                 "objective": request.objective,
                 "workflow": "langgraph",
                 "hpo_feedback": request.context.get("hpo_feedback"),
+                "requested_operations": requested_operations,
+                "input_dataset_uri": data_folder,
             }},
         )
         state = workflow.run({
@@ -91,18 +107,29 @@ class DataProcessingAgent(LangGraphAgent):
             "task_type": self.task_type,
             "target_goal": request.context.get("target_goal") or request.objective,
             "output_path": str(version_path),
+            "requested_operations": requested_operations,
         })
         if state.get("status") != "success":
             raise RuntimeError(state.get("error") or "data processing workflow failed")
         duration = (datetime.now() - started_at).total_seconds()
         published = state.get("published_version") or {}
         advice = state.get("advice") or {}
+        handoff = build_data_handoff(published, experiment_id)
+        operation_artifacts = [
+            artifact
+            for result in state.get("results") or []
+            for artifact in result.get("artifacts") or []
+        ]
+        artifacts = [
+            {"type": "dataset_version", "name": "published_dataset", "path": str(version_path)},
+            *operation_artifacts,
+        ]
         self.tracker.update_data_processing_experiment(
             str(experiment_id),
             status="success",
             duration=duration,
             metrics={"summary": published.get("quality_metrics") or {}},
-            artifacts=[{"type": "dataset_version", "name": "published_dataset", "path": str(version_path)}],
+            artifacts=artifacts,
             extensions={"data_lifecycle": {
                 "profile_before": state.get("profile"),
                 "plan": state.get("plan"),
@@ -127,9 +154,10 @@ class DataProcessingAgent(LangGraphAgent):
                 "dataset_profile": state.get("profile"),
                 "processing_plan": state.get("plan"),
                 "dataset_version": published,
+                "data_handoff": handoff,
             },
             metrics={"data_quality": published.get("quality_metrics") or {}},
-            artifacts=[{"type": "dataset_version", "name": "published_dataset", "path": str(version_path)}],
+            artifacts=artifacts,
             recommendations=[advice] if advice else [],
             experiment_ids={"data_processing": str(experiment_id)},
             request_id=request.request_id,

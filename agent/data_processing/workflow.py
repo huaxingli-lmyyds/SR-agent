@@ -25,6 +25,7 @@ class DataProcessingGraphState(TypedDict, total=False):
     task_type: str
     target_goal: str
     output_path: str
+    requested_operations: list[Dict[str, Any]]
     advice: Dict[str, Any]
     profile: Dict[str, Any]
     plan: Dict[str, Any]
@@ -36,6 +37,34 @@ class DataProcessingGraphState(TypedDict, total=False):
 
 
 class DataProcessingDecisionPolicy:
+    """Convert requested/advised operations into a bounded deterministic plan."""
+
+    max_operations = 20
+
+    def requested_operations(self, state: DataProcessingGraphState) -> list[Dict[str, Any]]:
+        explicit = [
+            {**item, "_advisory": False}
+            for item in state.get("requested_operations") or []
+            if isinstance(item, dict)
+        ]
+        advised = [
+            {**item, "_advisory": True}
+            for item in (state.get("advice") or {}).get("suggested_operations") or []
+            if isinstance(item, dict)
+        ]
+        candidates = explicit + advised
+        return [
+            {
+                "operation": str(item.get("operation") or ""),
+                "parameters": dict(item.get("parameters") or {}),
+                "reason": str(item.get("reason") or ""),
+                "expected_effect": dict(item.get("expected_effect") or {}),
+                "_advisory": bool(item.get("_advisory")),
+            }
+            for item in candidates[: self.max_operations]
+            if isinstance(item, dict) and item.get("operation")
+        ]
+
     def after_execute(self, results: list[Any]) -> str:
         return "fail" if not results or any(item.status == "failed" for item in results) else "publish"
 
@@ -98,11 +127,13 @@ class DataProcessingWorkflow:
         return {"profile": self._profile.to_dict()}
 
     def _build_plan(self, state: DataProcessingGraphState) -> Dict[str, Any]:
-        self._plan = build_processing_plan(self._profile, state.get("target_goal", ""))
+        requested = self.decision_policy.requested_operations(state)
+        self._plan = build_processing_plan(self._profile, state.get("target_goal", ""), requested)
         return {"plan": self._plan.to_dict()}
 
     def _execute(self, state: DataProcessingGraphState) -> Dict[str, Any]:
-        self._results = execute_plan(self._plan)
+        output_root = Path(state["output_path"]).parent / "processed"
+        self._results = execute_plan(self._plan, output_root=output_root)
         route = self.decision_policy.after_execute(self._results)
         error = next((item.error for item in self._results if item.status == "failed"), None)
         return {

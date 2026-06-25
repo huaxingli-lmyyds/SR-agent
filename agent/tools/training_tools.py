@@ -5,156 +5,24 @@
 """
 
 from langchain_core.tools import tool
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime
 import json
-import re
 
 # 导入 utils 模块
 from agent.utils import (
-    get_experiment_log_path,
     get_experiment_dir,
     resolve_config_path,
     resolve_data_path,
     resolve_optional_project_path,
     ExperimentTracker,
 )
-from agent.core.adapters import get_model_adapter, get_runner_adapter, get_task_adapter
+from agent.core.adapters import resolve_adapter_bundle
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
 from agent.hpo import FailurePolicy, HPOService
-
-# 全局路径
-def _find_model_paths(output_folder: Optional[str], exp_dir: Path) -> List[str]:
-    candidates: List[Path] = []
-    ckpt_scores: Dict[Path, float] = {}
-    ckpt_dirs: List[Path] = []
-
-    save_dirs: List[Path] = []
-    if output_folder:
-        save_dirs.append(Path(output_folder) / "save")
-    if exp_dir.exists():
-        save_dirs.append(exp_dir / "output" / "save")
-        save_dirs.append(exp_dir / "results" / "save")
-
-    for save_dir in save_dirs:
-        if not save_dir.exists():
-            continue
-        candidates.extend(save_dir.glob("*.ckpt"))
-        candidates.extend(save_dir.glob("*.pt"))
-        for ckpt_dir in save_dir.glob("CKPT+*"):
-            ckpt_dirs.append(ckpt_dir)
-            meta_path = ckpt_dir / "CKPT.yaml"
-            if not meta_path.exists():
-                continue
-            try:
-                with open(meta_path, "r", encoding="utf-8") as meta_file:
-                    for line in meta_file:
-                        if line.strip().startswith("ErrorRate:"):
-                            _, value = line.split(":", 1)
-                            ckpt_scores[ckpt_dir] = float(value.strip())
-                            break
-            except (OSError, ValueError):
-                continue
-
-    if output_folder:
-        out_dir = Path(output_folder)
-        if out_dir.exists():
-            candidates.extend(out_dir.glob("*.ckpt"))
-            candidates.extend(out_dir.glob("*.pt"))
-
-    if exp_dir.exists():
-        candidates.extend(exp_dir.glob("*.ckpt"))
-        candidates.extend(exp_dir.glob("*.pt"))
-
-    if ckpt_scores:
-        best_ckpt_dir = min(ckpt_scores, key=ckpt_scores.get)
-        return [str(best_ckpt_dir)]
-
-    if ckpt_dirs:
-        newest_ckpt_dir = max(ckpt_dirs, key=lambda p: p.stat().st_mtime)
-        return [str(newest_ckpt_dir)]
-
-    # Deduplicate
-    uniq = {p.resolve(): p for p in candidates}
-    if not uniq:
-        return []
-
-    best_path = max(uniq.values(), key=lambda p: p.stat().st_mtime)
-    return [str(best_path)]
-
-
-def _find_output_folder(
-    exp_dir: Path,
-    output_folder_path: Optional[Path],
-    config_output_folder: Optional[str],
-) -> Optional[Path]:
-    candidates: List[Path] = []
-
-    if output_folder_path is not None:
-        candidates.append(output_folder_path)
-
-    if config_output_folder:
-        resolved = resolve_optional_project_path(str(config_output_folder))
-        if resolved is not None:
-            candidates.append(resolved)
-
-    candidates.append(exp_dir / "output")
-    candidates.append(exp_dir / "results")
-
-    for candidate in candidates:
-        if (candidate / "train_log.txt").exists() or (candidate / "save").exists():
-            return candidate
-
-    return output_folder_path
-
-
-def _parse_training_log(train_log_path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    epoch_data: List[Dict[str, Any]] = []
-    final_metrics: Dict[str, Any] = {}
-
-    if not train_log_path.exists():
-        return epoch_data, final_metrics
-
-    pattern = re.compile(
-        r"epoch:\s*(\d+),\s*lr:\s*([\d.e+-]+)\s*-\s*"
-        r"train loss:\s*([\d.e+-]+)\s*-\s*"
-        r"valid loss:\s*([\d.e+-]+),\s*valid ErrorRate:\s*([\d.e+-]+)"
-    )
-
-    with open(train_log_path, "r", encoding="utf-8") as f:
-        for line in f:
-            match = pattern.search(line)
-            if not match:
-                continue
-            epoch_data.append(
-                {
-                    "epoch": int(match.group(1)),
-                    "lr": float(match.group(2)),
-                    "train_loss": float(match.group(3)),
-                    "valid_loss": float(match.group(4)),
-                    "valid_error_rate": float(match.group(5)),
-                }
-            )
-
-    if epoch_data:
-        final_epoch = epoch_data[-1]
-        best_epoch = min(epoch_data, key=lambda item: item["valid_error_rate"])
-        final_metrics = {
-            "final_epoch": final_epoch["epoch"],
-            "final_lr": final_epoch["lr"],
-            "final_train_loss": final_epoch["train_loss"],
-            "final_valid_loss": final_epoch["valid_loss"],
-            "final_valid_error_rate": final_epoch["valid_error_rate"],
-            "total_epochs": len(epoch_data),
-            "best_epoch": best_epoch["epoch"],
-            "best_valid_loss": best_epoch["valid_loss"],
-            "best_error_rate": best_epoch["valid_error_rate"],
-        }
-
-    return epoch_data, final_metrics
-
+from agent.runners import collect_training_result
 
 @tool
 def TrainModel(config_path: Optional[str] = None,
@@ -170,8 +38,8 @@ def TrainModel(config_path: Optional[str] = None,
                runner: Optional[str] = None,
                experiments_dir: Optional[str] = None) -> str:
     """
-    运行 ECAPA-TDNN 模型的训练脚本。
-    训练完成后会自动保存实验记录，包括配置、训练日志和结果。
+    通过注册的模型、任务和 Runner 适配器执行训练。
+    训练完成后会自动保存实验记录，包括配置、指标和产物。
     
     参数:
         config_path: 配置文件路径，如果为 None 则使用默认配置
@@ -225,9 +93,8 @@ def TrainModel(config_path: Optional[str] = None,
         model_family = model_family or ((record or {}).get("model") or {}).get("family") or "ecapa_tdnn"
         implementation = implementation or ((record or {}).get("model") or {}).get("implementation") or "speechbrain"
         runner_name = runner or ((record or {}).get("execution") or {}).get("runner") or implementation
-        task_adapter = get_task_adapter(task_type)
-        model_adapter = get_model_adapter(model_family)
-        runner_adapter = get_runner_adapter(runner_name)
+        adapters = resolve_adapter_bundle(task_type, model_family, implementation, runner_name)
+        task_adapter, model_adapter, runner_adapter = adapters.task, adapters.model, adapters.runner
         model_adapter.validate_config(config_data)
 
         # 确定数据文件夹
@@ -241,7 +108,7 @@ def TrainModel(config_path: Optional[str] = None,
             execution_info = record.get("execution", {})
             if execution_info.get("output_folder"):
                 output_folder = execution_info.get("output_folder")
-            if (record.get("task") or {}).get("dataset"):
+            if not data_folder and (record.get("task") or {}).get("dataset"):
                 df = str(resolve_data_path(record["task"]["dataset"]))
         else:
             experiment_id = tracker.create_hpo_experiment(
@@ -290,6 +157,9 @@ def TrainModel(config_path: Optional[str] = None,
         trial_budget = json.loads(budget_json) if budget_json else {}
         if not isinstance(trial_parameters, dict) or not isinstance(trial_budget, dict):
             raise ValueError("parameters_json and budget_json must be JSON objects")
+        parameter_validator = getattr(model_adapter, "validate_parameters", None)
+        if callable(parameter_validator):
+            parameter_validator(trial_parameters)
         data_fraction = trial_budget.get("data_fraction")
         if data_fraction is not None and not 0 < float(data_fraction) <= 1:
             raise ValueError("budget data_fraction must be in (0, 1]")
@@ -314,48 +184,26 @@ def TrainModel(config_path: Optional[str] = None,
             status = "failed"
             error_msg = train_result.get("error")
 
-        valid_error_rate = train_result.get("valid_error_rate") if isinstance(train_result, dict) else None
-        output_folder_path = _find_output_folder(
-            exp_dir,
-            output_folder_path,
-            config_data.get("output_folder"),
+        collected = collect_training_result(runner_adapter, train_result, output_folder_path, exp_dir)
+        collected["status"] = status
+        collected["error"] = error_msg
+        output_folder = collected.get("output_folder") or (
+            str(output_folder_path) if output_folder_path else None
         )
-        output_folder = str(output_folder_path) if output_folder_path else None
-
-        model_paths = _find_model_paths(
-            str(output_folder_path) if output_folder_path else None,
-            exp_dir,
-        )
-        train_log_path = (
-            output_folder_path / "train_log.txt" if output_folder_path else None
-        )
-
-        epoch_data, final_metrics = (
-            _parse_training_log(train_log_path) if train_log_path else ([], {})
-        )
-
-        training_metrics = {"valid_error_rate": valid_error_rate}
-        if final_metrics:
-            training_metrics.update(final_metrics)
+        training_metrics = dict(collected.get("metrics") or {})
+        epoch_data = list(collected.get("epoch_data") or [])
 
         # experiment_tracker 更新记录
-        operation_result = runner_adapter.normalize_training_result({
-            "status": status,
-            "error": error_msg,
-            "output_folder": str(output_folder_path) if output_folder_path else None,
-            "metrics": training_metrics,
-            "model_paths": model_paths,
-            "train_log_path": str(train_log_path) if train_log_path else None,
-            "epoch_data": epoch_data,
-            "final_metrics": final_metrics,
-        })
-        operation_result.task = (record or {}).get("task") or {
+        operation_result = runner_adapter.normalize_training_result(collected)
+        operation_result.task = {
+            **((record or {}).get("task") or {}),
             "type": task_type,
             "dataset": df,
             "primary_metric": task_adapter.primary_metric,
             "metric_mode": task_adapter.metric_mode,
         }
-        operation_result.model = (record or {}).get("model") or {
+        operation_result.model = {
+            **((record or {}).get("model") or {}),
             "family": model_family,
             "implementation": implementation,
             "config_path": config_path_str,
@@ -375,11 +223,11 @@ def TrainModel(config_path: Optional[str] = None,
             operation_result,
             duration_seconds=duration,
             actor={"type": "hpo_agent", "name": "model_optimizer"},
+            update_status=trial_id is None,
         )
         if trial_id and status == "success":
             tracker.update_hpo_experiment(
                 experiment_id,
-                status="running",
                 extensions={"optimization": {
                     "latest_trial_execution": {
                         "trial_id": trial_id,

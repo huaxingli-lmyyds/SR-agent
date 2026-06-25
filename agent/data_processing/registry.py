@@ -10,6 +10,7 @@ from .contracts import DataOperationResult, DatasetSpec
 class DataProcessor(Protocol):
     operation_name: str
     supported_data_types: Iterable[str]
+    parameter_schema: Dict[str, Any]
 
     def validate(self, dataset: DatasetSpec, parameters: Dict[str, Any]) -> None: ...
 
@@ -40,7 +41,10 @@ class DataProcessorRegistry:
 
     def describe(self) -> Dict[str, Any]:
         return {
-            name: {"supported_data_types": list(processor.supported_data_types)}
+            name: {
+                "supported_data_types": list(processor.supported_data_types),
+                "parameter_schema": dict(getattr(processor, "parameter_schema", {})),
+            }
             for name, processor in sorted(self._processors.items())
         }
 

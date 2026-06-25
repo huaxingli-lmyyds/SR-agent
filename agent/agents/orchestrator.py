@@ -15,10 +15,9 @@ from agent.agents.coordination import (
     CompletionDecision,
     CompletionPolicy,
     TaskDispatcher,
-    TaskExecutionRecord,
 )
 from agent.agents.orchestration_workflow import OrchestrationWorkflow
-from agent.core.adapters import get_task_adapter
+from agent.tasks import get_task_adapter
 from agent.memory import EpisodeMemory, MemoryScope, MemoryService
 from agent.utils import ConfigParser, ExperimentTracker
 from agent.utils.path_tool import (
@@ -236,7 +235,7 @@ class CoordinatorAgent(AdvisoryAgentBase):
         ))
         return OrchestrationResult(
             experiment_id=self._manage_experiment_id,
-            status=completion.status,
+            status=status,
             rounds=len(records),
             completion=completion.to_dict(),
             task_results=[record.to_dict() for record in records],

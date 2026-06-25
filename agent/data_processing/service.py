@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import shutil
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,8 @@ def infer_dataset_spec(
     task_type: str = "generic",
     max_files: int = 10000,
 ) -> DatasetSpec:
+    if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0:
+        raise ValueError("max_files must be a positive integer")
     source = Path(source_uri).resolve()
     if dataset_type == "auto":
         extensions = Counter(
@@ -145,9 +148,46 @@ def profile_dataset(dataset: DatasetSpec) -> DataProfile:
     )
 
 
-def build_processing_plan(profile: DataProfile, target_goal: str = "") -> DataProcessingPlan:
+def build_processing_plan(
+    profile: DataProfile,
+    target_goal: str = "",
+    requested_operations: Optional[List[Dict[str, Any]]] = None,
+) -> DataProcessingPlan:
     operations: List[DataOperation] = []
+    rejected_operations: List[Dict[str, Any]] = []
     seen = set()
+    for requested in requested_operations or []:
+        operation_name = str(requested.get("operation") or "").strip()
+        if not operation_name or operation_name in seen:
+            continue
+        try:
+            processor = PROCESSORS.get(operation_name, profile.dataset.dataset_type)
+            parameters = dict(requested.get("parameters") or {})
+            if requested.get("_advisory"):
+                for name, rule in getattr(processor, "parameter_schema", {}).items():
+                    if (
+                        rule.get("advisor_allowed", True) is False
+                        and parameters.get(name, rule.get("default")) != rule.get("default")
+                    ):
+                        raise ValueError(f"advisor cannot change protected parameter: {name}")
+            processor.validate(profile.dataset, parameters)
+        except (KeyError, ValueError) as exc:
+            if requested.get("_advisory"):
+                rejected_operations.append({
+                    "operation": operation_name,
+                    "parameters": dict(requested.get("parameters") or {}),
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "source": "advisor",
+                })
+                continue
+            raise
+        seen.add(operation_name)
+        operations.append(DataOperation(
+            operation=operation_name,
+            parameters=parameters,
+            reason=str(requested.get("reason") or "Requested by the data processing policy."),
+            expected_effect=dict(requested.get("expected_effect") or {}),
+        ))
     for issue in profile.issues:
         operation_name = issue.suggested_operation or "validate_dataset"
         if operation_name in seen:
@@ -167,6 +207,7 @@ def build_processing_plan(profile: DataProfile, target_goal: str = "") -> DataPr
     return DataProcessingPlan(
         dataset=profile.dataset,
         operations=operations,
+        rejected_operations=rejected_operations,
         validation_rules=[{"metric": "error_count", "operator": "eq", "value": 0}],
         target_goal=target_goal,
     )
@@ -175,6 +216,7 @@ def build_processing_plan(profile: DataProfile, target_goal: str = "") -> DataPr
 class ValidateDatasetProcessor:
     operation_name = "validate_dataset"
     supported_data_types = {"*"}
+    parameter_schema: Dict[str, Any] = {}
 
     def validate(self, dataset: DatasetSpec, parameters: Dict[str, Any]) -> None:
         if not dataset.source_uri:
@@ -194,15 +236,132 @@ class ValidateDatasetProcessor:
         )
 
 
-def execute_plan(plan: DataProcessingPlan) -> List[DataOperationResult]:
+class FilterManifestRowsProcessor:
+    """Create a derived CSV dataset while preserving the original source."""
+
+    operation_name = "filter_manifest_rows"
+    supported_data_types = {"text", "tabular", "generic", "audio", "*"}
+    parameter_schema = {
+        "drop_empty_rows": {"type": "boolean", "default": True},
+        "deduplicate_rows": {"type": "boolean", "default": True},
+        "csv_glob": {"type": "string", "default": "*.csv"},
+        "materialize_complete_dataset": {
+            "type": "boolean",
+            "default": False,
+            "advisor_allowed": False,
+        },
+    }
+
+    def validate(self, dataset: DatasetSpec, parameters: Dict[str, Any]) -> None:
+        for name in ("drop_empty_rows", "deduplicate_rows", "materialize_complete_dataset"):
+            if name in parameters and not isinstance(parameters[name], bool):
+                raise ValueError(f"{name} must be a boolean")
+        if "csv_glob" in parameters and not isinstance(parameters["csv_glob"], str):
+            raise ValueError("csv_glob must be a string")
+        if ".." in str(parameters.get("csv_glob") or ""):
+            raise ValueError("csv_glob cannot traverse outside the dataset")
+
+    def execute(self, dataset: DatasetSpec, parameters: Dict[str, Any]) -> DataOperationResult:
+        self.validate(dataset, parameters)
+        source = Path(dataset.source_uri)
+        if not parameters.get("_output_uri"):
+            return DataOperationResult(
+                status="failed",
+                operation=self.operation_name,
+                error="filter_manifest_rows requires an execution output directory",
+            )
+        output = Path(str(parameters["_output_uri"]))
+        materialize = bool(parameters.get("materialize_complete_dataset", False))
+        resolved_source = source.resolve()
+        resolved_output = output.resolve()
+        if resolved_output == resolved_source or (
+            source.is_dir() and resolved_source in resolved_output.parents
+        ):
+            return DataOperationResult(
+                status="failed",
+                operation=self.operation_name,
+                error="output directory must be outside the source dataset",
+            )
+        output.mkdir(parents=True, exist_ok=True)
+        if materialize and source.is_dir():
+            shutil.copytree(source, output, dirs_exist_ok=True)
+        pattern = str(parameters.get("csv_glob") or "*.csv")
+        candidates = [source] if source.is_file() and source.suffix.lower() == ".csv" else list(source.glob(pattern))
+        before_rows = after_rows = dropped_rows = 0
+        artifacts: List[Dict[str, Any]] = []
+        for path in candidates:
+            relative_path = path.name if source.is_file() else path.relative_to(source)
+            destination = output / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("r", encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream)
+                fields = reader.fieldnames or []
+                rows = list(reader)
+            before_rows += len(rows)
+            cleaned = []
+            fingerprints = set()
+            for row in rows:
+                if parameters.get("drop_empty_rows", True) and any(
+                    value is None or str(value).strip() == "" for value in row.values()
+                ):
+                    dropped_rows += 1
+                    continue
+                fingerprint = json.dumps(row, sort_keys=True, ensure_ascii=False)
+                if parameters.get("deduplicate_rows", True) and fingerprint in fingerprints:
+                    dropped_rows += 1
+                    continue
+                fingerprints.add(fingerprint)
+                cleaned.append(row)
+            with destination.open("w", encoding="utf-8", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(cleaned)
+            after_rows += len(cleaned)
+            artifacts.append({
+                "type": "manifest",
+                "name": relative_path.as_posix() if isinstance(relative_path, Path) else relative_path,
+                "path": str(destination),
+            })
+        if not candidates:
+            return DataOperationResult(
+                status="failed",
+                operation=self.operation_name,
+                error=f"no CSV manifests matched {pattern}",
+            )
+        return DataOperationResult(
+            status="success",
+            operation=self.operation_name,
+            input_dataset_version=dataset.version,
+            output_dataset_uri=str(output),
+            consumer_ready=materialize,
+            before_metrics={"manifest_row_count": before_rows},
+            after_metrics={"manifest_row_count": after_rows, "dropped_row_count": dropped_rows, "error_count": 0},
+            artifacts=artifacts,
+            details={"parameters": {key: value for key, value in parameters.items() if not key.startswith("_")}},
+        )
+
+
+def execute_plan(plan: DataProcessingPlan, *, output_root: Optional[Path] = None) -> List[DataOperationResult]:
     results = []
-    for operation in plan.operations:
-        processor = PROCESSORS.get(operation.operation, plan.dataset.dataset_type)
-        processor.validate(plan.dataset, operation.parameters)
-        result = processor.execute(plan.dataset, operation.parameters)
+    current_dataset = plan.dataset
+    for index, operation in enumerate(plan.operations):
+        processor = PROCESSORS.get(operation.operation, current_dataset.dataset_type)
+        parameters = dict(operation.parameters)
+        if output_root is not None:
+            parameters["_output_uri"] = str(output_root / f"{index:02d}-{operation.operation}")
+        processor.validate(current_dataset, parameters)
+        result = processor.execute(current_dataset, parameters)
         results.append(result)
         if result.status == "failed":
             break
+        if result.output_dataset_uri:
+            current_dataset = DatasetSpec(
+                **{
+                    **current_dataset.to_dict(),
+                    "source_uri": result.output_dataset_uri,
+                    "version": result.output_dataset_version or current_dataset.version,
+                }
+            )
     validation_error = _validate_plan_results(plan, results)
     if validation_error:
         metrics = results[-1].after_metrics if results else {}
@@ -230,13 +389,43 @@ def publish_dataset_version(
     if failed:
         raise ValueError("cannot publish a dataset version with failed operations")
     version = _version_id(dataset, result_list)
+    output_uri = next(
+        (result.output_dataset_uri for result in reversed(result_list) if result.output_dataset_uri),
+        dataset.source_uri,
+    )
+    output_results = [result for result in result_list if result.output_dataset_uri]
+    final_output = output_results[-1] if output_results else None
+    if final_output is None:
+        consumer_uri = dataset.source_uri
+        consumption_status = "source_unchanged"
+        consumption_reason = "No operation produced a derived dataset; use the validated source dataset."
+    elif final_output.consumer_ready:
+        consumer_uri = final_output.output_dataset_uri
+        consumption_status = "ready"
+        consumption_reason = "The final derived dataset is marked consumer-ready."
+    else:
+        consumer_uri = None
+        consumption_status = "not_ready"
+        consumption_reason = (
+            "Data processing produced derived artifacts, but the final output is not a complete "
+            "dataset that downstream training can consume."
+        )
     record = DatasetVersion(
         dataset_id=dataset.dataset_id,
         version=version,
         source_uri=dataset.source_uri,
+        output_uri=output_uri,
+        consumer_uri=consumer_uri,
+        consumption_status=consumption_status,
+        consumption_reason=consumption_reason,
         parent_version=parent_version or dataset.version,
         operations=[result.to_dict() for result in result_list],
         quality_metrics=result_list[-1].after_metrics if result_list else {},
+        artifacts=[
+            artifact
+            for result in result_list
+            for artifact in result.artifacts
+        ],
         created_at=datetime.now().isoformat(),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,6 +477,7 @@ def plan_from_dict(data: Dict[str, Any]) -> DataProcessingPlan:
     return DataProcessingPlan(
         dataset=dataset_spec_from_dict(data["dataset"]),
         operations=[DataOperation(**item) for item in data.get("operations") or []],
+        rejected_operations=data.get("rejected_operations") or [],
         validation_rules=data.get("validation_rules") or [],
         target_goal=data.get("target_goal") or "",
     )
@@ -358,7 +548,7 @@ def _profile_manifest(source: Path) -> Dict[str, Any]:
             severity="warning",
             message="Manifest rows with missing values were found.",
             evidence={"count": invalid_row_count},
-            suggested_operation="validate_dataset",
+            suggested_operation="filter_manifest_rows",
         ))
     return {
         "schema": schema,
@@ -381,3 +571,4 @@ def _version_id(dataset: DatasetSpec, results: List[DataOperationResult]) -> str
 
 
 register_processor(ValidateDatasetProcessor())
+register_processor(FilterManifestRowsProcessor())
