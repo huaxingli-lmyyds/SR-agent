@@ -64,3 +64,33 @@ def test_soundfile_fallback_pads_short_reads(tmp_path) -> None:
     assert sample_rate == 16000
     assert tuple(signal.shape) == (1, 20)
     assert signal[0, 8:].abs().sum().item() == 0
+
+
+def test_voxceleb_recipes_use_project_batch_compat_layer() -> None:
+    project_root = Path(__file__).parents[2]
+    train_source = (project_root / "recipes/voxceleb/train_speaker_embeddings.py").read_text(
+        encoding="utf-8"
+    )
+    verification_source = (
+        project_root / "recipes/voxceleb/speaker_verification_cosine.py"
+    ).read_text(encoding="utf-8")
+    runner_source = (project_root / "agent/runners/speechbrain_backend.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from recipes.voxceleb.batch_compat import with_padded_batch" in train_source
+    assert "from recipes.voxceleb.batch_compat import with_padded_batch" in verification_source
+    assert "train_loader_kwargs=dataloader_options" in runner_source
+    assert "valid_loader_kwargs=dataloader_options" in runner_source
+    assert "recipe.with_padded_batch" in runner_source
+    assert "train_loader_kwargs=hparams[\"dataloader_options\"]" not in runner_source
+    assert "valid_loader_kwargs=hparams[\"dataloader_options\"]" not in runner_source
+
+
+def test_audio_compat_uses_soundfile_instead_of_speechbrain_audio_io() -> None:
+    source = Path("recipes/voxceleb/audio_compat.py").read_text(encoding="utf-8")
+
+    assert "import soundfile as sf" in source
+    assert "from speechbrain.dataio import audio_io" not in source
+    assert "import torchaudio" not in source
+    assert "sf.read(" in source

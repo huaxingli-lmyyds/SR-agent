@@ -26,10 +26,12 @@ patch_torchaudio_compatibility()
 
 import speechbrain as sb
 from recipes.voxceleb.audio_compat import audio_io
+from recipes.voxceleb.batch_compat import with_padded_batch
 from speechbrain.utils.data_utils import download_file
 from speechbrain.utils.distributed import run_on_main
 from speechbrain.utils.logger import get_logger
 from speechbrain.utils.metric_stats import EER, minDCF
+
 
 
 # Compute embeddings from the waveforms
@@ -208,13 +210,13 @@ def dataio_prep(params):
 
     # Create dataloaders
     train_dataloader = sb.dataio.dataloader.make_dataloader(
-        train_data, **params["train_dataloader_opts"]
+        train_data, **with_padded_batch(params["train_dataloader_opts"])
     )
     enrol_dataloader = sb.dataio.dataloader.make_dataloader(
-        enrol_data, **params["enrol_dataloader_opts"]
+        enrol_data, **with_padded_batch(params["enrol_dataloader_opts"])
     )
     test_dataloader = sb.dataio.dataloader.make_dataloader(
-        test_data, **params["test_dataloader_opts"]
+        test_data, **with_padded_batch(params["test_dataloader_opts"])
     )
 
     return train_dataloader, enrol_dataloader, test_dataloader

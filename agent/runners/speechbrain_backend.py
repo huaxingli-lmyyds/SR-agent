@@ -523,12 +523,13 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             checkpointer=hparams["checkpointer"],
         )
 
+        dataloader_options = recipe.with_padded_batch(hparams["dataloader_options"])
         speaker_brain.fit(
             speaker_brain.hparams.epoch_counter,
             train_data,
             valid_data,
-            train_loader_kwargs=hparams["dataloader_options"],
-            valid_loader_kwargs=hparams["dataloader_options"],
+            train_loader_kwargs=dataloader_options,
+            valid_loader_kwargs=dataloader_options,
         )
 
         train_log_path = hparams.get("train_log")

@@ -28,8 +28,10 @@ patch_torchaudio_compatibility()
 
 import speechbrain as sb
 from recipes.voxceleb.audio_compat import audio_io
+from recipes.voxceleb.batch_compat import with_padded_batch
 from speechbrain.utils.data_utils import download_file
 from speechbrain.utils.distributed import run_on_main
+
 
 
 class SpeakerBrain(sb.core.Brain):
@@ -241,11 +243,13 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
 
+    dataloader_options = with_padded_batch(hparams["dataloader_options"])
+
     # Training
     speaker_brain.fit(
         speaker_brain.hparams.epoch_counter,
         train_data,
         valid_data,
-        train_loader_kwargs=hparams["dataloader_options"],
-        valid_loader_kwargs=hparams["dataloader_options"],
+        train_loader_kwargs=dataloader_options,
+        valid_loader_kwargs=dataloader_options,
     )
