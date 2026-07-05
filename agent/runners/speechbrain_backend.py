@@ -72,6 +72,37 @@ def _load_hyperpyyaml_config(
         return None, _format_exception(exc)
 
 
+
+def _runtime_options_from_overrides(
+    overrides: Union[List[str], Dict[str, Any]],
+) -> Tuple[Union[List[str], Dict[str, Any]], Dict[str, Any]]:
+    if isinstance(overrides, dict):
+        normalized = dict(overrides)
+        raw = normalized.pop("_run_opts", {}) or {}
+        return normalized, dict(raw) if isinstance(raw, dict) else {}
+    return overrides, {}
+
+
+def _resolve_run_opts(torch_module: Any, requested: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    run_opts = dict(requested or {})
+    device = str(run_opts.get("device") or "auto").strip().lower()
+    if device in {"", "auto"}:
+        device = "cuda" if torch_module.cuda.is_available() else "cpu"
+    if device.startswith("cuda"):
+        if not torch_module.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested for SpeechBrain training/evaluation, but "
+                "torch.cuda.is_available() is False. Check the CUDA-matched "
+                "torch installation and CUDA_VISIBLE_DEVICES."
+            )
+        if ":" in device:
+            try:
+                torch_module.cuda.set_device(int(device.split(":", 1)[1]))
+            except (ValueError, RuntimeError) as exc:
+                raise RuntimeError(f"invalid CUDA device requested: {device}") from exc
+    run_opts["device"] = device
+    return run_opts
+
 def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
     if not train_log_path.exists():
         return None
@@ -244,10 +275,11 @@ def run_evaluation(
             }
 
         if isinstance(overrides, dict):
-            overrides = dict(overrides)
+            overrides, override_run_opts = _runtime_options_from_overrides(overrides)
         else:
             overrides = list(overrides or [])
-        run_opts = dict(run_opts or {})
+            override_run_opts = {}
+        run_opts = {**override_run_opts, **dict(run_opts or {})}
 
         if data_folder:
             if isinstance(overrides, dict):
@@ -260,8 +292,8 @@ def run_evaluation(
             else:
                 overrides.append(f"pretrain_path: {model_path}")
                 
-        if "device" not in run_opts:
-            run_opts["device"] = "cuda" if torch.cuda.is_available() else "cpu"
+        run_opts = _resolve_run_opts(torch, run_opts)
+        print(f"SR-agent SpeechBrain evaluation run_opts: {run_opts}", flush=True)
 
         params, err = _load_hyperpyyaml_config(config_path, overrides)
         if err:
@@ -427,14 +459,17 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
 
         data_fraction = None
         if isinstance(overrides, dict):
-            normalized_overrides: Union[List[str], Dict[str, Any]] = dict(overrides)
+            normalized_overrides, run_opts = _runtime_options_from_overrides(overrides)
             data_fraction = normalized_overrides.pop("_hpo_data_fraction", None)
             normalized_overrides.pop("_hpo_max_duration_seconds", None)
         elif isinstance(overrides, list):
             normalized_overrides = overrides
+            run_opts = {}
         else:
             normalized_overrides = []
-        run_opts: Dict[str, Any] = {}
+            run_opts = {}
+        run_opts = _resolve_run_opts(torch, run_opts)
+        print(f"SR-agent SpeechBrain training run_opts: {run_opts}", flush=True)
 
         torch.backends.cudnn.benchmark = True
         sb.utils.distributed.ddp_init_group(run_opts)
@@ -545,7 +580,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
 
         valid_error_rate = _extract_best_valid_error_rate(log_path)
 
-        return {"status": "success", "valid_error_rate": valid_error_rate, "error": None}
+        return {"status": "success", "valid_error_rate": valid_error_rate, "error": None, "runtime": {"run_opts": dict(run_opts)}}
     except Exception as exc:
         return {
             "status": "failed",

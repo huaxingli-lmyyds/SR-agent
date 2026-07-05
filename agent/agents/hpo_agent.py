@@ -191,7 +191,7 @@ class HPOAgent(LangGraphAgent):
                 "strategy_decision": decision.to_dict(), "adopted_plan": adopted_plan, "data_handoff": data_handoff,
             }})
             scheduled = HPOScheduler(
-                service, self._trial_executor(experiment_id, data_folder),
+                service, self._trial_executor(experiment_id, data_folder, request.context.get("runtime_options")),
                 retry_policy=RetryPolicy(int(request.budget.get("max_retries", 1))),
                 strategy_reviewer=self._runtime_strategy_reviewer(request, campaign),
                 review_interval_trials=int(request.budget.get("strategy_review_interval_trials", 3)),
@@ -260,7 +260,9 @@ class HPOAgent(LangGraphAgent):
             request_id=request.request_id,
         )
 
-    def _trial_executor(self, experiment_id: str, data_folder: str):
+    def _trial_executor(self, experiment_id: str, data_folder: str, runtime_options: Any = None):
+        runtime_options = dict(runtime_options or {}) if isinstance(runtime_options, dict) else {}
+
         def execute(trial: Any, attempt: int) -> Dict[str, Any]:
             from agent.tools.evaluation_tools import RunEvaluation
             from agent.tools.training_tools import TrainModel
@@ -280,6 +282,9 @@ class HPOAgent(LangGraphAgent):
                 "implementation": implementation,
                 "runner": runner,
                 "experiments_dir": str(self.experiments_dir),
+                "device": runtime_options.get("device"),
+                "precision": runtime_options.get("precision"),
+                "eval_precision": runtime_options.get("eval_precision"),
             }))
             if train_result.get("status") != "success":
                 return train_result
@@ -292,6 +297,9 @@ class HPOAgent(LangGraphAgent):
                 "task_type": self.task_type,
                 "model_family": model_family,
                 "implementation": implementation,
+                "device": runtime_options.get("device"),
+                "precision": runtime_options.get("precision"),
+                "eval_precision": runtime_options.get("eval_precision"),
             }))
             metrics: Dict[str, Any] = {}
             for values in (evaluation.get("metrics") or {}).values():

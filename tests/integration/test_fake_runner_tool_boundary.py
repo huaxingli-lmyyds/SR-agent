@@ -122,6 +122,9 @@ def test_training_tool_applies_budget_and_synchronizes_trial(
             "budget_json": json.dumps(trial.budget.to_dict()),
             "runner": "capturing",
             "data_folder": str(processed_dataset),
+            "device": "cuda:0",
+            "precision": "fp32",
+            "eval_precision": "fp32",
         }))
     finally:
         if previous is None:
@@ -137,4 +140,5 @@ def test_training_tool_applies_budget_and_synchronizes_trial(
     assert captured["_hpo_data_fraction"] == 0.25
     assert captured["_hpo_max_duration_seconds"] == 10
     assert captured["data_folder"] == str(processed_dataset)
+    assert captured["_run_opts"] == {"device": "cuda:0", "precision": "fp32", "eval_precision": "fp32"}
     assert payload["task"]["dataset"] == str(processed_dataset)

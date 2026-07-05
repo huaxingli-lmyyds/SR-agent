@@ -117,6 +117,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Dataset path; absolute paths such as /tmp/voxceleb1 are supported.",
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Runtime device for SpeechBrain, e.g. auto, cuda, cuda:0, or cpu.",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=["fp32", "fp16", "bf16"],
+        default=None,
+        help="SpeechBrain training precision.",
+    )
+    parser.add_argument(
+        "--eval-precision",
+        choices=["fp32", "fp16", "bf16"],
+        default=None,
+        help="SpeechBrain evaluation precision.",
+    )
     parser.add_argument("--primary-metric", type=str, default="eer")
     parser.add_argument("--metric-mode", choices=["min", "max"], default="min")
     parser.add_argument("--verbose", action="store_true")
@@ -147,6 +165,15 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         context["search_space"] = args.search_space_json
     if args.target_value is not None:
         context["target_value"] = args.target_value
+    runtime_options: dict[str, Any] = {}
+    if args.device:
+        runtime_options["device"] = args.device
+    if args.precision is not None:
+        runtime_options["precision"] = args.precision
+    if args.eval_precision is not None:
+        runtime_options["eval_precision"] = args.eval_precision
+    if runtime_options:
+        context["runtime_options"] = runtime_options
 
     if args.budgets_json is not None:
         if not isinstance(args.budgets_json, list):

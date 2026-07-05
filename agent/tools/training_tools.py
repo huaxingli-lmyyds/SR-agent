@@ -36,7 +36,10 @@ def TrainModel(config_path: Optional[str] = None,
                model_family: Optional[str] = None,
                implementation: Optional[str] = None,
                runner: Optional[str] = None,
-               experiments_dir: Optional[str] = None) -> str:
+               experiments_dir: Optional[str] = None,
+               device: Optional[str] = None,
+               precision: Optional[str] = None,
+               eval_precision: Optional[str] = None) -> str:
     """
     通过注册的模型、任务和 Runner 适配器执行训练。
     训练完成后会自动保存实验记录，包括配置、指标和产物。
@@ -173,6 +176,15 @@ def TrainModel(config_path: Optional[str] = None,
             overrides["_hpo_data_fraction"] = float(data_fraction)
         if max_duration is not None:
             overrides["_hpo_max_duration_seconds"] = float(max_duration)
+        run_opts: Dict[str, Any] = {}
+        if device:
+            run_opts["device"] = device
+        if precision:
+            run_opts["precision"] = precision
+        if eval_precision:
+            run_opts["eval_precision"] = eval_precision
+        if run_opts:
+            overrides["_run_opts"] = run_opts
         train_result = runner_adapter.run_training(config_path_str, overrides)
 
         end_time = datetime.now()
@@ -213,6 +225,7 @@ def TrainModel(config_path: Optional[str] = None,
             "output_folder": output_folder,
             "trial_id": trial_id,
             "budget": trial_budget,
+            "runtime_options": dict(overrides.get("_run_opts") or {}),
         })
         for artifact in operation_result.artifacts:
             if trial_id:

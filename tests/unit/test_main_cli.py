@@ -112,3 +112,21 @@ def test_cli_passes_data_folder_to_context() -> None:
 
     assert context["data_folder"] == "/tmp/voxceleb1"
     assert context["dataset_uri"] == "/tmp/voxceleb1"
+
+def test_cli_passes_runtime_options_to_context() -> None:
+    args = parse_args(
+        "--device",
+        "cuda:0",
+        "--precision",
+        "fp32",
+        "--eval-precision",
+        "fp32",
+    )
+
+    context = build_context(args)
+
+    assert context["runtime_options"] == {
+        "device": "cuda:0",
+        "precision": "fp32",
+        "eval_precision": "fp32",
+    }

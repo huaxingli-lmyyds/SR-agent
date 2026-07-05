@@ -48,6 +48,9 @@ def _run_evaluation(
     task_type: Optional[str] = None,
     model_family: Optional[str] = None,
     implementation: Optional[str] = None,
+    device: Optional[str] = None,
+    precision: Optional[str] = None,
+    eval_precision: Optional[str] = None,
 ) -> str:
     """Evaluate a recorded model and return a structured operation result."""
     tracker = ExperimentTracker(experiments_dir)
@@ -112,11 +115,21 @@ def _run_evaluation(
     config_path = str(resolve_config_path(config_candidate))
 
     started_at = datetime.now()
+    run_opts = {}
+    if device:
+        run_opts["device"] = device
+    if precision:
+        run_opts["precision"] = precision
+    if eval_precision:
+        run_opts["eval_precision"] = eval_precision
+    overrides = {"output_folder": str(output_folder)}
+    if run_opts:
+        overrides["_run_opts"] = run_opts
     raw = runner_adapter.run_evaluation(
         config_path,
         model_path=model_path,
         data_path=data_folder,
-        overrides={"output_folder": str(output_folder)},
+        overrides=overrides,
     )
 
     metrics = dict(raw.get("metrics") or {})
@@ -157,6 +170,7 @@ def _run_evaluation(
         "runner": runner_name,
         "output_folder": raw.get("output_folder") or str(output_folder),
         "trial_id": trial_id,
+        "runtime_options": run_opts,
     })
     for artifact in result.artifacts:
         if trial_id:
@@ -198,6 +212,9 @@ def RunEvaluation(
     task_type: Optional[str] = None,
     model_family: Optional[str] = None,
     implementation: Optional[str] = None,
+    device: Optional[str] = None,
+    precision: Optional[str] = None,
+    eval_precision: Optional[str] = None,
 ) -> str:
     """Evaluate through a registered runner and always return OperationResult JSON."""
     try:
@@ -212,6 +229,9 @@ def RunEvaluation(
             task_type=task_type,
             model_family=model_family,
             implementation=implementation,
+            device=device,
+            precision=precision,
+            eval_precision=eval_precision,
         )
     except Exception as exc:
         return OperationResult(
