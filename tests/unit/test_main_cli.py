@@ -104,3 +104,11 @@ def test_cli_rejects_non_list_budgets_json() -> None:
 
     with pytest.raises(SystemExit, match="--budgets-json must be a JSON list"):
         build_context(args)
+
+def test_cli_passes_data_folder_to_context() -> None:
+    args = parse_args("--data-folder", "/tmp/voxceleb1")
+
+    context = build_context(args)
+
+    assert context["data_folder"] == "/tmp/voxceleb1"
+    assert context["dataset_uri"] == "/tmp/voxceleb1"

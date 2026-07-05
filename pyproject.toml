@@ -6,9 +6,21 @@ build-backend = "setuptools.build_meta"
 name = "sr-agent"
 version = "0.1.0"
 description = "Agentic, model-agnostic hyperparameter optimization for speaker recognition"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "SR-agent contributors"},
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 requires-python = ">=3.10"
 dependencies = [
-    "speechbrain==1.0.3",
     "langgraph>=0.2.0",
     "langchain-core>=0.2.0",
     "langchain-openai>=0.1.0",
@@ -22,14 +34,18 @@ dependencies = [
     "scipy>=1.4.1",
     "sentencepiece>=0.1.91",
     "soundfile>=0.12.1",
-    "torch>=2.1.0",
-    "torchaudio>=2.1.0",
     "tqdm>=4.42.0",
     "huggingface_hub>=0.8.0",
 ]
 keywords = ["hyperparameter-optimization", "speaker-recognition", "agents"]
 
+
 [project.optional-dependencies]
+# Keep GPU-sensitive packages out of the default install. Install a matched
+# torch/torchaudio stack first, then add SpeechBrain support with this extra.
+speech = [
+    "speechbrain==1.0.3",
+]
 dev = [
     "ruff==0.12.4",
     "pytest==7.4.0",

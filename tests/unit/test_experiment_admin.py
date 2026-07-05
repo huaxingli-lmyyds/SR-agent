@@ -5,7 +5,7 @@ import sys
 import zipfile
 
 
-SCRIPT = Path(__file__).parents[2] / "scripts" / "experiment_admin.py"
+SCRIPT = Path(__file__).parents[2] / "scripts" / "admin" / "experiment_admin.py"
 
 
 def _run(*args):

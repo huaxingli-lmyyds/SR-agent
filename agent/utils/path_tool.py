@@ -3,6 +3,7 @@
 为整个工程提供统一的绝对路径管理和路径操作功能
 """
 
+import os
 from pathlib import Path
 from typing import Union, List, Optional, Dict, Any
 from datetime import datetime
@@ -46,12 +47,10 @@ def get_configs_dir() -> Path:
     return get_project_root() / "configs"
 
 def get_datasets_dir() -> Path:
-    """
-    获取数据集目录
-    
-    Returns:
-        Path: datasets 目录的绝对路径
-    """
+    """Return the dataset root, overridable on remote servers."""
+    root = os.environ.get("SR_AGENT_DATA_ROOT")
+    if root and root.strip():
+        return Path(root).expanduser().resolve()
     return get_project_root() / "datasets"
 
 
@@ -320,10 +319,19 @@ def resolve_config_path(
 
 
 def resolve_data_path(path: Optional[Union[str, Path]] = None) -> Path:
-    """解析数据目录；空值和 PLACEHOLDER 统一指向项目 datasets/voxceleb1。"""
+    """Resolve dataset paths from absolute paths, env vars, or data-root-relative paths."""
     if path is None or str(path).strip() in {"", "!PLACEHOLDER"}:
+        dataset_path = os.environ.get("SR_AGENT_DATASET_PATH")
+        if dataset_path and dataset_path.strip():
+            return Path(dataset_path).expanduser().resolve()
         return (get_datasets_dir() / "voxceleb1").resolve()
-    return resolve_project_path(path)
+    path_obj = Path(path).expanduser()
+    if path_obj.is_absolute():
+        return path_obj.resolve()
+    data_root = os.environ.get("SR_AGENT_DATA_ROOT")
+    if data_root and data_root.strip():
+        return (Path(data_root).expanduser() / path_obj).resolve()
+    return resolve_project_path(path_obj)
 
 
 def resolve_config_value_path(

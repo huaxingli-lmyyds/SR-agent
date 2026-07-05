@@ -24,7 +24,7 @@ def test_speechbrain_dependency_reports_missing_installation(monkeypatch) -> Non
 
     monkeypatch.setattr(speechbrain_dependency, "version", missing)
 
-    with pytest.raises(RuntimeError, match="pip install -e"):
+    with pytest.raises(RuntimeError, match=r"pip install -e .\[speech\]"):
         speechbrain_dependency.require_speechbrain()
 
 

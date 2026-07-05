@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.run_comparison_experiments import (
+from scripts.experiments.run_comparison_experiments import (
     ComparisonVariant,
     summarize,
     selected_variants,
@@ -74,7 +74,7 @@ def test_summarize_ranks_min_metric() -> None:
 
 
 def test_comparison_script_dry_run_writes_plan(tmp_path) -> None:
-    script = Path("scripts/run_comparison_experiments.py")
+    script = Path("scripts/experiments/run_comparison_experiments.py")
     completed = subprocess.run(
         [
             sys.executable,
@@ -139,3 +139,26 @@ def test_xvector_suite_exposes_lr_final_search_parameter() -> None:
     names = [item["name"] for item in selected[0].search_space["parameters"]]
 
     assert "lr_final" in names
+
+def test_comparison_plan_records_data_folder() -> None:
+    args = argparse.Namespace(
+        comparison_id="cmp_data",
+        suite="smoke",
+        repetitions=1,
+        config_path="configs/train_ecapa_tdnn.yaml",
+        data_folder="/tmp/voxceleb1",
+        objective="compare",
+        task_type="speaker_verification",
+        model_family="ecapa_tdnn",
+        implementation="speechbrain",
+        runner="speechbrain",
+        primary_metric="eer",
+        metric_mode="min",
+    )
+
+    plan = __import__(
+        "scripts.experiments.run_comparison_experiments",
+        fromlist=["build_plan", "variants_for_suite"],
+    ).build_plan(args, variants_for_suite("smoke"))
+
+    assert plan["data_folder"] == "/tmp/voxceleb1"

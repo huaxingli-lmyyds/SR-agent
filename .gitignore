@@ -6,6 +6,7 @@
 # -----------------------------------------------------------------------------
 *.md
 !/README.md
+!/demo/README.md
 !/CHANGELOG.md
 !/CONTRIBUTING.md
 !/LICENSE.md

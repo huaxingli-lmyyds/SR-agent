@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 import agent.models
@@ -36,8 +37,26 @@ def test_domain_and_infrastructure_modules_do_not_depend_on_agent_or_tool_layers
 def test_speechbrain_is_an_external_dependency() -> None:
     project_root = Path(__file__).parents[2]
     pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
+    metadata = tomllib.loads(pyproject)
+    dependencies = metadata["project"]["dependencies"]
+    optional = metadata["project"]["optional-dependencies"]
 
     assert not (project_root / "speechbrain").exists()
+    assert metadata["project"]["readme"] == "README.md"
+    assert metadata["project"]["requires-python"] == ">=3.10"
     assert 'name = "sr-agent"' in pyproject
-    assert '"speechbrain==1.0.3"' in pyproject
+    assert optional["speech"] == ["speechbrain==1.0.3"]
+    assert not any(item.startswith("speechbrain") for item in dependencies)
+    assert not any(item.startswith("torch") for item in dependencies)
+    assert not any(item.startswith("torchaudio") for item in dependencies)
     assert 'speechbrain/version.txt' not in pyproject
+
+
+def test_gpu_installation_guidance_stays_in_readme_not_requirements_files() -> None:
+    project_root = Path(__file__).parents[2]
+    readme = (project_root / "README.md").read_text(encoding="utf-8")
+
+    assert not (project_root / "requirements").exists()
+    assert "torch==2.5.1 torchaudio==2.5.1" in readme
+    assert "torch==2.9.1 torchaudio==2.9.1" in readme
+    assert "scripts/tools/check_remote_environment.py" in readme

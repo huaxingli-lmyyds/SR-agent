@@ -111,6 +111,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON search space object with parameters/constraints.",
     )
+    parser.add_argument(
+        "--data-folder",
+        type=str,
+        default=None,
+        help="Dataset path; absolute paths such as /tmp/voxceleb1 are supported.",
+    )
     parser.add_argument("--primary-metric", type=str, default="eer")
     parser.add_argument("--metric-mode", choices=["min", "max"], default="min")
     parser.add_argument("--verbose", action="store_true")
@@ -132,6 +138,9 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "primary_metric": args.primary_metric,
         "metric_mode": args.metric_mode,
     }
+    if args.data_folder is not None:
+        context["data_folder"] = args.data_folder
+        context["dataset_uri"] = args.data_folder
     if args.search_space_json is not None:
         if not isinstance(args.search_space_json, dict):
             raise SystemExit("--search-space-json must be a JSON object")

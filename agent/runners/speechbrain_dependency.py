@@ -15,14 +15,15 @@ def require_speechbrain() -> str:
         installed = version("speechbrain")
     except PackageNotFoundError as exc:
         raise RuntimeError(
-            "SpeechBrain is not installed. Install project dependencies with "
-            "'python -m pip install -e .'."
+            "SpeechBrain is not installed. First install a CUDA-matched "
+            "torch/torchaudio stack, then install SR-agent with "
+            "'python -m pip install -e .[speech]'."
         ) from exc
     if installed != SUPPORTED_SPEECHBRAIN_VERSION:
         raise RuntimeError(
             "Unsupported SpeechBrain version "
             f"{installed}; expected {SUPPORTED_SPEECHBRAIN_VERSION}. "
-            "Reinstall project dependencies to restore the tested version."
+            "Install the tested extra with 'python -m pip install -e .[speech]'."
         )
     return installed
 

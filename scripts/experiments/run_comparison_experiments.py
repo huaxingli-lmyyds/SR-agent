@@ -18,7 +18,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
-WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
@@ -258,10 +258,11 @@ def load_json_arg(value: str | None, *, expected_type: type, label: str) -> Any:
 
 
 def selected_variants(args: argparse.Namespace) -> list[ComparisonVariant]:
-    variants = variants_for_suite(args.suite, args.model_family)
+    model_family = getattr(args, "model_family", "ecapa_tdnn")
+    variants = variants_for_suite(args.suite, model_family)
     for variant in variants:
         if variant.name != "default_baseline":
-            variant.search_space = default_search_space(args.model_family)
+            variant.search_space = default_search_space(model_family)
     if args.only:
         wanted = {item.strip() for item in args.only.split(",") if item.strip()}
         variants = [item for item in variants if item.name in wanted]
@@ -294,6 +295,7 @@ def build_plan(args: argparse.Namespace, variants: list[ComparisonVariant]) -> d
         "suite": args.suite,
         "repetitions": args.repetitions,
         "config_path": args.config_path,
+        "data_folder": args.data_folder,
         "objective": args.objective,
         "task_type": args.task_type,
         "model_family": args.model_family,
@@ -334,6 +336,9 @@ def run_variant(args: argparse.Namespace, variant: ComparisonVariant, repetition
         enable_llm_advisor=variant.enable_llm_advisor,
     )
     context = variant.to_context(primary_metric=args.primary_metric, metric_mode=args.metric_mode)
+    if args.data_folder:
+        context["data_folder"] = args.data_folder
+        context["dataset_uri"] = args.data_folder
     context.update({
         "comparison_id": args.comparison_id,
         "comparison_suite": args.suite,
@@ -397,6 +402,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--dry-run", action="store_true")
     result.add_argument("--repetitions", type=int, default=1)
     result.add_argument("--config-path")
+    result.add_argument(
+        "--data-folder",
+        help="Dataset path, e.g. /tmp/voxceleb1 or /data/voxceleb1.",
+    )
     result.add_argument("--objective", default="Compare speaker-verification HPO strategies")
     result.add_argument("--task-type", default="speaker_verification")
     result.add_argument("--model-family", default="ecapa_tdnn")

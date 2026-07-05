@@ -144,7 +144,9 @@ class CoordinatorAgent(AdvisoryAgentBase):
     ) -> OrchestrationResult:
         self._run_started_at = datetime.now()
         config = ConfigParser(self.config_path).load_config(resolve_references=True)
-        data_folder = str(resolve_data_path(config.get("data_folder")))
+        run_context = context or {}
+        requested_dataset = run_context.get("dataset_uri") or run_context.get("data_folder")
+        data_folder = str(resolve_data_path(requested_dataset or config.get("data_folder")))
         output = resolve_config_value_path(config.get("output_folder"))
         task_adapter = get_task_adapter(self.task_type)
         self._manage_experiment_id = self.manage_tracker.create_orchestration_experiment(
@@ -165,8 +167,8 @@ class CoordinatorAgent(AdvisoryAgentBase):
         self._message_service = MessageService(self._manage_experiment_id)
         dispatcher = TaskDispatcher(self.registry, self._message_service)
         workflow_context = {
-            **(context or {}),
-            "target_goal": (context or {}).get("target_goal") or "validate and prepare the dataset",
+            **run_context,
+            "target_goal": run_context.get("target_goal") or "validate and prepare the dataset",
             "primary_metric": task_adapter.primary_metric,
             "metric_mode": task_adapter.metric_mode,
             "config_path": self.config_path,
