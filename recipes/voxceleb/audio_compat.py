@@ -47,6 +47,9 @@ except ImportError:
                 dtype="float32",
                 always_2d=True,
             )
+            if frames > 0 and data.shape[0] < frames:
+                padding = np.zeros((frames - data.shape[0], data.shape[1]), dtype="float32")
+                data = np.concatenate([data, padding], axis=0)
             # soundfile returns [frames, channels]; SpeechBrain recipes expect
             # the torchaudio-style [channels, frames] tensor.
             tensor = torch.from_numpy(np.ascontiguousarray(data.T))

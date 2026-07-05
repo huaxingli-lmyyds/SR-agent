@@ -142,13 +142,16 @@ def dataio_prep(hparams):
     @sb.utils.data_pipeline.provides("sig")
     def audio_pipeline(wav, start, stop, duration):
         if hparams["random_chunk"]:
-            duration_sample = int(duration * hparams["sample_rate"])
-            start = random.randint(0, duration_sample - snt_len_sample)
+            duration_sample = max(0, int(float(duration) * hparams["sample_rate"]))
+            if duration_sample > snt_len_sample:
+                start = random.randint(0, duration_sample - snt_len_sample)
+            else:
+                start = 0
             stop = start + snt_len_sample
         else:
-            start = int(start)
-            stop = int(stop)
-        num_frames = stop - start
+            start = max(0, int(start))
+            stop = max(start + 1, int(stop))
+        num_frames = max(1, stop - start)
         sig, fs = audio_io.load(wav, num_frames=num_frames, frame_offset=start)
         sig = sig.transpose(0, 1).squeeze(1)
         return sig

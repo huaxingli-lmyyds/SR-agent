@@ -38,3 +38,29 @@ def test_soundfile_fallback_loads_channel_first_tensor(tmp_path) -> None:
 
     assert sample_rate == 16000
     assert tuple(signal.shape) == (1, 20)
+
+
+def test_training_audio_pipeline_guards_short_random_chunks() -> None:
+    source = Path("recipes/voxceleb/train_speaker_embeddings.py").read_text(encoding="utf-8")
+
+    assert "duration_sample - snt_len_sample" in source
+    assert "if duration_sample > snt_len_sample" in source
+    assert "random.randint(0, duration_sample - snt_len_sample)" in source
+    assert "num_frames = max(1, stop - start)" in source
+
+
+def test_soundfile_fallback_pads_short_reads(tmp_path) -> None:
+    pytest.importorskip("soundfile")
+    import numpy as np
+    import soundfile as sf
+
+    from recipes.voxceleb.audio_compat import audio_io
+
+    wav_path = tmp_path / "short.wav"
+    sf.write(wav_path, np.ones(8, dtype="float32"), 16000)
+
+    signal, sample_rate = audio_io.load(str(wav_path), frame_offset=0, num_frames=20)
+
+    assert sample_rate == 16000
+    assert tuple(signal.shape) == (1, 20)
+    assert signal[0, 8:].abs().sum().item() == 0
