@@ -87,15 +87,16 @@ def test_voxceleb_recipes_use_project_batch_compat_layer() -> None:
     assert "valid_loader_kwargs=hparams[\"dataloader_options\"]" not in runner_source
 
 
-def test_audio_compat_uses_soundfile_instead_of_speechbrain_audio_io() -> None:
-    source = Path("recipes/voxceleb/audio_compat.py").read_text(encoding="utf-8")
+def test_audio_compat_uses_shared_soundfile_backend() -> None:
+    audio_source = Path("recipes/voxceleb/audio_compat.py").read_text(encoding="utf-8")
+    backend_source = Path("agent/runners/soundfile_audio.py").read_text(encoding="utf-8")
 
-    assert "def _audio_dependencies" in source
-    assert "import soundfile as sf" in source
-    assert "from speechbrain.dataio import audio_io" not in source
-    assert "import torchaudio" not in source
-    assert "sf.read(" in source
-    assert "soundfile as sf\nexcept" not in source
+    assert "from agent.runners.soundfile_audio import load_audio" in audio_source
+    assert "from speechbrain.dataio import audio_io" not in audio_source
+    assert "import torchaudio" not in audio_source
+    assert "def load_audio" in backend_source
+    assert "import soundfile as sf" in backend_source
+    assert "sf.read(" in backend_source
 
 
 def test_training_configs_store_augmentation_annotations_with_augmentation_data() -> None:

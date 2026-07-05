@@ -41,6 +41,13 @@ def patch_torchaudio_compatibility() -> list[str]:
 
         torchaudio.set_audio_backend = set_audio_backend  # type: ignore[attr-defined]
         patched.append("set_audio_backend")
+
+    current_load = getattr(torchaudio, "load", None)
+    if getattr(current_load, "__module__", "") != "agent.runners.soundfile_audio":
+        from agent.runners.soundfile_audio import load_audio
+
+        torchaudio.load = load_audio  # type: ignore[assignment]
+        patched.append("load")
     return patched
 
 

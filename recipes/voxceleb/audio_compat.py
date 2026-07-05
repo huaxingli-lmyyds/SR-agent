@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from agent.runners.soundfile_audio import load_audio
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
 
 patch_torchaudio_compatibility()
@@ -26,37 +27,30 @@ class _SoundFileAudioIO:
         frame_offset: int = 0,
         **_kwargs: Any,
     ):
-        np, sf, torch = _audio_dependencies()
         frames = -1 if num_frames is None else int(num_frames)
-        data, sample_rate = sf.read(
+        tensor, sample_rate = load_audio(
             path,
-            start=int(frame_offset),
-            frames=frames,
-            dtype="float32",
-            always_2d=True,
+            frame_offset=frame_offset,
+            num_frames=frames,
+            channels_first=True,
         )
-        if frames > 0 and data.shape[0] < frames:
-            padding = np.zeros((frames - data.shape[0], data.shape[1]), dtype="float32")
-            data = np.concatenate([data, padding], axis=0)
-        # soundfile returns [frames, channels]; SpeechBrain recipes expect the
-        # torchaudio-style [channels, frames] tensor.
-        tensor = torch.from_numpy(np.ascontiguousarray(data.T))
+        if frames > 0 and tensor.shape[-1] < frames:
+            torch = _torch_module()
+            pad_shape = (*tensor.shape[:-1], frames - tensor.shape[-1])
+            padding = torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)
+            tensor = torch.cat([tensor, padding], dim=-1)
         return tensor, sample_rate
 
 
-
-def _audio_dependencies():
+def _torch_module():
     try:
-        import numpy as np
-        import soundfile as sf
         import torch
     except ImportError as exc:
         raise ImportError(
-            "numpy, soundfile, and torch are required for the SR-agent "
-            "SpeechBrain audio loader. Install project dependencies with: "
-            "pip install -e .[speech]"
+            "torch is required for the SR-agent SpeechBrain audio loader. "
+            "Install project dependencies with: pip install -e .[speech]"
         ) from exc
-    return np, sf, torch
+    return torch
 
 
 audio_io = _SoundFileAudioIO()
