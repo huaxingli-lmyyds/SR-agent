@@ -23,7 +23,7 @@ import torch
 from hyperpyyaml import load_hyperpyyaml
 
 import speechbrain as sb
-from speechbrain.dataio import audio_io
+from recipes.voxceleb.audio_compat import audio_io
 from speechbrain.utils.data_utils import download_file
 from speechbrain.utils.distributed import run_on_main
 

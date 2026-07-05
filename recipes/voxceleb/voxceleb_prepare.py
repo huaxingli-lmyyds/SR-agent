@@ -15,7 +15,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from speechbrain.dataio import audio_io
+from recipes.voxceleb.audio_compat import audio_io
 from speechbrain.dataio.dataio import load_pkl, save_pkl
 from speechbrain.utils.logger import get_logger
 
