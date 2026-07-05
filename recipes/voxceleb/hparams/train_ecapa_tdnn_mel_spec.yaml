@@ -14,8 +14,8 @@ train_log: !ref <output_folder>/train_log.txt
 data_folder: !PLACEHOLDER  # e.g. /path/to/Voxceleb
 train_annotation: !ref <save_folder>/train.csv
 valid_annotation: !ref <save_folder>/dev.csv
-noise_annotation: !ref <save_folder>/noise.csv
-rir_annotation: !ref <save_folder>/rir.csv
+noise_annotation: !ref <data_folder_noise>/noise.csv
+rir_annotation: !ref <data_folder_rir>/rir.csv
 data_folder_noise: !ref <data_folder>/noise
 data_folder_rir: !ref <data_folder>/rir
 # Folder to extract data augmentation files
