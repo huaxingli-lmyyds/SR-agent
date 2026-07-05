@@ -9,16 +9,6 @@ from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
 
 patch_torchaudio_compatibility()
 
-try:
-    import numpy as np
-    import soundfile as sf
-    import torch
-except ImportError as exc:
-    raise ImportError(
-        "soundfile is required for the SR-agent SpeechBrain audio loader. "
-        "Install project dependencies with: pip install -e .[speech]"
-    ) from exc
-
 
 @dataclass(frozen=True)
 class _SoundFileAudioIO:
@@ -36,6 +26,7 @@ class _SoundFileAudioIO:
         frame_offset: int = 0,
         **_kwargs: Any,
     ):
+        np, sf, torch = _audio_dependencies()
         frames = -1 if num_frames is None else int(num_frames)
         data, sample_rate = sf.read(
             path,
@@ -51,6 +42,21 @@ class _SoundFileAudioIO:
         # torchaudio-style [channels, frames] tensor.
         tensor = torch.from_numpy(np.ascontiguousarray(data.T))
         return tensor, sample_rate
+
+
+
+def _audio_dependencies():
+    try:
+        import numpy as np
+        import soundfile as sf
+        import torch
+    except ImportError as exc:
+        raise ImportError(
+            "numpy, soundfile, and torch are required for the SR-agent "
+            "SpeechBrain audio loader. Install project dependencies with: "
+            "pip install -e .[speech]"
+        ) from exc
+    return np, sf, torch
 
 
 audio_io = _SoundFileAudioIO()

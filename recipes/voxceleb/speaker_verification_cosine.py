@@ -245,7 +245,7 @@ if __name__ == "__main__":
     )
     download_file(params["verification_file"], veri_file_path)
 
-    from voxceleb_prepare import prepare_voxceleb  # noqa E402
+    from recipes.voxceleb.voxceleb_prepare import prepare_voxceleb  # noqa E402
 
     # Create experiment directory
     sb.core.create_experiment_directory(

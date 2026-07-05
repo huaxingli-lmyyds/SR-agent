@@ -107,7 +107,7 @@ epoch_counter: !new:speechbrain.utils.epoch_loop.EpochCounter
 ############################## Augmentations ###################################
 
 # Download and prepare the dataset of noisy sequences for augmentation
-prepare_noise_data: !name:speechbrain.augment.preparation.prepare_dataset_from_URL
+prepare_noise_data: !name:recipes.voxceleb.augmentation_prepare.prepare_dataset_from_URL
     URL: !ref <NOISE_DATASET_URL>
     dest_folder: !ref <data_folder_noise>
     ext: wav
@@ -124,7 +124,7 @@ add_noise: !new:speechbrain.augment.time_domain.AddNoise
     num_workers: !ref <num_workers>
 
 # Download and prepare the dataset of room impulse responses for augmentation
-prepare_rir_data: !name:speechbrain.augment.preparation.prepare_dataset_from_URL
+prepare_rir_data: !name:recipes.voxceleb.augmentation_prepare.prepare_dataset_from_URL
     URL: !ref <RIR_DATASET_URL>
     dest_folder: !ref <data_folder_rir>
     ext: wav

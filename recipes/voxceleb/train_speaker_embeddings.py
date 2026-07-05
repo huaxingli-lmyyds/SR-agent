@@ -207,7 +207,7 @@ if __name__ == "__main__":
     download_file(hparams["verification_file"], veri_file_path)
 
     # Dataset prep (parsing VoxCeleb and annotation into csv files)
-    from voxceleb_prepare import prepare_voxceleb  # noqa
+    from recipes.voxceleb.voxceleb_prepare import prepare_voxceleb  # noqa
 
     run_on_main(
         prepare_voxceleb,
