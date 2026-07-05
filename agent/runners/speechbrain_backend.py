@@ -9,6 +9,7 @@ import json
 import re
 import os
 import shutil
+import traceback
 
 from agent.utils.path_tool import (
     get_prep_cache_dir,
@@ -22,26 +23,30 @@ from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility,
 
 patch_torchaudio_compatibility()
 
+def _format_exception(exc: Exception) -> str:
+    """Return an actionable exception summary with traceback context."""
+    return f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+
 try:
     from recipes.voxceleb import train_speaker_embeddings as _TRAIN_RECIPE_MODULE
     _TRAIN_RECIPE_ERROR = None
 except Exception as exc:
     _TRAIN_RECIPE_MODULE = None
-    _TRAIN_RECIPE_ERROR = f"{type(exc).__name__}: {exc}"
+    _TRAIN_RECIPE_ERROR = _format_exception(exc)
 
 try:
     from recipes.voxceleb import speaker_verification_cosine as _VERIFICATION_MODULE
     _VERIFICATION_ERROR = None
 except Exception as exc:
     _VERIFICATION_MODULE = None
-    _VERIFICATION_ERROR = f"{type(exc).__name__}: {exc}"
+    _VERIFICATION_ERROR = _format_exception(exc)
 
 try:
     from recipes.voxceleb import voxceleb_prepare as _PREPARE_MODULE
     _PREPARE_ERROR = None
 except Exception as exc:
     _PREPARE_MODULE = None
-    _PREPARE_ERROR = f"{type(exc).__name__}: {exc}"
+    _PREPARE_ERROR = _format_exception(exc)
 
 
 def _load_hyperpyyaml_config(
@@ -64,7 +69,7 @@ def _load_hyperpyyaml_config(
             params = load_hyperpyyaml(fin, normalized_overrides)
         return params, None
     except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, _format_exception(exc)
 
 
 def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
@@ -186,7 +191,7 @@ def run_data_prep(
     except Exception as exc:
         return {
             "status": "failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _format_exception(exc),
             "verification_local": None,
             "save_folder": str(save_folder),
         }
@@ -375,7 +380,7 @@ def run_evaluation(
     except Exception as exc:
         return {
             "status": "failed",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _format_exception(exc),
             "eer": None,
             "min_dcf": None,
             "output_folder": None,
@@ -545,7 +550,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         return {
             "status": "failed",
             "valid_error_rate": None,
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": _format_exception(exc),
         }
 
 

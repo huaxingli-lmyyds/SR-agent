@@ -27,6 +27,7 @@ patch_torchaudio_compatibility()
 import speechbrain as sb
 from recipes.voxceleb.audio_compat import audio_io
 from recipes.voxceleb.batch_compat import with_padded_batch
+from recipes.voxceleb.verification_compat import parse_verification_pair
 from speechbrain.utils.data_utils import download_file
 from speechbrain.utils.distributed import run_on_main
 from speechbrain.utils.logger import get_logger
@@ -103,10 +104,15 @@ def get_verification_scores(veri_test):
         train_cohort = torch.stack(list(train_dict.values()))
 
     for i, line in enumerate(veri_test):
-        # Reading verification file (enrol_file test_file label)
-        lab_pair = int(line.split(" ")[0].rstrip().split(".")[0].strip())
-        enrol_id = line.split(" ")[1].rstrip().split(".")[0].strip()
-        test_id = line.split(" ")[2].rstrip().split(".")[0].strip()
+        # Reading verification file (label enrol_file test_file)
+        pair = parse_verification_pair(line, source="verification_split", line_number=i + 1)
+        if pair is None:
+            continue
+        lab_pair, enrol_id, test_id = pair
+        if enrol_id not in enrol_dict:
+            raise KeyError(f"Missing enrol embedding for verification id: {enrol_id}")
+        if test_id not in test_dict:
+            raise KeyError(f"Missing test embedding for verification id: {test_id}")
         enrol = enrol_dict[enrol_id]
         test = test_dict[test_id]
 

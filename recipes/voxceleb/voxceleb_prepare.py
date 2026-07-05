@@ -20,6 +20,7 @@ from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
 patch_torchaudio_compatibility()
 
 from recipes.voxceleb.audio_compat import audio_io
+from recipes.voxceleb.verification_compat import parse_verification_pair
 from speechbrain.dataio.dataio import load_pkl, save_pkl
 from speechbrain.utils.logger import get_logger
 
@@ -271,10 +272,18 @@ def _get_utt_split_lists(
 
     print("Getting file list...")
     for data_folder in data_folders:
-        test_lst = [
-            line.rstrip("\n").split(" ")[1]
-            for line in open(verification_pairs_file, encoding="utf-8")
-        ]
+        test_lst = []
+        with open(verification_pairs_file, encoding="utf-8") as fin:
+            for line_number, line in enumerate(fin, start=1):
+                pair = parse_verification_pair(
+                    line,
+                    source=verification_pairs_file,
+                    line_number=line_number,
+                )
+                if pair is None:
+                    continue
+                _, enrol_id, _ = pair
+                test_lst.append(enrol_id)
         test_lst = set(sorted(test_lst))
 
         test_spks = [snt.split("/")[0] for snt in test_lst]
@@ -454,11 +463,18 @@ def prepare_csv_enrol_test(data_folders, save_folder, verification_pairs_file):
         enrol_ids, test_ids = [], []
 
         # Get unique ids (enrol and test utterances)
-        for line in open(test_lst_file, encoding="utf-8"):
-            e_id = line.split(" ")[1].rstrip().split(".")[0].strip()
-            t_id = line.split(" ")[2].rstrip().split(".")[0].strip()
-            enrol_ids.append(e_id)
-            test_ids.append(t_id)
+        with open(test_lst_file, encoding="utf-8") as fin:
+            for line_number, line in enumerate(fin, start=1):
+                pair = parse_verification_pair(
+                    line,
+                    source=test_lst_file,
+                    line_number=line_number,
+                )
+                if pair is None:
+                    continue
+                _, e_id, t_id = pair
+                enrol_ids.append(e_id)
+                test_ids.append(t_id)
 
         enrol_ids = list(np.unique(np.array(enrol_ids)))
         test_ids = list(np.unique(np.array(test_ids)))
