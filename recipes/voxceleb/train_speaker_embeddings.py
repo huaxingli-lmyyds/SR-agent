@@ -22,6 +22,10 @@ import sys
 import torch
 from hyperpyyaml import load_hyperpyyaml
 
+from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
+
+patch_torchaudio_compatibility()
+
 import speechbrain as sb
 from recipes.voxceleb.audio_compat import audio_io
 from speechbrain.utils.data_utils import download_file

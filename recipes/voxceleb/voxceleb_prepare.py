@@ -15,6 +15,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
+
+patch_torchaudio_compatibility()
+
 from recipes.voxceleb.audio_compat import audio_io
 from speechbrain.dataio.dataio import load_pkl, save_pkl
 from speechbrain.utils.logger import get_logger
