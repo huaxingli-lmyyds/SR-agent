@@ -171,3 +171,14 @@ def test_other_model_and_runner_resolve_through_public_adapter_boundary() -> Non
             RUNNER_ADAPTERS.pop("demo_runtime", None)
         else:
             RUNNER_ADAPTERS["demo_runtime"] = previous_runner
+
+def test_speaker_model_adapters_are_registered() -> None:
+    from agent.models import get_model_adapter
+
+    resnet = get_model_adapter("resnet")
+    xvector = get_model_adapter("xvector")
+
+    assert resnet.default_evaluation_config.endswith("verification_resnet.yaml")
+    assert xvector.default_evaluation_config.endswith("verification_plda_xvector.yaml")
+    assert any(item["name"] == "lr" for item in resnet.default_search_space()["parameters"])
+    assert any(item["name"] == "lr_final" for item in xvector.default_search_space()["parameters"])

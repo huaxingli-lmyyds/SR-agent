@@ -1,86 +1,92 @@
-/datasets/
-**/.env
-agent/agents/test*.py
-agent/prep_cache/
-agent/logs/
-
-read/
-!read/
-tests/tmp/
-
-
-# Agent experiments
-agent/experiments/
-agent/experiments_hpo_version1/
-agent/results/
-agent/test*.py
-agent/experiment.zip
-agent/experiments_*/
-agent/experiment*.zip
-experiment_archives/
-datasets.zip
+# -----------------------------------------------------------------------------
+# Repository documentation policy
+# Keep only repository-level overview documents in version control by default.
+# Detailed notes, experiment writeups, and generated reports should stay local
+# unless explicitly force-added by maintainers.
+# -----------------------------------------------------------------------------
 *.md
-*_*.md
-!ECAPA_TDNN_RUNTIME_CHECKLIST.md
-!TESTING_GUIDE.md
-!MODEL_AGNOSTIC_EXPERIMENT_REFACTOR.md
-!DATA_PROCESSING_EXTENSION.md
-!AGENT_OPTIMIZATION_ROADMAP.md
-!COORDINATION_REFACTOR.md
-!SYSTEM_ARCHITECTURE.md
-!AAAI_SUBMISSION_READINESS_AUDIT.md
-!read/SYSTEM_INTERFACE_AUDIT_AND_AAAI_INNOVATION.md
-agent/log.zip
-result_of_stage_1/
+!/README.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
+!/LICENSE.md
+read/
+docs/build/
+docs/API/*.rst
+/site/
 
-# Test files and reports
-agent/tests/
+# -----------------------------------------------------------------------------
+# Local datasets, downloaded assets, and large archives
+# -----------------------------------------------------------------------------
+/datasets/
+datasets.zip
+*.zip
+!scripts/*.zip
+**/audio_cache/
+**/downloads/
 
-# Temporary config files
-configs/*_test.json
-configs/*_backup*
-
-# Log files
-**/*.log
-**/train_log.txt
-
-# Training outputs
+# -----------------------------------------------------------------------------
+# Experiment outputs, training artifacts, checkpoints, and caches
+# -----------------------------------------------------------------------------
+agent/experiments/
+agent/experiments_*/
+agent/experiments_hpo_version*/
+agent/results/
+agent/logs/
+agent/prep_cache/
+agent/memory/episodes.jsonl
+experiment_archives/
+result_of_stage_*/
 results/
 save/
+**/results/
+**/save/
+**/log/
+**/logs/
+**/train_log.txt
+**/*.log
+**/model_checkpoints/
+**/pretrained_model_checkpoints/
+**/pretrained_models/
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.safetensors
+scores.txt
 
-# Database
-*.db
-*.sqlite
-
-# Backup files
+# -----------------------------------------------------------------------------
+# Temporary files produced by tests, scripts, and local tooling
+# -----------------------------------------------------------------------------
+.tmp/
+tests/tmp/
+tests/download/
+agent/tests/
+agent/test*.py
+agent/agents/test*.py
+agent/experiment*.zip
+configs/*_test.json
+configs/*_backup*
 *.bak
 *.backup
+*.orig
+*.rej
 *~
 
-# Byte-compiled / optimized / DLL files
+# -----------------------------------------------------------------------------
+# Python bytecode, packaging, and build outputs
+# -----------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
-test*_*.py
-**/test.py
-
-# Keep project architecture tests under version control.
-!tests/**/*.py
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
 develop-eggs/
 dist/
-downloads/
 eggs/
 .eggs/
 lib/
 lib64/
-node_modules/
 parts/
 sdist/
 var/
@@ -91,133 +97,71 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
+# -----------------------------------------------------------------------------
+# Test, coverage, and static-analysis caches
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.coverage
+.coverage.*
 htmlcov/
 .tox/
 .nox/
-.coverage
-.coverage.*
-.cache
+.cache/
 nosetests.xml
 coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
-.pytest_cache/
 cover/
-tests/tmp/
-tests/download/
 
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/build/
-docs/API/*.rst
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
+# -----------------------------------------------------------------------------
+# Virtual environments and dependency folders
+# -----------------------------------------------------------------------------
 .env
-.venv
-env/
+.env.*
+!.env.example
+.venv/
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
+__pypackages__/
+node_modules/
 
-# PyCharm project settings
-.idea
+# -----------------------------------------------------------------------------
+# Databases and local application state
+# -----------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+.scrapy/
+celerybeat-schedule
+celerybeat.pid
 
-# Spyder project settings
+# -----------------------------------------------------------------------------
+# IDE, OS, notebook, and miscellaneous local files
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
 .spyderproject
 .spyproject
-
-# Rope project settings
 .ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Audio folders
-**/audio_cache/
-
-# Pretrained & models folders
-**/model_checkpoints/
-**/pretrained_model_checkpoints/
-**/pretrained_models/
-
-# Results folders
-**/results/
-
-# Log folders
-**/log/
-
-# Mac OS
+.ipynb_checkpoints/
+profile_default/
+ipython_config.py
 .DS_Store
+Thumbs.db
