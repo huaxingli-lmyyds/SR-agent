@@ -1,4 +1,5 @@
 from importlib.metadata import PackageNotFoundError
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,3 +34,31 @@ def test_speechbrain_dependency_rejects_unverified_version(monkeypatch) -> None:
 
     with pytest.raises(RuntimeError, match="expected 1.0.3"):
         speechbrain_dependency.require_speechbrain()
+
+
+def test_torchaudio_compatibility_patch_restores_removed_backend_api(monkeypatch) -> None:
+    fake_torchaudio = SimpleNamespace()
+    monkeypatch.setitem(__import__("sys").modules, "torchaudio", fake_torchaudio)
+
+    patched = speechbrain_dependency.patch_torchaudio_compatibility()
+
+    assert patched == ["list_audio_backends", "get_audio_backend", "set_audio_backend"]
+    assert fake_torchaudio.list_audio_backends() == ["ffmpeg", "soundfile"]
+    assert fake_torchaudio.get_audio_backend() == "soundfile"
+    assert fake_torchaudio.set_audio_backend("soundfile") is None
+
+
+def test_torchaudio_compatibility_patch_keeps_existing_backend_api(monkeypatch) -> None:
+    fake_torchaudio = SimpleNamespace(
+        list_audio_backends=lambda: ["existing"],
+        get_audio_backend=lambda: "existing",
+        set_audio_backend=lambda backend: backend,
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torchaudio", fake_torchaudio)
+
+    patched = speechbrain_dependency.patch_torchaudio_compatibility()
+
+    assert patched == []
+    assert fake_torchaudio.list_audio_backends() == ["existing"]
+    assert fake_torchaudio.get_audio_backend() == "existing"
+    assert fake_torchaudio.set_audio_backend("x") == "x"

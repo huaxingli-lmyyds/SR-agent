@@ -18,7 +18,9 @@ from agent.utils.path_tool import (
     resolve_data_path,
     resolve_project_path,
 )
-from agent.runners.speechbrain_dependency import require_speechbrain
+from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility, require_speechbrain
+
+patch_torchaudio_compatibility()
 
 try:
     from recipes.voxceleb import train_speaker_embeddings as _TRAIN_RECIPE_MODULE
