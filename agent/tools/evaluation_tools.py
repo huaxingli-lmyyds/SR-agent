@@ -24,16 +24,26 @@ from agent.utils import (
 
 
 def _checkpoint_path(record: dict, trial_id: Optional[str] = None) -> Optional[str]:
-    for artifact in record.get("artifacts") or []:
+    def matches(artifact: dict) -> bool:
         metadata = artifact.get("metadata") or {}
         path = str(artifact.get("path") or "")
-        matches_trial = (
+        return (
             trial_id is None
             or metadata.get("trial_id") == trial_id
             or f"/trials/{trial_id}/" in path.replace("\\", "/")
         )
-        if artifact.get("type") == "checkpoint" and matches_trial:
+
+    for artifact in record.get("artifacts") or []:
+        if artifact.get("type") == "checkpoint" and matches(artifact):
             return artifact.get("path")
+
+    optimization = (record.get("extensions") or {}).get("optimization") or {}
+    for trial in optimization.get("trial_summary") or []:
+        if trial_id is not None and trial.get("trial_id") != trial_id:
+            continue
+        for artifact in trial.get("artifacts") or []:
+            if artifact.get("type") == "checkpoint" and matches(artifact):
+                return artifact.get("path")
     return None
 
 
@@ -194,8 +204,22 @@ def _run_evaluation(
             trial_id,
             status="completed" if result.status == "success" else "failed",
             metrics=trial_metrics,
+            cost={"evaluation": {
+                "duration_seconds": (datetime.now() - started_at).total_seconds(),
+                "status": result.status,
+                "metrics": trial_metrics,
+            }},
             artifacts=[artifact.to_dict() for artifact in result.artifacts],
             stop_reason=result.error,
+        )
+        tracker.update_hpo_experiment(
+            experiment_id,
+            extensions={"optimization": {"latest_trial": {
+                "trial_id": trial_id,
+                "phase": "completed" if result.status == "success" else "evaluation_failed",
+                "status": result.status,
+                "updated_at": datetime.now().isoformat(),
+            }}},
         )
     return result.to_json()
 

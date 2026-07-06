@@ -134,11 +134,41 @@ def test_training_tool_applies_budget_and_synchronizes_trial(
 
     recorded = service.load_trial(experiment_id, trial.trial_id)
     assert payload["status"] == "success"
-    assert recorded.status == "completed"
+    assert recorded.status == "running"
     assert recorded.metrics["valid_error_rate"] == 0.08
+    assert recorded.cost["training"]["status"] == "success"
     assert captured["number_of_epochs"] == 2
     assert captured["_hpo_data_fraction"] == 0.25
     assert captured["_hpo_max_duration_seconds"] == 10
     assert captured["data_folder"] == str(processed_dataset)
     assert captured["_run_opts"] == {"device": "cuda:0", "precision": "fp32", "eval_precision": "fp32"}
     assert payload["task"]["dataset"] == str(processed_dataset)
+    record = tracker.get_experiment(experiment_id)
+    assert record["stage"] == "optimization"
+    assert record["execution"].get("trial_id") is None
+    assert record["parameters"] == {}
+    summary = (record["extensions"]["optimization"]["trial_summary"])[0]
+    assert summary["phase"] == "evaluation_pending"
+    assert summary["artifacts"][0]["metadata"]["trial_id"] == trial.trial_id
+
+def test_checkpoint_selection_reads_trial_summary_artifacts() -> None:
+    record = {
+        "extensions": {
+            "optimization": {
+                "trial_summary": [
+                    {
+                        "trial_id": "trial_a",
+                        "artifacts": [
+                            {
+                                "type": "checkpoint",
+                                "path": "trials/trial_a/output/a.ckpt",
+                                "metadata": {"trial_id": "trial_a"},
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    }
+
+    assert evaluation_tools._checkpoint_path(record, "trial_a").endswith("a.ckpt")

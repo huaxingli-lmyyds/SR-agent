@@ -112,7 +112,7 @@ def test_trial_result_does_not_finish_parent_experiment(tmp_path: Path, minimal_
     record = tracker.get_experiment(experiment_id)
     assert record["status"] == "created"
     assert record.get("error") is None
-    assert record["metrics"]["validation"]["loss"] == 0.1
+    assert record.get("metrics") == {}
 
 
 def test_other_model_and_runner_resolve_through_public_adapter_boundary() -> None:
@@ -182,3 +182,73 @@ def test_speaker_model_adapters_are_registered() -> None:
     assert xvector.default_evaluation_config.endswith("verification_plda_xvector.yaml")
     assert any(item["name"] == "lr" for item in resnet.default_search_space()["parameters"])
     assert any(item["name"] == "lr_final" for item in xvector.default_search_space()["parameters"])
+
+def test_manage_record_compacts_child_agent_results_like_hpo_top_level() -> None:
+    from types import SimpleNamespace
+
+    from agent.agents.orchestrator import CoordinatorAgent
+
+    coordinator = object.__new__(CoordinatorAgent)
+    record = SimpleNamespace(
+        agent_type="hpo_agent",
+        action="optimize_hyperparameters",
+        started_at="start",
+        completed_at="end",
+        request={"request_id": "request_1"},
+        result={
+            "status": "success",
+            "request_id": "request_1",
+            "summary": {
+                "strategy": "tpe",
+                "best_trial_id": "trial_1",
+                "best_parameters": {"lr": 0.001},
+                "campaign": {
+                    "campaign_id": "campaign_1",
+                    "status": "completed",
+                    "stop_reason": "target_reached",
+                    "study_summaries": [{"full": "record"}],
+                    "best_experiment_id": "hpo_1",
+                    "best_value": 0.03,
+                },
+                "studies": [{"experiment_id": "hpo_1", "study_id": "study_1"}],
+            },
+            "metrics": {"eer": 0.03, "min_dcf": 0.1},
+            "artifacts": [{"type": "checkpoint"}, {"type": "predictions"}],
+            "recommendations": [{"note": "future"}],
+            "experiment_ids": {"hpo": "hpo_1"},
+        },
+    )
+
+    compact = coordinator._compact_task_record(record)
+    summary = coordinator._orchestration_summary([compact])
+    message = coordinator._compact_message({
+        "message_type": "task.request",
+        "payload": {
+            "action": "optimize_hyperparameters",
+            "objective": "improve",
+            "context": {
+                "previous_results": {"data_processing_agent": {"large": "payload"}},
+                "search_space": {"parameters": [{"name": "lr"}]},
+            },
+            "request_id": "request_1",
+        },
+    })
+
+    assert compact["summary"]["campaign"] == {
+        "campaign_id": "campaign_1",
+        "status": "completed",
+        "stop_reason": "target_reached",
+        "study_count": 1,
+        "best_experiment_id": "hpo_1",
+        "best_value": 0.03,
+    }
+    assert compact["artifact_count"] == 2
+    assert "study_summaries" not in compact["summary"]["campaign"]
+    assert summary["metrics"]["best"] == {
+        "eer": 0.03,
+        "min_dcf": 0.1,
+        "trial_id": "trial_1",
+    }
+    assert summary["metrics"]["summary"]["agent_count"] == 1
+    assert message["payload"]["context"]["previous_result_agents"] == ["data_processing_agent"]
+    assert "previous_results" not in message["payload"]["context"]

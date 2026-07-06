@@ -33,10 +33,10 @@ test_data: !ref <save_folder>/test.csv
 split_ratio: [90, 10]
 skip_prep: False
 
-batch_size: 8
-score_norm: s-norm  # z-norm t-norm s-norm (uncomment to enable it)
-cohort_size: 20000 # amount of imposter utterances in normalization cohort
-n_train_snts: 400000 # used for normalization stats
+batch_size: 32
+score_norm: none  # set to z-norm, t-norm, or s-norm for full score normalization
+cohort_size: 20000 # used only when score_norm is enabled
+n_train_snts: 400000 # used only when score_norm is enabled
 
 # Feature parameters
 n_mels: 80
@@ -45,15 +45,19 @@ n_mels: 80
 # deltas: False
 
 # Dataloader options
+num_workers: 4
+
 train_dataloader_opts:
     batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
 
 enrol_dataloader_opts:
     batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
 
 test_dataloader_opts:
     batch_size: !ref <batch_size>
-
+    num_workers: !ref <num_workers>
 compute_features: !new:speechbrain.lobes.features.Fbank
     n_mels: !ref <n_mels>
 

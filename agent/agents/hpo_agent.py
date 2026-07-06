@@ -208,15 +208,25 @@ class HPOAgent(LangGraphAgent):
             )
             campaign.study_summaries[-1]["best_parameters"] = current_best.parameters
             campaign.study_summaries[-1]["strategy_reviews"] = scheduled.study.strategy_reviews
-            study_results.append({"experiment_id": experiment_id, "study": scheduled.study.to_dict(), "trials": [item.to_dict() for item in scheduled.trials]})
+            study_results.append({"experiment_id": experiment_id, "study_id": scheduled.study.study_id, "status": scheduled.study.status, "trial_count": len(scheduled.trials), "best_trial_id": scheduled.study.best_trial_id})
             if best_trial is None or (
                 current_value < float(best_trial.metrics[objectives[0].metric])
                 if objectives[0].mode == "min" else current_value > float(best_trial.metrics[objectives[0].metric])
             ):
                 best_trial, best_experiment_id = current_best, experiment_id
             tracker.update_hpo_experiment(
-                experiment_id, status="success", parameters=current_best.parameters, metrics={"best": current_best.metrics},
-                extensions={"optimization": {"campaign": campaign.to_dict(), "study": scheduled.study.to_dict(), "trials": [item.to_dict() for item in scheduled.trials]}},
+                experiment_id,
+                status="success",
+                metrics={"best": {"trial_id": current_best.trial_id, **current_best.metrics}},
+                extensions={"optimization": {
+                    "campaign": campaign.to_dict(),
+                    "latest_trial": {
+                        "trial_id": current_best.trial_id,
+                        "phase": "completed",
+                        "status": current_best.status,
+                        "updated_at": current_best.updated_at,
+                    },
+                }},
             )
             if not campaign_policy.should_continue(campaign):
                 break
@@ -231,6 +241,7 @@ class HPOAgent(LangGraphAgent):
         for item in study_results:
             tracker.update_hpo_experiment(
                 item["experiment_id"],
+                duration=duration,
                 extensions={"optimization": {"campaign": campaign.to_dict()}},
             )
         self.memory_service.remember_episode(EpisodeMemory(

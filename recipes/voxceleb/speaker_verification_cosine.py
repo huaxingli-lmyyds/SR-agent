@@ -87,6 +87,22 @@ def compute_embedding_loop(data_loader):
     return embedding_dict
 
 
+
+
+def score_norm_mode():
+    """Return the enabled score-normalization mode, or None for fast scoring."""
+    value = params.get("score_norm")
+    if value is None or value is False:
+        return None
+    value = str(value).strip().lower()
+    if value in {"", "none", "false", "off", "disabled", "no"}:
+        return None
+    if value not in {"z-norm", "t-norm", "s-norm"}:
+        raise ValueError(
+            "score_norm must be one of: z-norm, t-norm, s-norm, none/off"
+        )
+    return value
+
 def get_verification_scores(veri_test):
     """Computes positive and negative scores given the verification split."""
     scores = []
@@ -98,9 +114,10 @@ def get_verification_scores(veri_test):
 
     # Cosine similarity initialization
     similarity = torch.nn.CosineSimilarity(dim=-1, eps=1e-6)
+    norm_mode = score_norm_mode()
 
     # creating cohort for score normalization
-    if "score_norm" in params:
+    if norm_mode:
         train_cohort = torch.stack(list(train_dict.values()))
 
     for i, line in enumerate(veri_test):
@@ -116,7 +133,7 @@ def get_verification_scores(veri_test):
         enrol = enrol_dict[enrol_id]
         test = test_dict[test_id]
 
-        if "score_norm" in params:
+        if norm_mode:
             # Getting norm stats for enrol impostors
             enrol_rep = enrol.repeat(train_cohort.shape[0], 1, 1)
             score_e_c = similarity(enrol_rep, train_cohort)
@@ -145,12 +162,12 @@ def get_verification_scores(veri_test):
         score = similarity(enrol, test)[0]
 
         # Perform score normalization
-        if "score_norm" in params:
-            if params["score_norm"] == "z-norm":
+        if norm_mode:
+            if norm_mode == "z-norm":
                 score = (score - mean_e_c) / std_e_c
-            elif params["score_norm"] == "t-norm":
+            elif norm_mode == "t-norm":
                 score = (score - mean_t_c) / std_t_c
-            elif params["score_norm"] == "s-norm":
+            elif norm_mode == "s-norm":
                 score_e = (score - mean_e_c) / std_e_c
                 score_t = (score - mean_t_c) / std_t_c
                 score = 0.5 * (score_e + score_t)
@@ -166,7 +183,6 @@ def get_verification_scores(veri_test):
 
     s_file.close()
     return positive_scores, negative_scores
-
 
 def dataio_prep(params):
     "Creates the dataloaders and their data processing pipelines."
@@ -285,7 +301,7 @@ if __name__ == "__main__":
     enrol_dict = compute_embedding_loop(enrol_dataloader)
     test_dict = compute_embedding_loop(test_dataloader)
 
-    if "score_norm" in params:
+    if score_norm_mode():
         train_dict = compute_embedding_loop(train_dataloader)
 
     # Compute the EER

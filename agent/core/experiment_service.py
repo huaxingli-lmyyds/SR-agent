@@ -22,13 +22,32 @@ class ExperimentService:
         actor: Optional[Dict[str, Any]] = None,
         update_status: bool = True,
     ) -> bool:
+        """Record an operation result without letting trial steps pollute HPO top level.
+
+        HPO experiments contain many trial-level training/evaluation operations. When
+        update_status is False, those operation details are returned to the caller and
+        stored on the Trial object, while the top-level HPO record keeps only study-level
+        summaries written by HPOService/HPOAgent.
+        """
         result.experiment_id = experiment_id
+        if not update_status:
+            stable_updates: Dict[str, Any] = {}
+            if result.task:
+                stable_updates["task"] = result.task
+            if result.model:
+                stable_updates["model"] = result.model
+            return self.tracker.update_experiment(
+                experiment_id,
+                experiment_type=experiment_type,
+                **stable_updates,
+            )
+
         return self.tracker.update_experiment(
             experiment_id,
             experiment_type=experiment_type,
-            status=result.status if update_status else None,
-            error=result.error if update_status else None,
-            duration=duration_seconds if update_status else None,
+            status=result.status,
+            error=result.error,
+            duration=duration_seconds,
             stage=result.stage,
             actor=actor,
             task=result.task,

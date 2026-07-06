@@ -380,7 +380,7 @@ def run_evaluation(
         verification_module.test_dict = verification_module.compute_embedding_loop(
             test_dataloader
         )
-        if "score_norm" in params:
+        if verification_module.score_norm_mode():
             verification_module.train_dict = verification_module.compute_embedding_loop(
                 train_dataloader
             )

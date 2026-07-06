@@ -164,3 +164,31 @@ def test_project_augmentation_prepare_delays_soundfile_import() -> None:
     assert "def _soundfile_module" in source
     assert "import soundfile as sf" in source
     assert "soundfile as sf\nexcept" not in source
+
+def test_ecapa_verification_config_disables_score_norm_by_default() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "configs/verification_ecapa.yaml",
+        "recipes/voxceleb/hparams/verification_ecapa.yaml",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "score_norm: none" in source
+        assert "score_norm: s-norm" not in source
+        assert "batch_size: 32" in source
+        assert "num_workers: 4" in source
+
+
+def test_hpo_evaluation_uses_explicit_score_norm_mode() -> None:
+    project_root = Path(__file__).parents[2]
+    recipe_source = (project_root / "recipes/voxceleb/speaker_verification_cosine.py").read_text(
+        encoding="utf-8"
+    )
+    runner_source = (project_root / "agent/runners/speechbrain_backend.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "def score_norm_mode" in recipe_source
+    assert "if score_norm_mode():" in recipe_source
+    assert "if verification_module.score_norm_mode():" in runner_source
+    assert 'if "score_norm" in params:' not in recipe_source
+    assert 'if "score_norm" in params:' not in runner_source

@@ -473,23 +473,49 @@ class HPOService:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(study.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         trials = self.list_trials(study.experiment_id)
+        objective = study.objectives[0] if study.objectives else None
+        best_trial = (
+            self.load_trial(study.experiment_id, study.best_trial_id)
+            if study.best_trial_id else None
+        )
+        best_metric = (
+            best_trial.metrics.get(objective.metric)
+            if best_trial is not None and objective is not None else None
+        )
         self.tracker.update_hpo_experiment(
             study.experiment_id,
             extensions={"optimization": {
-                "study": study.to_dict(),
+                "study": {
+                    "study_id": study.study_id,
+                    "experiment_id": study.experiment_id,
+                    "status": study.status,
+                    "strategy": study.strategy,
+                    "candidate_strategy": study.candidate_strategy,
+                    "best_trial_id": study.best_trial_id,
+                    "best_metric": best_metric,
+                    "objective": objective.to_dict() if objective else None,
+                    "trial_ids": list(study.trial_ids),
+                    "max_training_runs": study.max_training_runs,
+                    "updated_at": study.updated_at,
+                    "study_artifact": str(path),
+                },
                 "trial_summary": [
                     {
                         "trial_id": trial.trial_id,
                         "status": trial.status,
+                        "phase": _trial_phase(trial),
                         "rung": trial.rung,
                         "parameters": trial.parameters,
                         "budget": trial.budget.to_dict(),
                         "metrics": trial.metrics,
+                        "artifacts": trial.artifacts,
                         "stop_reason": trial.stop_reason,
+                        "updated_at": trial.updated_at,
                     }
                     for trial in trials
                 ],
             }},
+            metrics={"best": {"trial_id": study.best_trial_id, objective.metric: best_metric} if objective and best_metric is not None else {}},
             artifacts=[{
                 "type": "hpo_study",
                 "name": study.study_id,
@@ -506,6 +532,19 @@ class HPOService:
         return get_experiment_artifact_dir(experiment_id, "hpo_study", "hpo", create=True) / "trials"
 
 
+
+def _trial_phase(trial: Trial) -> str:
+    if trial.status in {"failed", "stopped"}:
+        return trial.status
+    if trial.status in {"completed", "promoted"}:
+        return "completed"
+    if (trial.cost or {}).get("training") and not any(
+        artifact.get("type") == "predictions" for artifact in trial.artifacts
+    ):
+        return "evaluation_pending"
+    if trial.status == "running":
+        return "training"
+    return trial.status
 def search_space_from_dict(data: Dict[str, Any]) -> SearchSpace:
     return SearchSpace(
         parameters=[SearchParameter(**item) for item in data.get("parameters") or []],

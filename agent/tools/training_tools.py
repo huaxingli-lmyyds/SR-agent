@@ -242,11 +242,11 @@ def TrainModel(config_path: Optional[str] = None,
             tracker.update_hpo_experiment(
                 experiment_id,
                 extensions={"optimization": {
-                    "latest_trial_execution": {
+                    "latest_trial": {
                         "trial_id": trial_id,
-                        "parameters": trial_parameters,
-                        "budget": trial_budget,
-                        "metrics": training_metrics,
+                        "phase": "training",
+                        "status": "training_completed",
+                        "updated_at": datetime.now().isoformat(),
                     }
                 }},
             )
@@ -258,11 +258,15 @@ def TrainModel(config_path: Optional[str] = None,
             HPOService(tracker).record_trial(
                 study,
                 trial_id,
-                status="completed" if status == "success" else "failed",
+                status="running" if status == "success" else "failed",
                 metrics=trial_metrics,
                 intermediate_metrics=epoch_data,
                 cost={
-                    "duration_seconds": duration,
+                    "training": {
+                        "duration_seconds": duration,
+                        "status": status,
+                        "metrics": training_metrics,
+                    },
                     "failure_category": failure.category if failure else None,
                     "recoverable": failure.recoverable if failure else None,
                 },

@@ -1,0 +1,35 @@
+{
+  "config_path": "configs/train_ecapa_tdnn.yaml",
+  "runner": "speechbrain",
+  "implementation": "speechbrain",
+  "model_family": "ecapa_tdnn",
+  "task_type": "speaker_verification",
+  "strategy": "tpe",
+  "primary_metric": "eer",
+  "metric_mode": "min",
+  "epochs": 1,
+  "data_fraction": 0.05,
+  "max_training_runs": 2,
+  "max_studies": 1,
+  "device": "auto",
+  "precision": "fp32",
+  "eval_precision": "fp32",
+  "search_space": {
+    "parameters": {
+      "lr": {
+        "type": "float",
+        "low": 0.0001,
+        "high": 0.002,
+        "log": true
+      },
+      "batch_size": {
+        "type": "categorical",
+        "choices": [16, 32]
+      },
+      "sentence_len": {
+        "type": "categorical",
+        "choices": [2.0, 3.0]
+      }
+    }
+  }
+}
