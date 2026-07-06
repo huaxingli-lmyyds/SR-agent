@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Optional
+
 
 def _load_env() -> None:
     import dotenv
 
-    dotenv.load_dotenv(dotenv_path=dotenv.find_dotenv())
+    env_path = dotenv.find_dotenv(usecwd=True)
+    if not env_path:
+        candidate = Path.cwd() / ".env"
+        env_path = str(candidate) if candidate.exists() else ""
+    dotenv.load_dotenv(dotenv_path=env_path or None)
+
     api_key = os.getenv("ZHIPUAI_API_KEY")
-    api_base = os.getenv("ZHIPUAI_API_BASE_URL") or os.getenv("ZHIU_API_BASE_URL")
+    api_base = os.getenv("ZHIPUAI_API_BASE_URL")
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
     if api_base:
         os.environ["OPENAI_API_BASE"] = api_base
+        os.environ["OPENAI_BASE_URL"] = api_base
 
 
 class AdvisoryAgentBase:
@@ -38,9 +46,13 @@ class AdvisoryAgentBase:
             from langchain_openai import ChatOpenAI
 
             _load_env()
+            api_base = os.getenv("ZHIPUAI_API_BASE_URL")
             self._llm = ChatOpenAI(
                 model=self.model_name,
                 temperature=self.temperature,
+                base_url=api_base,
+                timeout=30,
+                max_retries=1,
             )
         return self._llm
 
