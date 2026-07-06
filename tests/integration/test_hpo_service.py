@@ -202,3 +202,37 @@ def test_training_runs_used_includes_retries(
 
     assert service.training_runs_used(study) == 2
     assert service.remaining_training_runs(study) == 1
+
+
+def test_record_trial_deduplicates_artifacts(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([SearchParameter("lr", "categorical", choices=[0.1])]),
+        [Objective("eer", "min")],
+        [TrialBudget("full", epochs=1)],
+        max_training_runs=1,
+    )
+    trial = service.suggest_trials(study, 1)[0]
+    artifact = {"type": "predictions", "name": "scores", "path": "scores.txt"}
+
+    service.record_trial(study, trial.trial_id, status="running", artifacts=[artifact])
+    service.record_trial(study, trial.trial_id, status="completed", metrics={"eer": 0.03}, artifacts=[artifact])
+
+    saved = service.load_trial(experiment_id, trial.trial_id)
+    assert saved.artifacts == [artifact]

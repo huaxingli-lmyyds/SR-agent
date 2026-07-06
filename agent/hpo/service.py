@@ -271,7 +271,7 @@ class HPOService:
         trial.metrics.update(metrics or {})
         trial.intermediate_metrics = intermediate_metrics or trial.intermediate_metrics
         trial.cost.update(cost or {})
-        trial.artifacts.extend(artifacts or [])
+        trial.artifacts = _merge_trial_artifacts(trial.artifacts, artifacts or [])
         trial.stop_reason = stop_reason
         trial.updated_at = datetime.now().isoformat()
         self.save_trial(study.experiment_id, trial)
@@ -515,7 +515,16 @@ class HPOService:
                     for trial in trials
                 ],
             }},
-            metrics={"best": {"trial_id": study.best_trial_id, objective.metric: best_metric} if objective and best_metric is not None else {}},
+            metrics={
+                "best": {
+                    "trial_id": study.best_trial_id,
+                    "primary_metric": objective.metric,
+                    "primary_value": best_metric,
+                    "primary_mode": objective.mode,
+                    objective.metric: best_metric,
+                }
+                if objective and best_metric is not None else {}
+            },
             artifacts=[{
                 "type": "hpo_study",
                 "name": study.study_id,
@@ -545,6 +554,28 @@ def _trial_phase(trial: Trial) -> str:
     if trial.status == "running":
         return "training"
     return trial.status
+
+
+def _merge_trial_artifacts(
+    existing: List[Dict[str, Any]],
+    updates: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Append Trial artifacts while preserving first-seen order and uniqueness."""
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for artifact in [*existing, *updates]:
+        key = (
+            artifact.get("type"),
+            artifact.get("name"),
+            artifact.get("path"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(artifact)
+    return merged
+
+
 def search_space_from_dict(data: Dict[str, Any]) -> SearchSpace:
     return SearchSpace(
         parameters=[SearchParameter(**item) for item in data.get("parameters") or []],

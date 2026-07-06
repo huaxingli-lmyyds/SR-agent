@@ -562,10 +562,14 @@ class ExperimentTracker:
 
     @staticmethod
     def _metric_value(record: Dict[str, Any], metric: str) -> Optional[Any]:
-        for split in ("test", "validation", "train", "summary"):
-            value = (record.get("metrics") or {}).get(split, {}).get(metric)
+        for split in ("best", "test", "validation", "train", "summary"):
+            values = (record.get("metrics") or {}).get(split, {})
+            value = values.get(metric) if isinstance(values, dict) else None
             if value is not None:
                 return value
+            if split == "best" and isinstance(values, dict):
+                if values.get("primary_metric") == metric and values.get("primary_value") is not None:
+                    return values["primary_value"]
         return None
 
     @staticmethod

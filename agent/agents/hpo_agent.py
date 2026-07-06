@@ -217,7 +217,8 @@ class HPOAgent(LangGraphAgent):
             tracker.update_hpo_experiment(
                 experiment_id,
                 status="success",
-                metrics={"best": {"trial_id": current_best.trial_id, **current_best.metrics}},
+                parameters=current_best.parameters,
+                metrics={"best": self._best_metric_record(current_best, objectives[0])},
                 extensions={"optimization": {
                     "campaign": campaign.to_dict(),
                     "latest_trial": {
@@ -264,12 +265,64 @@ class HPOAgent(LangGraphAgent):
                 "studies": study_results,
                 "data_handoff": data_handoff,
             },
-            metrics=best_trial.metrics,
+            metrics=self._best_metric_record(best_trial, objectives[0]),
             recommendations=[],
             artifacts=best_trial.artifacts,
             experiment_ids={"hpo": best_experiment_id, "campaign": [item["experiment_id"] for item in study_results]},
             request_id=request.request_id,
         )
+
+    @staticmethod
+    def _best_metric_record(trial: Any, objective: Objective) -> Dict[str, Any]:
+        metrics = dict(trial.metrics or {})
+        training, evaluation = HPOAgent._split_trial_metrics(metrics, objective.metric)
+        primary_value = metrics.get(objective.metric)
+        return {
+            "trial_id": trial.trial_id,
+            "primary_metric": objective.metric,
+            "primary_mode": objective.mode,
+            "primary_value": primary_value,
+            **metrics,
+            "training": training,
+            "evaluation": evaluation,
+        }
+
+    @staticmethod
+    def _split_trial_metrics(
+        metrics: Dict[str, Any],
+        primary_metric: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        training: Dict[str, Any] = {}
+        evaluation: Dict[str, Any] = {}
+        training_names = {
+            "valid_error_rate",
+            "final_epoch",
+            "final_lr",
+            "final_train_loss",
+            "final_valid_loss",
+            "final_valid_error_rate",
+            "total_epochs",
+            "best_epoch",
+            "best_valid_loss",
+            "best_error_rate",
+        }
+        evaluation_names = {
+            primary_metric,
+            "eer",
+            "min_dcf",
+            "accuracy",
+            "precision",
+            "recall",
+            "f1",
+            "auc",
+        }
+        for key, value in metrics.items():
+            normalized = key.lower()
+            if key in training_names or normalized.startswith(("train_", "valid_", "final_", "best_")):
+                training[key] = value
+            elif key in evaluation_names:
+                evaluation[key] = value
+        return training, evaluation
 
     def _trial_executor(self, experiment_id: str, data_folder: str, runtime_options: Any = None):
         runtime_options = dict(runtime_options or {}) if isinstance(runtime_options, dict) else {}

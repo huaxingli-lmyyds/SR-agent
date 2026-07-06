@@ -162,3 +162,28 @@ def test_agent_rejects_epoch_search_when_budget_controls_epochs() -> None:
             space,
             [TrialBudget("full", epochs=5)],
         )
+
+
+def test_hpo_best_metric_record_separates_training_and_evaluation_metrics() -> None:
+    from types import SimpleNamespace
+
+    from agent.agents.hpo_agent import HPOAgent
+    from agent.hpo import Objective
+
+    trial = SimpleNamespace(
+        trial_id="trial_1",
+        metrics={
+            "eer": 0.03,
+            "min_dcf": 0.1,
+            "valid_error_rate": 0.2,
+            "final_train_loss": 1.5,
+        },
+    )
+
+    record = HPOAgent._best_metric_record(trial, Objective("eer", "min"))
+
+    assert record["primary_metric"] == "eer"
+    assert record["primary_value"] == 0.03
+    assert record["eer"] == 0.03
+    assert record["training"] == {"valid_error_rate": 0.2, "final_train_loss": 1.5}
+    assert record["evaluation"] == {"eer": 0.03, "min_dcf": 0.1}
