@@ -128,6 +128,20 @@ def test_training_configs_use_project_augmentation_prepare() -> None:
         assert "speechbrain.augment.preparation.prepare_dataset_from_URL" not in source
 
 
+def test_additive_margin_training_configs_are_hpo_overridable() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "configs/train_ecapa_tdnn.yaml",
+        "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
+        "recipes/voxceleb/hparams/train_resnet.yaml",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "margin: 0.2" in source
+        assert "margin: !ref <margin>" in source
+        assert "weight_decay: 0.000002" in source
+        assert "weight_decay: !ref <weight_decay>" in source
+
+
 def test_project_augmentation_prepare_writes_speechbrain_csv(tmp_path) -> None:
     pytest.importorskip("soundfile")
     import numpy as np

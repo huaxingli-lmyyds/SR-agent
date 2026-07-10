@@ -256,11 +256,23 @@ class CoordinatorAgent(AdvisoryAgentBase):
         )
 
     def _coordination_advisor(self, agents: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
-        response = self.llm.invoke(
-            "Return only JSON diagnostic advice for this multi-agent run. "
-            "Do not choose agent order or execute tasks. "
-            f"Agents={json.dumps(agents, ensure_ascii=False)} Context={json.dumps(context, ensure_ascii=False)}"
-        )
+        compact_context = self._compact_request_context(context)
+        prompt = json.dumps({
+            "schema": {
+                "diagnostics": [],
+                "risks": [],
+                "notes": [],
+            },
+            "rules": [
+                "Return raw JSON only.",
+                "Do not use markdown, code fences, comments, or explanatory text.",
+                "Do not choose agent order, assign tasks, or execute tools.",
+                "Only provide diagnostics about the current multi-agent run.",
+            ],
+            "agents": agents,
+            "context": compact_context,
+        }, ensure_ascii=False, separators=(",", ":"))
+        response = self.llm.invoke(prompt)
         try:
             value = json.loads(self._extract_message_content(response))
             return value if isinstance(value, dict) else {}

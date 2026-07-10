@@ -393,23 +393,21 @@ class HPOAgent(LangGraphAgent):
             dataset_key=self.memory_scope.dataset_key,
             limit=5,
         ))
-        prompt = (
-            "Return one JSON object matching this StrategyProposal schema exactly: "
-            '{"action":"keep_strategy|refine_search_space|expand_search_space|switch_strategy|adjust_budget",'
-            '"requested_strategy":"auto|random_search|grid_search|adaptive_search|tpe|successive_halving|null",'
-            '"search_space":{"parameters":[],"constraints":[]} or null,'
-            '"budgets":[{"stage":"name","epochs":1,"data_fraction":1.0,"max_duration_seconds":null}] or null,'
-            '"max_training_runs":integer or null,"reason_codes":[],"evidence":{},'
-            '"expected_effect":{},"confidence":0.0}. '
-            "Submit a proposal only; do not execute tools. The service rejects invalid fields and "
-            "max_training_runs cannot exceed the hard limit. "
-            f"Selected strategy={selected_strategy}; request={json.dumps(request.to_dict(), ensure_ascii=False)}; "
-            f"search_space={json.dumps(search_space.to_dict(), ensure_ascii=False)}; "
-            f"budgets={json.dumps([item.to_dict() for item in budgets], ensure_ascii=False)}; "
-            f"hard_max_training_runs={hard_max_training_runs}; "
-            f"campaign={json.dumps(campaign or {}, ensure_ascii=False)}; "
-            f"historical_memory={memory_context}"
-        )
+        prompt = self._strategy_proposal_prompt({
+            "phase": "study_planning",
+            "objective": request.objective,
+            "task_type": self.task_type,
+            "model_family": self.model_family,
+            "selected_strategy": selected_strategy,
+            "requested_strategy": request.context.get("strategy", "auto"),
+            "primary_metric": request.context.get("primary_metric", "eer"),
+            "metric_mode": request.context.get("metric_mode", "min"),
+            "hard_max_training_runs": hard_max_training_runs,
+            "search_space": search_space.to_dict(),
+            "budgets": [item.to_dict() for item in budgets],
+            "campaign": self._compact_campaign(campaign or {}),
+            "historical_memory": memory_context,
+        })
         try:
             value = json.loads(self._extract_message_content(self.llm.invoke(prompt)))
             return StrategyProposal.from_dict(value)
@@ -432,16 +430,16 @@ class HPOAgent(LangGraphAgent):
                 dataset_key=self.memory_scope.dataset_key,
                 limit=5,
             ))
-            prompt = (
-                "Return one valid StrategyProposal JSON object for subsequent candidate generation only. "
-                "Use completed metrics, failure clusters, boundary hits, prior reviews, campaign progress, "
-                "and historical memory. Do not request tools or mutate Trial state. "
-                f"request={json.dumps(request.to_dict(), ensure_ascii=False)}; "
-                f"study={json.dumps(study.to_dict(), ensure_ascii=False)}; "
-                f"feedback={json.dumps(feedback, ensure_ascii=False)}; "
-                f"campaign={json.dumps(campaign.to_dict(), ensure_ascii=False)}; "
-                f"historical_memory={memory_context}"
-            )
+            prompt = self._strategy_proposal_prompt({
+                "phase": "runtime_review",
+                "objective": request.objective,
+                "task_type": self.task_type,
+                "model_family": self.model_family,
+                "study": self._compact_study(study),
+                "feedback": feedback,
+                "campaign": self._compact_campaign(campaign.to_dict()),
+                "historical_memory": memory_context,
+            })
             try:
                 return StrategyProposal.from_dict(json.loads(self._extract_message_content(self.llm.invoke(prompt))))
             except Exception as exc:
@@ -451,6 +449,69 @@ class HPOAgent(LangGraphAgent):
                     evidence={"error": f"{type(exc).__name__}: {exc}"},
                 )
         return review
+
+    @staticmethod
+    def _strategy_proposal_prompt(context: Dict[str, Any]) -> str:
+        schema = {
+            "action": "keep_strategy",
+            "requested_strategy": None,
+            "search_space": None,
+            "budgets": None,
+            "max_training_runs": None,
+            "reason_codes": [],
+            "evidence": {},
+            "expected_effect": {},
+            "confidence": 0.0,
+        }
+        rules = [
+            "Return raw JSON only.",
+            "Do not use markdown, code fences, comments, or explanatory text.",
+            "Use exactly the schema keys shown in schema.",
+            "Allowed action values: keep_strategy, refine_search_space, expand_search_space, switch_strategy, adjust_budget.",
+            "If no change is useful, return action=keep_strategy and leave requested_strategy, search_space, budgets, max_training_runs as null.",
+            "Do not invent parameter names unless action=expand_search_space.",
+            "Do not exceed hard_max_training_runs when that field is present in context.",
+            "This is advisory only; deterministic validation may reject invalid fields.",
+        ]
+        payload = {"schema": schema, "rules": rules, "context": context}
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _compact_campaign(campaign: Dict[str, Any]) -> Dict[str, Any]:
+        objective = campaign.get("objective") or {}
+        summaries = list(campaign.get("study_summaries") or [])
+        return {
+            "campaign_id": campaign.get("campaign_id"),
+            "status": campaign.get("status"),
+            "stop_reason": campaign.get("stop_reason"),
+            "objective": {
+                "metric": objective.get("metric"),
+                "mode": objective.get("mode"),
+            },
+            "target_value": campaign.get("target_value"),
+            "max_studies": campaign.get("max_studies"),
+            "max_total_training_runs": campaign.get("max_total_training_runs"),
+            "best_value": campaign.get("best_value"),
+            "study_count": len(summaries),
+            "recent_studies": summaries[-3:],
+        }
+
+    @staticmethod
+    def _compact_study(study: Any) -> Dict[str, Any]:
+        return {
+            "study_id": getattr(study, "study_id", None),
+            "experiment_id": getattr(study, "experiment_id", None),
+            "status": getattr(study, "status", None),
+            "strategy": getattr(study, "strategy", None),
+            "candidate_strategy": getattr(study, "candidate_strategy", None),
+            "best_trial_id": getattr(study, "best_trial_id", None),
+            "trial_count": len(getattr(study, "trial_ids", []) or []),
+            "max_training_runs": getattr(study, "max_training_runs", None),
+            "search_space": study.search_space.to_dict(),
+            "budgets": [item.to_dict() for item in getattr(study, "budgets", [])],
+            "recent_reviews": list(getattr(study, "strategy_reviews", []) or [])[-3:],
+        }
+
 
     def _resolve_search_space(self, value: Optional[Dict[str, Any]]) -> SearchSpace:
         return self._build_search_space(value or self._default_model_search_space())

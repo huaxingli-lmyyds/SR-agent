@@ -18,6 +18,12 @@ def _load_env() -> None:
 
     api_key = os.getenv("ZHIPUAI_API_KEY")
     api_base = os.getenv("ZHIPUAI_API_BASE_URL")
+    if api_base and api_base.rstrip("/").endswith("/chat/completions"):
+        raise ValueError(
+            "ZHIPUAI_API_BASE_URL must be the OpenAI-compatible API root, "
+            "for example https://llmapi.paratera.com/v1; do not include "
+            "/chat/completions because the OpenAI client appends that path."
+        )
     if api_key:
         os.environ["OPENAI_API_KEY"] = api_key
     if api_base:

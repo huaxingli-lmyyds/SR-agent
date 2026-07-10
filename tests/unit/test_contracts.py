@@ -181,6 +181,8 @@ def test_speaker_model_adapters_are_registered() -> None:
     assert resnet.default_evaluation_config.endswith("verification_resnet.yaml")
     assert xvector.default_evaluation_config.endswith("verification_plda_xvector.yaml")
     assert any(item["name"] == "lr" for item in resnet.default_search_space()["parameters"])
+    assert any(item["name"] == "margin" for item in resnet.default_search_space()["parameters"])
+    assert any(item["name"] == "weight_decay" for item in resnet.default_search_space()["parameters"])
     assert any(item["name"] == "lr_final" for item in xvector.default_search_space()["parameters"])
 
 def test_manage_record_compacts_child_agent_results_like_hpo_top_level() -> None:

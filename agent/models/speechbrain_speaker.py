@@ -24,6 +24,8 @@ class SpeechBrainResNetAdapter:
                 {"name": "lr", "parameter_type": "float", "low": 1e-5, "high": 3e-3, "scale": "log"},
                 {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32, 48]},
                 {"name": "sentence_len", "parameter_type": "categorical", "choices": [2.0, 3.0, 4.0]},
+                {"name": "margin", "parameter_type": "float", "low": 0.1, "high": 0.4},
+                {"name": "weight_decay", "parameter_type": "float", "low": 1e-7, "high": 1e-3, "scale": "log"},
             ],
             "constraints": [],
         }
@@ -35,6 +37,10 @@ class SpeechBrainResNetAdapter:
             raise ValueError("ResNet parameter 'batch_size' must be positive")
         if "sentence_len" in parameters and float(parameters["sentence_len"]) <= 0:
             raise ValueError("ResNet parameter 'sentence_len' must be positive")
+        if "margin" in parameters and float(parameters["margin"]) <= 0:
+            raise ValueError("ResNet parameter 'margin' must be positive")
+        if "weight_decay" in parameters and float(parameters["weight_decay"]) < 0:
+            raise ValueError("ResNet parameter 'weight_decay' must be non-negative")
 
 
 @dataclass

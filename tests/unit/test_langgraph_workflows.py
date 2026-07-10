@@ -1,3 +1,6 @@
+import json
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("langgraph")
@@ -187,3 +190,69 @@ def test_hpo_best_metric_record_separates_training_and_evaluation_metrics() -> N
     assert record["eer"] == 0.03
     assert record["training"] == {"valid_error_rate": 0.2, "final_train_loss": 1.5}
     assert record["evaluation"] == {"eer": 0.03, "min_dcf": 0.1}
+
+
+def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
+    from agent.agents.hpo_agent import HPOAgent
+
+    prompt = HPOAgent._strategy_proposal_prompt({
+        "phase": "runtime_review",
+        "hard_max_training_runs": 30,
+        "study": {"trial_count": 12},
+    })
+    payload = json.loads(prompt)
+
+    assert payload["schema"]["action"] == "keep_strategy"
+    assert "Return raw JSON only." in payload["rules"]
+    assert "runtime_review" == payload["context"]["phase"]
+    assert "```" not in prompt
+
+
+def test_hpo_runtime_prompt_uses_compact_study_summary() -> None:
+    from agent.agents.hpo_agent import HPOAgent
+
+    study = SimpleNamespace(
+        study_id="study_1",
+        experiment_id="exp_1",
+        status="running",
+        strategy="adaptive_search",
+        candidate_strategy="tpe",
+        best_trial_id="trial_9",
+        trial_ids=[f"trial_{idx}" for idx in range(20)],
+        max_training_runs=30,
+        search_space=SearchSpace([SearchParameter("lr", "float", low=1e-5, high=1e-2)]),
+        budgets=[TrialBudget("screen", epochs=3, data_fraction=0.25)],
+        strategy_reviews=[{"trigger": str(idx)} for idx in range(5)],
+    )
+
+    compact = HPOAgent._compact_study(study)
+
+    assert compact["trial_count"] == 20
+    assert "trial_ids" not in compact
+    assert compact["recent_reviews"] == [{"trigger": "2"}, {"trigger": "3"}, {"trigger": "4"}]
+
+
+def test_data_processing_advice_prompt_allows_validated_suggestions(monkeypatch) -> None:
+    from agent.agents.data_processing_agent import DataProcessingAgent
+
+    captured = {}
+
+    class FakeLLM:
+        def invoke(self, prompt):
+            captured["prompt"] = prompt
+            return {"content": '{"diagnostics":[],"suggested_operations":[],"notes":[]}'}
+
+    agent = DataProcessingAgent(enable_llm_advisor=True)
+    agent._llm = FakeLLM()
+    advice = agent._planning_advice({
+        "dataset_uri": "/data",
+        "dataset_type": "audio",
+        "task_type": "speaker_verification",
+        "target_goal": "validate",
+        "profile": {"large": "omitted"},
+    })
+    payload = json.loads(captured["prompt"])
+
+    assert advice["suggested_operations"] == []
+    assert "suggested_operations are advisory only" in " ".join(payload["rules"])
+    assert "profile" not in payload["context"]

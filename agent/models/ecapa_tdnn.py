@@ -20,7 +20,9 @@ class SpeechBrainEcapaAdapter:
         return {
             "parameters": [
                 {"name": "lr", "parameter_type": "float", "low": 1e-5, "high": 1e-2, "scale": "log"},
-                {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 32, 64]},
+                {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
+                {"name": "margin", "parameter_type": "float", "low": 0.1, "high": 0.4},
+                {"name": "weight_decay", "parameter_type": "float", "low": 1e-7, "high": 1e-3, "scale": "log"},
             ],
             "constraints": [],
         }
@@ -30,6 +32,10 @@ class SpeechBrainEcapaAdapter:
             raise ValueError("ECAPA parameter 'lr' must be positive")
         if "batch_size" in parameters and int(parameters["batch_size"]) <= 0:
             raise ValueError("ECAPA parameter 'batch_size' must be positive")
+        if "margin" in parameters and float(parameters["margin"]) <= 0:
+            raise ValueError("ECAPA parameter 'margin' must be positive")
+        if "weight_decay" in parameters and float(parameters["weight_decay"]) < 0:
+            raise ValueError("ECAPA parameter 'weight_decay' must be non-negative")
 
 
 __all__ = ["SpeechBrainEcapaAdapter"]

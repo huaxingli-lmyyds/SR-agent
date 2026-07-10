@@ -164,10 +164,28 @@ class DataProcessingAgent(LangGraphAgent):
         )
 
     def _planning_advice(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        response = self.llm.invoke(
-            "Return JSON recommendations only for future data-processing changes and diagnostics. "
-            f"Do not execute operations or change the workflow. Context={json.dumps(state, ensure_ascii=False)}"
-        )
+        context = {
+            "dataset_uri": state.get("dataset_uri"),
+            "dataset_type": state.get("dataset_type"),
+            "task_type": state.get("task_type"),
+            "target_goal": state.get("target_goal"),
+            "requested_operations": state.get("requested_operations") or [],
+        }
+        prompt = json.dumps({
+            "schema": {
+                "diagnostics": [],
+                "suggested_operations": [],
+                "notes": [],
+            },
+            "rules": [
+                "Return raw JSON only.",
+                "Do not use markdown, code fences, comments, or explanatory text.",
+                "suggested_operations are advisory only and will be validated before execution.",
+                "Only suggest operations when they are useful for the current dataset goal.",
+            ],
+            "context": context,
+        }, ensure_ascii=False, separators=(",", ":"))
+        response = self.llm.invoke(prompt)
         try:
             value = json.loads(self._extract_message_content(response))
             return value if isinstance(value, dict) else {"advice": value}
