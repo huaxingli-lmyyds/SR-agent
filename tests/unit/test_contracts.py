@@ -115,6 +115,22 @@ def test_trial_result_does_not_finish_parent_experiment(tmp_path: Path, minimal_
     assert record.get("metrics") == {}
 
 
+def test_ecapa_default_search_space_stays_close_to_reference_recipe() -> None:
+    from agent.models.ecapa_tdnn import SpeechBrainEcapaAdapter
+
+    params = {
+        item["name"]: item
+        for item in SpeechBrainEcapaAdapter().default_search_space()["parameters"]
+    }
+
+    assert params["lr"]["low"] == 3e-4
+    assert params["lr"]["high"] == 3e-3
+    assert params["batch_size"]["choices"] == [16, 24, 32]
+    assert params["margin"]["low"] == 0.15
+    assert params["margin"]["high"] == 0.3
+    assert params["weight_decay"]["low"] == 5e-7
+    assert params["weight_decay"]["high"] == 2e-5
+
 def test_other_model_and_runner_resolve_through_public_adapter_boundary() -> None:
     from agent.core.adapters import resolve_adapter_bundle
     from agent.models import MODEL_ADAPTERS, register_model_adapter

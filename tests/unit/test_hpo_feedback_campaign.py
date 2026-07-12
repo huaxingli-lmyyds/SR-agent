@@ -36,9 +36,42 @@ def test_feedback_clusters_failures_and_detects_search_boundary() -> None:
 
     assert feedback["failure_clusters"] == {"resource": 2}
     assert feedback["boundary_hits"][0]["parameter"] == "lr"
+    assert feedback["best_parameters"] == {"lr": 0.01}
+    assert feedback["ranked_trials"][0]["trial_id"] == "a"
+    assert feedback["ranked_trials"][0]["primary_metric"] == 0.1
     assert proposal.requested_strategy == "random_search"
     assert proposal.search_space["parameters"][0]["low"] < 0.0
 
+
+def test_feedback_expands_log_boundaries_locally() -> None:
+    study = HPOStudy(
+        study_id="study_log",
+        experiment_id="exp_log",
+        strategy="random_search",
+        search_space=SearchSpace([
+            SearchParameter("weight_decay", "float", low=5e-7, high=2e-5, scale="log"),
+        ]),
+        objectives=[Objective("eer", "min")],
+        budgets=[TrialBudget("full", epochs=1)],
+        max_training_runs=4,
+    )
+    trials = [
+        Trial(
+            "a",
+            {"weight_decay": 5e-7},
+            study.budgets[0],
+            status="completed",
+            metrics={"eer": 0.1},
+        )
+    ]
+
+    feedback = HPOFeedbackAnalyzer().analyze(study, trials)
+    proposal = HPOFeedbackAnalyzer().propose(study, feedback)
+    weight_decay = proposal.search_space["parameters"][0]
+
+    assert feedback["boundary_hits"] == [{"parameter": "weight_decay", "edge": "low", "value": 5e-7}]
+    assert weight_decay["low"] == 5e-7 / 3.0
+    assert weight_decay["low"] > 1e-12
 
 def test_feedback_uses_adaptive_generation_when_history_is_available() -> None:
     study = _study()

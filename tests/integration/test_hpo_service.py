@@ -88,6 +88,45 @@ def test_hpo_quotas_promotion_and_strict_completion(
     assert service.complete_study(study).status == "completed"
 
 
+def test_successive_halving_waits_for_startup_cohort_before_promotion(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([SearchParameter("lr", "categorical", choices=[0.1, 0.2, 0.3])]),
+        [Objective("eer", "min")],
+        [TrialBudget("small", epochs=1), TrialBudget("large", epochs=2)],
+        initial_trial_count=3,
+        promotion_limits=[1],
+        max_training_runs=4,
+        min_completed_per_rung=1,
+    )
+    trials = service.suggest_trials(study, 10)
+    service.record_trial(study, trials[0].trial_id, status="running")
+    service.record_trial(study, trials[0].trial_id, status="completed", metrics={"eer": 0.1})
+
+    assert service.promote_trials(study) == []
+
+    for index, trial in enumerate(trials[1:], start=1):
+        service.record_trial(study, trial.trial_id, status="running")
+        service.record_trial(study, trial.trial_id, status="completed", metrics={"eer": 0.1 + index})
+
+    assert len(service.promote_trials(study)) == 1
+
 def test_grid_search_strategy_is_selected_by_service(
     tmp_path,
     minimal_config,

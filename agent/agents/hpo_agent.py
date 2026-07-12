@@ -171,8 +171,11 @@ class HPOAgent(LangGraphAgent):
                     "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
                 }},
             )
-            initial_count = min(int(request.budget.get("initial_trial_count") or min(3, run_limit)), run_limit)
-            default_promotions = [max(1, initial_count // 3), 1][: max(len(budgets) - 1, 0)]
+            initial_count = min(
+                int(request.budget.get("initial_trial_count") or self._default_initial_trial_count(strategy, budgets, run_limit)),
+                run_limit,
+            )
+            default_promotions = self._default_promotion_limits(initial_count, budgets)
             promotion_limits = [] if strategy != "successive_halving" else request.budget.get("promotion_limits", default_promotions)
             study = service.create_study(
                 experiment_id, search_space, objectives, budgets, strategy=strategy,
@@ -406,6 +409,7 @@ class HPOAgent(LangGraphAgent):
             "search_space": search_space.to_dict(),
             "budgets": [item.to_dict() for item in budgets],
             "campaign": self._compact_campaign(campaign or {}),
+            "reference_profile": self._reference_search_profile(self.model_family),
             "historical_memory": memory_context,
         })
         try:
@@ -438,6 +442,7 @@ class HPOAgent(LangGraphAgent):
                 "study": self._compact_study(study),
                 "feedback": feedback,
                 "campaign": self._compact_campaign(campaign.to_dict()),
+                "reference_profile": self._reference_search_profile(self.model_family),
                 "historical_memory": memory_context,
             })
             try:
@@ -449,6 +454,32 @@ class HPOAgent(LangGraphAgent):
                     evidence={"error": f"{type(exc).__name__}: {exc}"},
                 )
         return review
+
+    @staticmethod
+    def _default_initial_trial_count(strategy: str, budgets: List[TrialBudget], run_limit: int) -> int:
+        if strategy != "successive_halving" or len(budgets) <= 1:
+            return min(3, max(int(run_limit), 1))
+        reduction_factor = 3
+        target = reduction_factor ** max(len(budgets) - 1, 1)
+        target = min(max(target, 3), max(int(run_limit), 1))
+        for count in range(target, 0, -1):
+            planned_runs = count + sum(HPOAgent._default_promotion_limits(count, budgets, reduction_factor))
+            if planned_runs <= run_limit:
+                return count
+        return 1
+
+    @staticmethod
+    def _default_promotion_limits(
+        initial_count: int,
+        budgets: List[TrialBudget],
+        reduction_factor: int = 3,
+    ) -> List[int]:
+        limits: List[int] = []
+        current = max(int(initial_count), 0)
+        for _ in range(max(len(budgets) - 1, 0)):
+            current = max(1, (current + reduction_factor - 1) // reduction_factor)
+            limits.append(current)
+        return limits
 
     @staticmethod
     def _strategy_proposal_prompt(context: Dict[str, Any]) -> str:
@@ -470,6 +501,13 @@ class HPOAgent(LangGraphAgent):
             "Allowed action values: keep_strategy, refine_search_space, expand_search_space, switch_strategy, adjust_budget.",
             "If no change is useful, return action=keep_strategy and leave requested_strategy, search_space, budgets, max_training_runs as null.",
             "Do not invent parameter names unless action=expand_search_space.",
+            "Treat reference_profile.baseline_parameters as the trusted recipe anchor.",
+            "Prefer local refinements around reference_profile.stable_search_space instead of broad global searches.",
+            "Change at most two sensitive parameters in one proposal unless failures require a resource fix.",
+            "For log-scale parameters, adjust boundaries by small multiplicative factors; do not jump by many orders of magnitude.",
+            "For margin, prefer narrow changes near the baseline unless completed evaluation evidence supports widening.",
+            "If evaluation or resource failures occur, first reduce resource-sensitive choices such as batch_size before changing optimization parameters.",
+            "Use keep_strategy when evidence is too weak; do not switch strategy only because a switch is allowed.",
             "Do not exceed hard_max_training_runs when that field is present in context.",
             "This is advisory only; deterministic validation may reject invalid fields.",
         ]
@@ -511,6 +549,72 @@ class HPOAgent(LangGraphAgent):
             "budgets": [item.to_dict() for item in getattr(study, "budgets", [])],
             "recent_reviews": list(getattr(study, "strategy_reviews", []) or [])[-3:],
         }
+
+    @staticmethod
+    def _reference_search_profile(model_family: str) -> Dict[str, Any]:
+        profiles = {
+            "ecapa_tdnn": {
+                "baseline_parameters": {
+                    "lr": 0.001,
+                    "batch_size": 32,
+                    "margin": 0.2,
+                    "weight_decay": 2e-6,
+                },
+                "stable_search_space": {
+                    "parameters": [
+                        {"name": "lr", "parameter_type": "float", "low": 3e-4, "high": 3e-3, "scale": "log"},
+                        {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
+                        {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
+                        {"name": "weight_decay", "parameter_type": "float", "low": 5e-7, "high": 2e-5, "scale": "log"},
+                    ],
+                    "constraints": [],
+                },
+                "local_adjustment_policy": {
+                    "max_changed_parameters_per_review": 2,
+                    "lr_boundary_factor": 2.0,
+                    "weight_decay_boundary_factor": 3.0,
+                    "margin_step": 0.05,
+                    "resource_first_on_oom": ["batch_size"],
+                    "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
+                },
+                "rationale": "SpeechBrain ECAPA recipe is stable near lr=0.001, margin=0.2, weight_decay=2e-6; HPO should make local evidence-backed moves before broad exploration.",
+            },
+            "resnet": {
+                "baseline_parameters": {
+                    "lr": 0.001,
+                    "batch_size": 32,
+                    "margin": 0.2,
+                    "weight_decay": 2e-6,
+                },
+                "stable_search_space": {
+                    "parameters": [
+                        {"name": "lr", "parameter_type": "float", "low": 3e-4, "high": 3e-3, "scale": "log"},
+                        {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
+                        {"name": "sentence_len", "parameter_type": "categorical", "choices": [2.0, 3.0, 4.0]},
+                        {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
+                        {"name": "weight_decay", "parameter_type": "float", "low": 5e-7, "high": 2e-5, "scale": "log"},
+                    ],
+                    "constraints": [],
+                },
+                "local_adjustment_policy": {
+                    "max_changed_parameters_per_review": 2,
+                    "lr_boundary_factor": 2.0,
+                    "weight_decay_boundary_factor": 3.0,
+                    "margin_step": 0.05,
+                    "resource_first_on_oom": ["batch_size", "sentence_len"],
+                    "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
+                },
+                "rationale": "ResNet speaker-recognition tuning should stay near the stable SpeechBrain recipe before widening multiple coupled parameters.",
+            },
+        }
+        return profiles.get(model_family, {
+            "baseline_parameters": {},
+            "stable_search_space": None,
+            "local_adjustment_policy": {
+                "max_changed_parameters_per_review": 2,
+                "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
+            },
+        })
 
 
     def _resolve_search_space(self, value: Optional[Dict[str, Any]]) -> SearchSpace:

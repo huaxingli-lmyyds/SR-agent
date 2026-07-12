@@ -43,6 +43,31 @@ def test_adaptive_search_moves_around_best_completed_trial() -> None:
     assert all(item["lr"] != 0.4 for item in suggestions)
 
 
+def test_adaptive_search_perturbs_log_parameters_by_multiplier() -> None:
+    space = SearchSpace([SearchParameter("weight_decay", "float", low=5e-7, high=2e-5, scale="log")])
+    history = [
+        Trial(
+            "trial_best",
+            {"weight_decay": 2e-6},
+            TrialBudget("full"),
+            status="completed",
+            metrics={"eer": 0.1},
+        )
+    ]
+
+    suggestions = AdaptiveSearchStrategy().suggest(
+        space,
+        2,
+        existing=[trial.parameters for trial in history],
+        history=history,
+        objective=Objective("eer", "min"),
+    )
+
+    values = [item["weight_decay"] for item in suggestions]
+    assert values
+    assert all(5e-7 <= value <= 2e-5 for value in values)
+    assert all(0.1 < value / 2e-6 < 10 for value in values)
+
 def test_auto_planning_selects_strategy_deterministically() -> None:
     policy = HPOPlanningPolicy()
     grid = SearchSpace([SearchParameter("batch_size", "categorical", choices=[16, 32])])

@@ -331,12 +331,17 @@ class HPOService:
         objective = study.objectives[0]
         trials = self.list_trials(study.experiment_id)
         completed_by_rung: Dict[int, List[Trial]] = {}
+        active_by_rung: Dict[int, List[Trial]] = {}
         for trial in trials:
             if trial.status == "completed":
                 completed_by_rung.setdefault(trial.rung, []).append(trial)
+            elif trial.status in {"suggested", "running"}:
+                active_by_rung.setdefault(trial.rung, []).append(trial)
         eligible_rungs = []
         for rung, items in completed_by_rung.items():
             if rung + 1 >= len(study.budgets) or len(items) < study.min_completed_per_rung:
+                continue
+            if active_by_rung.get(rung):
                 continue
             limit = study.promotion_limits[rung] if rung < len(study.promotion_limits) else None
             destination_count = len([trial for trial in trials if trial.rung == rung + 1])

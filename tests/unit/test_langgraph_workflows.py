@@ -192,6 +192,20 @@ def test_hpo_best_metric_record_separates_training_and_evaluation_metrics() -> N
     assert record["evaluation"] == {"eer": 0.03, "min_dcf": 0.1}
 
 
+def test_hpo_successive_halving_defaults_use_larger_startup_cohort() -> None:
+    from agent.agents.hpo_agent import HPOAgent
+
+    budgets = [
+        TrialBudget("screening", epochs=3, data_fraction=0.25),
+        TrialBudget("promotion", epochs=8, data_fraction=0.5),
+        TrialBudget("confirmation", epochs=20, data_fraction=1.0),
+    ]
+
+    assert HPOAgent._default_initial_trial_count("successive_halving", budgets, 30) == 9
+    assert HPOAgent._default_promotion_limits(9, budgets) == [3, 1]
+    assert HPOAgent._default_initial_trial_count("successive_halving", budgets, 10) == 6
+    assert HPOAgent._default_promotion_limits(6, budgets) == [2, 1]
+
 def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
     from agent.agents.hpo_agent import HPOAgent
 
@@ -205,7 +219,30 @@ def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
     assert payload["schema"]["action"] == "keep_strategy"
     assert "Return raw JSON only." in payload["rules"]
     assert "runtime_review" == payload["context"]["phase"]
+    assert "trusted recipe anchor" in " ".join(payload["rules"])
     assert "```" not in prompt
+
+
+def test_hpo_reference_profile_guides_local_ecapa_search() -> None:
+    from agent.agents.hpo_agent import HPOAgent
+
+    profile = HPOAgent._reference_search_profile("ecapa_tdnn")
+    params = {
+        item["name"]: item
+        for item in profile["stable_search_space"]["parameters"]
+    }
+
+    assert profile["baseline_parameters"] == {
+        "lr": 0.001,
+        "batch_size": 32,
+        "margin": 0.2,
+        "weight_decay": 2e-6,
+    }
+    assert params["lr"]["low"] == 3e-4
+    assert params["lr"]["high"] == 3e-3
+    assert params["weight_decay"]["low"] == 5e-7
+    assert params["weight_decay"]["high"] == 2e-5
+    assert profile["local_adjustment_policy"]["max_changed_parameters_per_review"] == 2
 
 
 def test_hpo_runtime_prompt_uses_compact_study_summary() -> None:

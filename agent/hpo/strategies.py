@@ -140,17 +140,14 @@ class AdaptiveSearchStrategy:
             candidate = dict(best)
             parameter = search_space.parameters[attempts % len(search_space.parameters)]
             if parameter.parameter_type == "categorical":
-                options = [item for item in parameter.choices if item != candidate.get(parameter.name)]
-                if options:
-                    candidate[parameter.name] = options[(attempts + seed) % len(options)]
+                value = _nearby_categorical_value(parameter, candidate.get(parameter.name), attempts + seed)
+                if value is not None:
+                    candidate[parameter.name] = value
             else:
-                if parameter.low is None or parameter.high is None:
+                value = _nearby_numeric_value(parameter, candidate.get(parameter.name), attempts)
+                if value is None:
                     continue
-                span = parameter.high - parameter.low
-                direction = -1 if attempts % 2 else 1
-                value = float(candidate.get(parameter.name, parameter.low)) + direction * span * 0.1
-                value = min(max(value, parameter.low), parameter.high)
-                candidate[parameter.name] = int(round(value)) if parameter.parameter_type == "int" else value
+                candidate[parameter.name] = value
             signature = _signature(candidate)
             if signature in seen or not _constraints_match(candidate, search_space.constraints):
                 continue
@@ -164,6 +161,43 @@ class AdaptiveSearchStrategy:
                 existing=[*(existing or []), *suggestions],
             ))
         return suggestions
+
+
+def _nearby_categorical_value(parameter: SearchParameter, current: Any, offset: int) -> Any:
+    choices = list(parameter.choices or [])
+    if len(choices) <= 1:
+        return None
+    try:
+        ordered = sorted(choices)
+    except TypeError:
+        ordered = choices
+    if current not in ordered:
+        return ordered[offset % len(ordered)]
+    index = ordered.index(current)
+    step = -1 if offset % 2 else 1
+    next_index = min(max(index + step, 0), len(ordered) - 1)
+    if next_index == index:
+        next_index = min(max(index - step, 0), len(ordered) - 1)
+    return ordered[next_index] if next_index != index else None
+
+
+def _nearby_numeric_value(parameter: SearchParameter, current: Any, offset: int) -> Any:
+    if parameter.low is None or parameter.high is None:
+        return None
+    low = float(parameter.low)
+    high = float(parameter.high)
+    if high < low:
+        return None
+    value = float(current if current is not None else low)
+    direction = -1 if offset % 2 else 1
+    if parameter.scale == "log" and low > 0 and high > 0:
+        ratio = high / low
+        factor = ratio ** 0.15
+        value = value / factor if direction < 0 else value * factor
+    else:
+        value = value + direction * (high - low) * 0.1
+    value = min(max(value, low), high)
+    return int(round(value)) if parameter.parameter_type == "int" else value
 
 
 class OptunaTPEStrategy:

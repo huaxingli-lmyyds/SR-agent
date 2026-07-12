@@ -42,9 +42,28 @@ class HPOFeedbackAnalyzer:
             if trial.status in {"completed", "promoted", "stopped", "failed"}
         ])
         best_metric = None
+        best_parameters = None
+        ranked_trials: List[Dict[str, Any]] = []
         if completed:
-            values = [item.metrics[objective.metric] for item in completed]
-            best_metric = min(values) if objective.mode == "min" else max(values)
+            reverse = objective.mode == "max"
+            ranked = sorted(completed, key=lambda item: item.metrics[objective.metric], reverse=reverse)
+            best_metric = ranked[0].metrics[objective.metric]
+            best_parameters = dict(ranked[0].parameters)
+            ranked_trials = [
+                {
+                    "trial_id": trial.trial_id,
+                    "rung": trial.rung,
+                    "status": trial.status,
+                    "parameters": dict(trial.parameters),
+                    "primary_metric": trial.metrics.get(objective.metric),
+                    "training": {
+                        key: trial.metrics[key]
+                        for key in ("valid_error_rate", "final_valid_loss", "final_train_loss", "final_epoch")
+                        if key in trial.metrics
+                    },
+                }
+                for trial in ranked[:5]
+            ]
         return {
             "completed_trials": len(completed),
             "failed_trials": failure_total,
@@ -53,6 +72,8 @@ class HPOFeedbackAnalyzer:
             "failure_rate": failure_total / terminal_count if terminal_count else 0.0,
             "boundary_hits": boundary_hits,
             "best_metric": best_metric,
+            "best_parameters": best_parameters,
+            "ranked_trials": ranked_trials,
         }
 
     def propose(
@@ -84,9 +105,9 @@ class HPOFeedbackAnalyzer:
                     continue
                 span = high - low
                 if hit["edge"] == "low":
-                    parameter["low"] = max(low - span * 0.25, 1e-12) if parameter.get("scale") == "log" else low - span * 0.25
+                    parameter["low"] = max(low / 3.0, 1e-12) if parameter.get("scale") == "log" else low - span * 0.1
                 else:
-                    parameter["high"] = high + span * 0.25
+                    parameter["high"] = high * 3.0 if parameter.get("scale") == "log" else high + span * 0.1
             search_space = {"parameters": parameters, "constraints": study.search_space.constraints}
             reasons.append("best_trial_at_search_boundary")
         return StrategyProposal(

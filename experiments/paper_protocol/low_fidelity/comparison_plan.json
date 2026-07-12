@@ -1,0 +1,349 @@
+{
+  "schema_version": "1.0",
+  "comparison_id": "cmp_20260711_224227_f88a63",
+  "created_at": "2026-07-11T14:42:27.707150+00:00",
+  "suite": "low_fidelity",
+  "repetitions": 1,
+  "config_path": "configs/train_ecapa_tdnn.yaml",
+  "data_folder": "C:\\tmp\\voxceleb1",
+  "objective": "Compare speaker-verification HPO strategies",
+  "task_type": "speaker_verification",
+  "model_family": "ecapa_tdnn",
+  "implementation": "speechbrain",
+  "runner": "speechbrain",
+  "primary_metric": "eer",
+  "metric_mode": "min",
+  "variants": [
+    {
+      "name": "default_baseline",
+      "strategy": "grid_search",
+      "enable_llm_advisor": false,
+      "max_training_runs": 1,
+      "max_studies": 1,
+      "budgets": [
+        {
+          "stage": "screen",
+          "epochs": 3,
+          "data_fraction": 0.25,
+          "max_duration_seconds": null
+        }
+      ],
+      "search_space": {
+        "parameters": [
+          {
+            "name": "lr",
+            "parameter_type": "categorical",
+            "choices": [
+              0.001
+            ]
+          },
+          {
+            "name": "batch_size",
+            "parameter_type": "categorical",
+            "choices": [
+              16
+            ]
+          },
+          {
+            "name": "sentence_len",
+            "parameter_type": "categorical",
+            "choices": [
+              4.0
+            ]
+          },
+          {
+            "name": "margin",
+            "parameter_type": "categorical",
+            "choices": [
+              0.2
+            ]
+          },
+          {
+            "name": "weight_decay",
+            "parameter_type": "categorical",
+            "choices": [
+              2e-06
+            ]
+          }
+        ],
+        "constraints": []
+      },
+      "initial_trial_count": null,
+      "promotion_limits": null,
+      "min_completed_per_rung": 1,
+      "strategy_review_interval_trials": 3,
+      "max_retries": 1
+    },
+    {
+      "name": "random_search",
+      "strategy": "random_search",
+      "enable_llm_advisor": false,
+      "max_training_runs": 6,
+      "max_studies": 1,
+      "budgets": [
+        {
+          "stage": "screen",
+          "epochs": 3,
+          "data_fraction": 0.25,
+          "max_duration_seconds": null
+        }
+      ],
+      "search_space": {
+        "parameters": [
+          {
+            "name": "lr",
+            "parameter_type": "float",
+            "low": 1e-05,
+            "high": 0.003,
+            "scale": "log"
+          },
+          {
+            "name": "batch_size",
+            "parameter_type": "categorical",
+            "choices": [
+              8,
+              16,
+              24,
+              32
+            ]
+          },
+          {
+            "name": "sentence_len",
+            "parameter_type": "categorical",
+            "choices": [
+              2.0,
+              3.0,
+              4.0
+            ]
+          },
+          {
+            "name": "margin",
+            "parameter_type": "float",
+            "low": 0.1,
+            "high": 0.4
+          },
+          {
+            "name": "weight_decay",
+            "parameter_type": "float",
+            "low": 1e-07,
+            "high": 0.001,
+            "scale": "log"
+          }
+        ],
+        "constraints": []
+      },
+      "initial_trial_count": null,
+      "promotion_limits": null,
+      "min_completed_per_rung": 1,
+      "strategy_review_interval_trials": 3,
+      "max_retries": 1
+    },
+    {
+      "name": "tpe",
+      "strategy": "tpe",
+      "enable_llm_advisor": false,
+      "max_training_runs": 6,
+      "max_studies": 1,
+      "budgets": [
+        {
+          "stage": "screen",
+          "epochs": 3,
+          "data_fraction": 0.25,
+          "max_duration_seconds": null
+        }
+      ],
+      "search_space": {
+        "parameters": [
+          {
+            "name": "lr",
+            "parameter_type": "float",
+            "low": 1e-05,
+            "high": 0.003,
+            "scale": "log"
+          },
+          {
+            "name": "batch_size",
+            "parameter_type": "categorical",
+            "choices": [
+              8,
+              16,
+              24,
+              32
+            ]
+          },
+          {
+            "name": "sentence_len",
+            "parameter_type": "categorical",
+            "choices": [
+              2.0,
+              3.0,
+              4.0
+            ]
+          },
+          {
+            "name": "margin",
+            "parameter_type": "float",
+            "low": 0.1,
+            "high": 0.4
+          },
+          {
+            "name": "weight_decay",
+            "parameter_type": "float",
+            "low": 1e-07,
+            "high": 0.001,
+            "scale": "log"
+          }
+        ],
+        "constraints": []
+      },
+      "initial_trial_count": null,
+      "promotion_limits": null,
+      "min_completed_per_rung": 1,
+      "strategy_review_interval_trials": 3,
+      "max_retries": 1
+    },
+    {
+      "name": "adaptive_search",
+      "strategy": "adaptive_search",
+      "enable_llm_advisor": false,
+      "max_training_runs": 6,
+      "max_studies": 1,
+      "budgets": [
+        {
+          "stage": "screen",
+          "epochs": 3,
+          "data_fraction": 0.25,
+          "max_duration_seconds": null
+        }
+      ],
+      "search_space": {
+        "parameters": [
+          {
+            "name": "lr",
+            "parameter_type": "float",
+            "low": 1e-05,
+            "high": 0.003,
+            "scale": "log"
+          },
+          {
+            "name": "batch_size",
+            "parameter_type": "categorical",
+            "choices": [
+              8,
+              16,
+              24,
+              32
+            ]
+          },
+          {
+            "name": "sentence_len",
+            "parameter_type": "categorical",
+            "choices": [
+              2.0,
+              3.0,
+              4.0
+            ]
+          },
+          {
+            "name": "margin",
+            "parameter_type": "float",
+            "low": 0.1,
+            "high": 0.4
+          },
+          {
+            "name": "weight_decay",
+            "parameter_type": "float",
+            "low": 1e-07,
+            "high": 0.001,
+            "scale": "log"
+          }
+        ],
+        "constraints": []
+      },
+      "initial_trial_count": null,
+      "promotion_limits": null,
+      "min_completed_per_rung": 1,
+      "strategy_review_interval_trials": 3,
+      "max_retries": 1
+    },
+    {
+      "name": "successive_halving",
+      "strategy": "successive_halving",
+      "enable_llm_advisor": false,
+      "max_training_runs": 8,
+      "max_studies": 1,
+      "budgets": [
+        {
+          "stage": "screen",
+          "epochs": 3,
+          "data_fraction": 0.25,
+          "max_duration_seconds": null
+        },
+        {
+          "stage": "promote",
+          "epochs": 8,
+          "data_fraction": 0.5,
+          "max_duration_seconds": null
+        },
+        {
+          "stage": "full",
+          "epochs": 24,
+          "data_fraction": 1.0,
+          "max_duration_seconds": null
+        }
+      ],
+      "search_space": {
+        "parameters": [
+          {
+            "name": "lr",
+            "parameter_type": "float",
+            "low": 1e-05,
+            "high": 0.003,
+            "scale": "log"
+          },
+          {
+            "name": "batch_size",
+            "parameter_type": "categorical",
+            "choices": [
+              8,
+              16,
+              24,
+              32
+            ]
+          },
+          {
+            "name": "sentence_len",
+            "parameter_type": "categorical",
+            "choices": [
+              2.0,
+              3.0,
+              4.0
+            ]
+          },
+          {
+            "name": "margin",
+            "parameter_type": "float",
+            "low": 0.1,
+            "high": 0.4
+          },
+          {
+            "name": "weight_decay",
+            "parameter_type": "float",
+            "low": 1e-07,
+            "high": 0.001,
+            "scale": "log"
+          }
+        ],
+        "constraints": []
+      },
+      "initial_trial_count": 6,
+      "promotion_limits": [
+        2,
+        1
+      ],
+      "min_completed_per_rung": 2,
+      "strategy_review_interval_trials": 3,
+      "max_retries": 1
+    }
+  ]
+}
