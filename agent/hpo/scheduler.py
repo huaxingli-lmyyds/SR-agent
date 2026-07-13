@@ -263,35 +263,65 @@ class HPOScheduler:
 
     def _review_strategy(self, state: HPOGraphState) -> Dict[str, Any]:
         completed = int(state.get("completed_since_review", 0))
-        if completed < self.review_interval_trials:
+        if self.study.strategy == "successive_halving" or completed < self.review_interval_trials:
             return {}
-        proposal = None
-        if self.strategy_reviewer:
-            feedback = HPOFeedbackAnalyzer().analyze(
-                self.study,
-                self.service.list_trials(self.study.experiment_id),
-            )
-            try:
-                proposal = self.strategy_reviewer(self.study, feedback)
-            except Exception as exc:
-                proposal = StrategyProposal(
-                    action="invalid_proposal",
-                    reason_codes=["runtime_review_error"],
-                    evidence={"error": f"{type(exc).__name__}: {exc}"},
-                )
+        proposal = self._make_strategy_proposal("interval_review")
         self.service.review_strategy(self.study, proposal, trigger=f"after_{completed}_trials")
         return {"completed_since_review": 0}
 
     def _promote(self, state: HPOGraphState) -> Dict[str, Any]:
+        source_rung = self._next_promotable_rung()
+        if source_rung is not None:
+            proposal = self._make_strategy_proposal(f"after_rung_{source_rung}")
+            self.service.review_strategy(self.study, proposal, trigger=f"after_rung_{source_rung}")
         promoted = self.service.promote_trials(self.study)
-        if promoted:
-            self.service.review_strategy(self.study, trigger=f"after_rung_{promoted[0].rung - 1}")
-        return {"route": "next" if promoted else "complete"}
+        return {"route": "next" if promoted else "complete", "completed_since_review": 0 if promoted else state.get("completed_since_review", 0)}
+
+    def _make_strategy_proposal(self, trigger: str) -> Optional[StrategyProposal]:
+        if not self.strategy_reviewer:
+            return None
+        feedback = HPOFeedbackAnalyzer().analyze(
+            self.study,
+            self.service.list_trials(self.study.experiment_id),
+        )
+        feedback["review_trigger"] = trigger
+        try:
+            return self.strategy_reviewer(self.study, feedback)
+        except Exception as exc:
+            return StrategyProposal(
+                action="invalid_proposal",
+                reason_codes=["runtime_review_error"],
+                evidence={"error": f"{type(exc).__name__}: {exc}", "review_trigger": trigger},
+            )
+
+    def _next_promotable_rung(self) -> Optional[int]:
+        if self.study.strategy != "successive_halving":
+            return None
+        trials = self.service.list_trials(self.study.experiment_id)
+        completed_by_rung: Dict[int, List[Trial]] = {}
+        active_by_rung: Dict[int, List[Trial]] = {}
+        for trial in trials:
+            if trial.status == "completed":
+                completed_by_rung.setdefault(trial.rung, []).append(trial)
+            elif trial.status in {"suggested", "running"}:
+                active_by_rung.setdefault(trial.rung, []).append(trial)
+        eligible: List[int] = []
+        for rung, items in completed_by_rung.items():
+            if rung + 1 >= len(self.study.budgets) or len(items) < self.study.min_completed_per_rung:
+                continue
+            if active_by_rung.get(rung):
+                continue
+            limit = self.study.promotion_limits[rung] if rung < len(self.study.promotion_limits) else None
+            destination_count = len([trial for trial in trials if trial.rung == rung + 1])
+            if limit is None or destination_count < limit:
+                eligible.append(rung)
+        return min(eligible) if eligible else None
 
     def _complete(self, state: HPOGraphState) -> Dict[str, Any]:
         errors = list(state.get("errors") or [])
         if int(state.get("completed_since_review", 0)) > 0:
-            self.service.review_strategy(self.study, trigger="final_trials")
+            proposal = self._make_strategy_proposal("final_trials")
+            self.service.review_strategy(self.study, proposal, trigger="final_trials")
         try:
             self._study = self.service.complete_study(self.study, "langgraph_completed")
         except ValueError as exc:

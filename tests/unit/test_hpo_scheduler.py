@@ -9,6 +9,7 @@ from agent.hpo import (
     RetryPolicy,
     SearchParameter,
     SearchSpace,
+    StrategyProposal,
     TrialBudget,
 )
 from agent.utils.experiment_tracker import ExperimentTracker
@@ -131,3 +132,51 @@ def test_scheduler_advisor_failure_does_not_control_execution(
 
     assert result.study.status == "completed"
     assert "advisor unavailable" in result.advice["advice_error"]
+
+def test_successive_halving_reviewer_runs_at_stage_boundaries(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([SearchParameter("lr", "categorical", choices=[0.1, 0.2, 0.3])]),
+        [Objective("eer", "min")],
+        [TrialBudget("screen", epochs=1), TrialBudget("confirm", epochs=2)],
+        strategy="successive_halving",
+        initial_trial_count=3,
+        promotion_limits=[1],
+        max_training_runs=4,
+    )
+    calls = []
+
+    def reviewer(current_study, feedback):
+        calls.append(feedback["review_trigger"])
+        return StrategyProposal(action="keep_strategy", evidence={"trigger": feedback["review_trigger"]})
+
+    def executor(trial, attempt):
+        return {"status": "success", "metrics": {"eer": float(trial.parameters["lr"])}}
+
+    result = HPOScheduler(
+        service,
+        executor,
+        strategy_reviewer=reviewer,
+        review_interval_trials=1,
+    ).run(study)
+
+    assert result.study.status == "completed"
+    assert "after_rung_0" in calls
+    assert "after_1_trials" not in calls
+    assert result.strategy_reviews[0]["trigger"] == "after_rung_0"

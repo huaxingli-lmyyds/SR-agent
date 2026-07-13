@@ -206,6 +206,90 @@ def test_hpo_successive_halving_defaults_use_larger_startup_cohort() -> None:
     assert HPOAgent._default_initial_trial_count("successive_halving", budgets, 10) == 6
     assert HPOAgent._default_promotion_limits(6, budgets) == [2, 1]
 
+
+def test_hpo_study_learning_summary_records_next_study_guidance() -> None:
+    from agent.agents.hpo_agent import HPOAgent
+    from agent.hpo import Objective
+
+    search_space = SearchSpace([
+        SearchParameter("lr", "float", low=3e-4, high=3e-3, scale="log"),
+        SearchParameter("batch_size", "categorical", choices=[16, 24, 32]),
+    ])
+    study = SimpleNamespace(
+        strategy="successive_halving",
+        candidate_strategy="tpe",
+        search_space=search_space,
+        strategy_reviews=[{
+            "trigger": "stage_end:screening",
+            "proposal": {
+                "action": "refine_search_space",
+                "requested_strategy": "tpe",
+                "reason_codes": ["localize_around_best"],
+            },
+            "decision": {
+                "accepted_fields": ["requested_strategy", "search_space"],
+                "rejected_fields": [],
+            },
+            "applied_candidate_strategy": "tpe",
+        }],
+    )
+    best_trial = SimpleNamespace(
+        trial_id="trial_7",
+        parameters={"lr": 0.0012, "batch_size": 24},
+        metrics={"eer": 0.31, "valid_error_rate": 0.35},
+    )
+
+    summary = HPOAgent._study_learning_summary(study, best_trial, Objective("eer", "min"))
+
+    assert summary["local_search_anchor"]["parameters"] == {"lr": 0.0012, "batch_size": 24}
+    assert summary["local_search_anchor"]["value"] == 0.31
+    assert summary["final_candidate_strategy"] == "tpe"
+    assert summary["last_review"]["accepted_fields"] == ["requested_strategy", "search_space"]
+    assert summary["next_study_recommendation"]["strategy"] == "tpe"
+    assert summary["next_study_recommendation"]["search_space"] == search_space.to_dict()
+
+
+def test_hpo_cross_study_memory_exposes_recent_learning_for_next_planning() -> None:
+    from agent.agents.hpo_agent import HPOAgent
+
+    learning_summary = {
+        "local_search_anchor": {
+            "trial_id": "trial_7",
+            "parameters": {"lr": 0.0012, "batch_size": 24},
+            "metric": "eer",
+            "mode": "min",
+            "value": 0.31,
+        },
+        "next_study_recommendation": {
+            "strategy": "tpe",
+            "search_space": {"parameters": [{"name": "lr", "low": 8e-4, "high": 2e-3}]},
+            "anchor_parameters": {"lr": 0.0012, "batch_size": 24},
+        },
+    }
+    campaign = {
+        "best_value": 0.31,
+        "best_experiment_id": "exp_2",
+        "study_summaries": [
+            {"experiment_id": "exp_1", "study_id": "study_1", "best_value": 0.4},
+            {
+                "experiment_id": "exp_2",
+                "study_id": "study_2",
+                "best_value": 0.31,
+                "best_parameters": {"lr": 0.0012, "batch_size": 24},
+                "learning_summary": learning_summary,
+            },
+        ],
+    }
+
+    memory = HPOAgent._cross_study_memory(campaign)
+
+    assert memory["prior_study_count"] == 2
+    assert memory["best_parameters"] == {"lr": 0.0012, "batch_size": 24}
+    assert memory["local_search_anchor"] == learning_summary["local_search_anchor"]
+    assert memory["next_study_recommendation"] == learning_summary["next_study_recommendation"]
+    assert memory["recent_learnings"][-1]["learning_summary"] == learning_summary
+
+
 def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
     from agent.agents.hpo_agent import HPOAgent
 
@@ -220,6 +304,7 @@ def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
     assert "Return raw JSON only." in payload["rules"]
     assert "runtime_review" == payload["context"]["phase"]
     assert "trusted recipe anchor" in " ".join(payload["rules"])
+    assert "cross_study_memory.local_search_anchor" in " ".join(payload["rules"])
     assert "```" not in prompt
 
 

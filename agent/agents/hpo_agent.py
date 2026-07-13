@@ -210,7 +210,9 @@ class HPOAgent(LangGraphAgent):
                 best_value=current_value, training_runs=service.training_runs_used(scheduled.study),
             )
             campaign.study_summaries[-1]["best_parameters"] = current_best.parameters
+            campaign.study_summaries[-1]["best_metrics"] = self._best_metric_record(current_best, objectives[0])
             campaign.study_summaries[-1]["strategy_reviews"] = scheduled.study.strategy_reviews
+            campaign.study_summaries[-1]["learning_summary"] = self._study_learning_summary(scheduled.study, current_best, objectives[0])
             study_results.append({"experiment_id": experiment_id, "study_id": scheduled.study.study_id, "status": scheduled.study.status, "trial_count": len(scheduled.trials), "best_trial_id": scheduled.study.best_trial_id})
             if best_trial is None or (
                 current_value < float(best_trial.metrics[objectives[0].metric])
@@ -274,6 +276,78 @@ class HPOAgent(LangGraphAgent):
             experiment_ids={"hpo": best_experiment_id, "campaign": [item["experiment_id"] for item in study_results]},
             request_id=request.request_id,
         )
+
+    @staticmethod
+    def _study_learning_summary(study: Any, best_trial: Any, objective: Objective) -> Dict[str, Any]:
+        reviews = list(getattr(study, "strategy_reviews", []) or [])
+        last_review = reviews[-1] if reviews else {}
+        decision = last_review.get("decision") or {}
+        proposal = last_review.get("proposal") or {}
+        final_strategy = getattr(study, "candidate_strategy", None) or getattr(study, "strategy", None)
+        final_search_space = study.search_space.to_dict()
+        return {
+            "local_search_anchor": {
+                "trial_id": getattr(best_trial, "trial_id", None),
+                "parameters": dict(getattr(best_trial, "parameters", {}) or {}),
+                "metric": objective.metric,
+                "mode": objective.mode,
+                "value": (getattr(best_trial, "metrics", {}) or {}).get(objective.metric),
+            },
+            "final_strategy": getattr(study, "strategy", None),
+            "final_candidate_strategy": final_strategy,
+            "final_search_space": final_search_space,
+            "last_review": {
+                "trigger": last_review.get("trigger"),
+                "proposal_action": proposal.get("action"),
+                "requested_strategy": proposal.get("requested_strategy"),
+                "reason_codes": proposal.get("reason_codes") or [],
+                "accepted_fields": decision.get("accepted_fields") or [],
+                "rejected_fields": decision.get("rejected_fields") or [],
+                "applied_candidate_strategy": last_review.get("applied_candidate_strategy"),
+            },
+            "next_study_recommendation": {
+                "strategy": final_strategy,
+                "search_space": final_search_space,
+                "anchor_parameters": dict(getattr(best_trial, "parameters", {}) or {}),
+                "reason_codes": proposal.get("reason_codes") or [],
+            },
+        }
+
+    @staticmethod
+    def _cross_study_memory(campaign: Dict[str, Any]) -> Dict[str, Any]:
+        summaries = list(campaign.get("study_summaries") or [])
+        recent = summaries[-3:]
+        best_summary = None
+        best_value = campaign.get("best_value")
+        best_experiment_id = campaign.get("best_experiment_id")
+        if best_experiment_id:
+            best_summary = next(
+                (item for item in summaries if item.get("experiment_id") == best_experiment_id),
+                None,
+            )
+        if best_summary is None and summaries:
+            best_summary = summaries[-1]
+        latest_learning = (recent[-1].get("learning_summary") if recent else None) or {}
+        return {
+            "prior_study_count": len(summaries),
+            "best_value": best_value,
+            "best_experiment_id": best_experiment_id,
+            "best_parameters": (best_summary or {}).get("best_parameters") or {},
+            "local_search_anchor": latest_learning.get("local_search_anchor"),
+            "next_study_recommendation": latest_learning.get("next_study_recommendation"),
+            "recent_learnings": [
+                {
+                    "experiment_id": item.get("experiment_id"),
+                    "study_id": item.get("study_id"),
+                    "best_value": item.get("best_value"),
+                    "improvement": item.get("improvement"),
+                    "improved": item.get("improved"),
+                    "best_parameters": item.get("best_parameters") or {},
+                    "learning_summary": item.get("learning_summary") or {},
+                }
+                for item in recent
+            ],
+        }
 
     @staticmethod
     def _best_metric_record(trial: Any, objective: Objective) -> Dict[str, Any]:
@@ -409,6 +483,7 @@ class HPOAgent(LangGraphAgent):
             "search_space": search_space.to_dict(),
             "budgets": [item.to_dict() for item in budgets],
             "campaign": self._compact_campaign(campaign or {}),
+            "cross_study_memory": self._cross_study_memory(campaign or {}),
             "reference_profile": self._reference_search_profile(self.model_family),
             "historical_memory": memory_context,
         })
@@ -442,6 +517,7 @@ class HPOAgent(LangGraphAgent):
                 "study": self._compact_study(study),
                 "feedback": feedback,
                 "campaign": self._compact_campaign(campaign.to_dict()),
+                "cross_study_memory": self._cross_study_memory(campaign.to_dict()),
                 "reference_profile": self._reference_search_profile(self.model_family),
                 "historical_memory": memory_context,
             })
@@ -508,6 +584,8 @@ class HPOAgent(LangGraphAgent):
             "For margin, prefer narrow changes near the baseline unless completed evaluation evidence supports widening.",
             "If evaluation or resource failures occur, first reduce resource-sensitive choices such as batch_size before changing optimization parameters.",
             "Use keep_strategy when evidence is too weak; do not switch strategy only because a switch is allowed.",
+            "When phase=study_planning and cross_study_memory has prior studies, inherit the latest next_study_recommendation unless new evidence argues otherwise.",
+            "Use cross_study_memory.local_search_anchor to propose a local search_space around proven parameters for the next Study.",
             "Do not exceed hard_max_training_runs when that field is present in context.",
             "This is advisory only; deterministic validation may reject invalid fields.",
         ]

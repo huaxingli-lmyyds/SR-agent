@@ -39,6 +39,10 @@ def test_feedback_clusters_failures_and_detects_search_boundary() -> None:
     assert feedback["best_parameters"] == {"lr": 0.01}
     assert feedback["ranked_trials"][0]["trial_id"] == "a"
     assert feedback["ranked_trials"][0]["primary_metric"] == 0.1
+    assert feedback["rung_summaries"][0]["completed"] == 1
+    assert feedback["rung_summaries"][0]["failed"] == 2
+    assert feedback["parameter_observations"]["lr"]["top_values"] == [0.01]
+    assert feedback["failed_trial_examples"][0]["failure_category"] == "resource"
     assert proposal.requested_strategy == "random_search"
     assert proposal.search_space["parameters"][0]["low"] < 0.0
 
