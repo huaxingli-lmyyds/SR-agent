@@ -57,8 +57,8 @@ class AdvisoryAgentBase:
                 model=self.model_name,
                 temperature=self.temperature,
                 base_url=api_base,
-                timeout=30,
-                max_retries=1,
+                timeout=300,
+                max_retries=2,
             )
         return self._llm
 
