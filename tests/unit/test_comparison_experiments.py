@@ -119,7 +119,7 @@ def test_resnet_suite_uses_resnet_baseline_and_search_space() -> None:
         search_space_json=None,
     )
     selected = selected_variants(args)
-    assert selected[0].search_space["parameters"][1]["choices"] == [16, 24, 32, 48]
+    assert selected[0].search_space["parameters"][1]["choices"] == [16, 24, 32]
     assert any(item["name"] == "margin" for item in selected[0].search_space["parameters"])
     assert any(item["name"] == "weight_decay" for item in selected[0].search_space["parameters"])
 

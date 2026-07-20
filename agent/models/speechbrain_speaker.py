@@ -10,7 +10,7 @@ from typing import Any, Dict
 class SpeechBrainResNetAdapter:
     model_family: str = "resnet"
     implementation: str = "speechbrain"
-    default_evaluation_config: str | None = "recipes/voxceleb/hparams/verification_resnet.yaml"
+    default_evaluation_config: str | None = "verification_resnet.yaml"
 
     def validate_config(self, config: Dict[str, Any]) -> None:
         required = ("embedding_model", "classifier", "output_folder", "compute_cost")

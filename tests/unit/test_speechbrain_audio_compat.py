@@ -103,6 +103,7 @@ def test_training_configs_store_augmentation_annotations_with_augmentation_data(
     project_root = Path(__file__).parents[2]
     for relative in (
         "configs/train_ecapa_tdnn.yaml",
+        "configs/train_resnet.yaml",
         "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
         "recipes/voxceleb/hparams/train_resnet.yaml",
         "recipes/voxceleb/hparams/train_x_vectors.yaml",
@@ -118,6 +119,7 @@ def test_training_configs_use_project_augmentation_prepare() -> None:
     project_root = Path(__file__).parents[2]
     for relative in (
         "configs/train_ecapa_tdnn.yaml",
+        "configs/train_resnet.yaml",
         "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
         "recipes/voxceleb/hparams/train_resnet.yaml",
         "recipes/voxceleb/hparams/train_x_vectors.yaml",
@@ -132,6 +134,7 @@ def test_additive_margin_training_configs_are_hpo_overridable() -> None:
     project_root = Path(__file__).parents[2]
     for relative in (
         "configs/train_ecapa_tdnn.yaml",
+        "configs/train_resnet.yaml",
         "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
         "recipes/voxceleb/hparams/train_resnet.yaml",
     ):
@@ -190,6 +193,15 @@ def test_ecapa_verification_config_disables_score_norm_by_default() -> None:
         assert "score_norm: s-norm" not in source
         assert "batch_size: 32" in source
         assert "num_workers: 4" in source
+
+
+def test_resnet_verification_config_is_safe_and_explicit() -> None:
+    source = Path("configs/verification_resnet.yaml").read_text(encoding="utf-8")
+
+    assert "speechbrain.lobes.models.ResNet.ResNet" in source
+    assert "score_norm: none" in source
+    assert "batch_size: 8" in source
+    assert "num_workers: 4" in source
 
 
 def test_hpo_evaluation_uses_explicit_score_norm_mode() -> None:

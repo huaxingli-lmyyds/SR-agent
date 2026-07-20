@@ -50,14 +50,14 @@ MODEL_EXPERIMENT_DEFAULTS = {
         },
     },
     "resnet": {
-        "config_path": "recipes/voxceleb/hparams/train_resnet.yaml",
+        "config_path": "configs/train_resnet.yaml",
         "search_space": {
             "parameters": [
-                {"name": "lr", "parameter_type": "float", "low": 1e-5, "high": 3e-3, "scale": "log"},
-                {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32, 48]},
+                {"name": "lr", "parameter_type": "float", "low": 3e-4, "high": 3e-3, "scale": "log"},
+                {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
                 {"name": "sentence_len", "parameter_type": "categorical", "choices": [2.0, 3.0, 4.0]},
-                {"name": "margin", "parameter_type": "float", "low": 0.1, "high": 0.4},
-                {"name": "weight_decay", "parameter_type": "float", "low": 1e-7, "high": 1e-3, "scale": "log"},
+                {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
+                {"name": "weight_decay", "parameter_type": "float", "low": 5e-7, "high": 2e-5, "scale": "log"},
             ],
             "constraints": [],
         },
