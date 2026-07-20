@@ -1,4 +1,4 @@
-from agent.hpo import HPOService, Objective, SearchParameter, SearchSpace, StrategyProposal, TrialBudget
+from agent.hpo import HPOService, Objective, SearchParameter, SearchSpace, StrategyProposal, Trial, TrialBudget
 from agent.utils.experiment_tracker import ExperimentTracker
 import agent.hpo.service as hpo_service_module
 
@@ -203,9 +203,22 @@ def test_runtime_review_updates_only_future_candidate_generation(
         action="adjust_budget",
         budgets=[{"stage": "unsafe", "epochs": 100}],
         max_training_runs=100,
+        requested_strategy="successive_halving",
+        requested_pruner="successive_halving",
+        initial_trial_count=3,
+        promotion_limits=[1],
+        reduction_factor=4,
     ))
     fields = {item["field"] for item in blocked["decision"]["rejected_fields"]}
-    assert fields == {"budgets", "max_training_runs"}
+    assert fields == {
+        "budgets",
+        "max_training_runs",
+        "requested_strategy",
+        "requested_pruner",
+        "initial_trial_count",
+        "promotion_limits",
+        "reduction_factor",
+    }
     assert study.budgets[0].stage == "full"
     assert study.max_training_runs == 4
 
@@ -275,3 +288,50 @@ def test_record_trial_deduplicates_artifacts(
 
     saved = service.load_trial(experiment_id, trial.trial_id)
     assert saved.artifacts == [artifact]
+
+def test_warm_start_history_guides_new_study_sampler(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    warm_trial = Trial(
+        "prior_trial",
+        {"lr": 0.4},
+        TrialBudget("screen", epochs=1),
+        status="completed",
+        metrics={"eer": 0.1},
+    )
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([SearchParameter("lr", "float", low=0.0, high=1.0)]),
+        [Objective("eer", "min")],
+        [TrialBudget("screen", epochs=1), TrialBudget("confirm", epochs=2)],
+        strategy="successive_halving",
+        sampler_strategy="adaptive_search",
+        pruner_strategy="successive_halving",
+        initial_trial_count=2,
+        promotion_limits=[1],
+        max_training_runs=3,
+        warm_start_trials=[warm_trial.to_dict()],
+    )
+
+    suggestions = service.suggest_trials(study, 2)
+
+    assert study.sampler_strategy == "adaptive_search"
+    assert study.pruner_strategy == "successive_halving"
+    assert len(study.warm_start_trials) == 1
+    assert len(suggestions) == 2
+    assert all(trial.parameters["lr"] != 0.4 for trial in suggestions)
+    assert all(abs(trial.parameters["lr"] - 0.4) <= 0.11 for trial in suggestions)

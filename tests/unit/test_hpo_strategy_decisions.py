@@ -1,6 +1,7 @@
 from agent.hpo import (
     HPOService,
     Objective,
+    OptimizationPlanDecisionPolicy,
     SearchParameter,
     SearchSpace,
     StrategyDecisionPolicy,
@@ -107,3 +108,46 @@ def test_interdependent_strategy_and_search_space_are_approved_together() -> Non
     assert decision.decision == "approved"
     assert decision.adopted_strategy == "random_search"
     assert set(decision.accepted_fields) == {"requested_strategy", "search_space"}
+
+
+def test_optimization_plan_decides_sampler_pruner_and_allocation_independently() -> None:
+    service = HPOService()
+    budgets = [
+        TrialBudget("screen", epochs=2, data_fraction=0.25),
+        TrialBudget("full", epochs=8, data_fraction=1.0),
+    ]
+    decision = OptimizationPlanDecisionPolicy().review(
+        StrategyProposal(
+            action="adjust_budget",
+            requested_sampler="adaptive_search",
+            requested_pruner="successive_halving",
+            budgets=[budget.to_dict() for budget in budgets],
+            initial_trial_count=6,
+            promotion_limits=[2],
+            reduction_factor=3,
+        ),
+        base_sampler="random_search",
+        base_pruner="none",
+        base_search_space=SearchSpace([
+            SearchParameter("lr", "float", low=1e-5, high=1e-2, scale="log")
+        ]),
+        base_budgets=[TrialBudget("full", epochs=8, data_fraction=1.0)],
+        hard_max_training_runs=8,
+        objectives=[Objective("eer", "min")],
+        available_strategies=service.available_strategies(),
+        validate_plan=service.validate_study_plan,
+        base_initial_trial_count=8,
+        base_promotion_limits=[],
+    )
+
+    assert decision.decision == "approved"
+    assert decision.adopted_sampler == "adaptive_search"
+    assert decision.adopted_pruner == "successive_halving"
+    assert decision.adopted_strategy == "successive_halving"
+    assert len(decision.adopted_budgets) == 2
+    assert decision.adopted_initial_trial_count == 6
+    assert decision.adopted_promotion_limits == [2]
+    assert set(decision.accepted_fields) == {
+        "requested_sampler", "requested_pruner", "budgets", "initial_trial_count",
+        "promotion_limits", "reduction_factor",
+    }

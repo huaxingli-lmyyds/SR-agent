@@ -57,6 +57,7 @@ The base package intentionally does not install `torch`, `torchaudio`, or `speec
 
 - `demo/`: real runnable demo framework for submission.
 - `scripts/experiments/`: comparison and model HPO launchers.
+- `scripts/evaluation/`: evaluate a specific trained checkpoint.
 - `scripts/admin/`: archive and clear experiment records/artifacts.
 - `scripts/tools/`: environment and runtime inspection utilities.
 
@@ -64,12 +65,29 @@ Common commands:
 
 ```bash
 python scripts/tools/check_remote_environment.py --require-cuda
+python scripts/evaluation/evaluate_checkpoint.py --help
 bash scripts/experiments/run_comparison_experiments.sh --suite smoke --dry-run
 bash scripts/experiments/run_resnet_hpo_comparison.sh --dry-run
 bash scripts/experiments/run_xvector_hpo_comparison.sh --dry-run
 bash scripts/admin/archive_experiments.sh --model-family ecapa_tdnn
 bash scripts/admin/clear_experiments.sh --model-family ecapa_tdnn
 ```
+
+Evaluate one ECAPA-TDNN training checkpoint on an explicit verification list:
+
+```bash
+python scripts/evaluation/evaluate_checkpoint.py \
+  --checkpoint /path/to/output/save/CKPT+2026-07-20+11-26-17+00 \
+  --data-folder /hy-tmp/voxceleb1 \
+  --verification-file /hy-tmp/lists/veri_test2.txt \
+  --device cuda \
+  --batch-size 8 \
+  --output-dir results/checkpoint_evaluation/ecapa_trial_5c4a59ec3d
+```
+
+The command writes per-pair cosine scores to `scores.txt` and the EER/minDCF
+summary to `evaluation_result.json`. The verification YAML must match the
+checkpoint architecture; use `--config` when evaluating another model.
 
 ## Add a New Model
 

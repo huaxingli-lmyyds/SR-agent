@@ -64,6 +64,7 @@ class HPOFeedbackAnalyzer:
             "rung_summaries": self._rung_summaries(trials, objective.metric, objective.mode),
             "parameter_observations": self._parameter_observations(completed, objective.metric, objective.mode),
             "failed_trial_examples": self._failed_trial_examples(trials),
+            "cost_summary": self._cost_summary(trials),
         }
 
     def propose(
@@ -73,7 +74,7 @@ class HPOFeedbackAnalyzer:
         available_strategies: Optional[List[str]] = None,
     ) -> StrategyProposal:
         """Create a conservative deterministic proposal when no LLM reviewer is enabled."""
-        strategy = study.candidate_strategy or study.strategy
+        strategy = study.candidate_strategy or study.sampler_strategy or study.strategy
         reasons: List[str] = []
         search_space = None
         if feedback["failure_rate"] >= 0.5:
@@ -196,6 +197,32 @@ class HPOFeedbackAnalyzer:
                 }
         return summary
 
+    @staticmethod
+    def _cost_summary(trials: List[Trial]) -> Dict[str, Any]:
+        durations: Dict[str, List[float]] = {
+            "training": [],
+            "evaluation": [],
+        }
+        for trial in trials:
+            for stage in durations:
+                stage_cost = trial.cost.get(stage) or {}
+                value = stage_cost.get("duration_seconds")
+                if isinstance(value, (int, float)) and value >= 0:
+                    durations[stage].append(float(value))
+        summary: Dict[str, Any] = {
+            "observed_trial_count": len(trials),
+            "stages": {},
+        }
+        for stage, values in durations.items():
+            summary["stages"][stage] = {
+                "observations": len(values),
+                "average_duration_seconds": (
+                    round(sum(values) / len(values), 3) if values else None
+                ),
+                "max_duration_seconds": round(max(values), 3) if values else None,
+                "total_duration_seconds": round(sum(values), 3),
+            }
+        return summary
     @staticmethod
     def _failed_trial_examples(trials: List[Trial]) -> List[Dict[str, Any]]:
         examples: List[Dict[str, Any]] = []

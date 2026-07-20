@@ -1,0 +1,13 @@
+{
+  "schema": {
+    "diagnostics": [],
+    "suggested_operations": [],
+    "notes": []
+  },
+  "rules": [
+    "Return raw JSON only.",
+    "Do not use markdown, code fences, comments, or explanatory text.",
+    "suggested_operations are advisory only and will be validated before execution.",
+    "Only suggest operations when they are useful for the current dataset goal."
+  ]
+}

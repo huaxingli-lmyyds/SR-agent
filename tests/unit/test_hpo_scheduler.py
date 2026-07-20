@@ -180,3 +180,47 @@ def test_successive_halving_reviewer_runs_at_stage_boundaries(
     assert "after_rung_0" in calls
     assert "after_1_trials" not in calls
     assert result.strategy_reviews[0]["trigger"] == "after_rung_0"
+
+def test_scheduler_uses_pruner_independently_from_sampler(
+    tmp_path,
+    minimal_config,
+    dataset_dir,
+    monkeypatch,
+) -> None:
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    monkeypatch.setattr(
+        hpo_service_module,
+        "get_experiment_artifact_dir",
+        lambda *args, **kwargs: tmp_path / "hpo_artifacts",
+    )
+    service = HPOService(tracker)
+    study = service.create_study(
+        experiment_id,
+        SearchSpace([SearchParameter("lr", "categorical", choices=[0.1, 0.2, 0.3])]),
+        [Objective("eer", "min")],
+        [TrialBudget("screen", epochs=1), TrialBudget("confirm", epochs=2)],
+        strategy="random_search",
+        sampler_strategy="random_search",
+        pruner_strategy="successive_halving",
+        initial_trial_count=3,
+        promotion_limits=[1],
+        max_training_runs=4,
+    )
+
+    result = HPOScheduler(
+        service,
+        lambda trial, attempt: {
+            "status": "success",
+            "metrics": {"eer": float(trial.parameters["lr"])},
+        },
+    ).run(study)
+
+    assert result.study.status == "completed"
+    assert result.study.strategy == "random_search"
+    assert result.study.pruner_strategy == "successive_halving"
+    assert len([trial for trial in result.trials if trial.rung == 0]) == 3
+    assert len([trial for trial in result.trials if trial.rung == 1]) == 1

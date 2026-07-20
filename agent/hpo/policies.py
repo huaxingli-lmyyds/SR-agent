@@ -100,6 +100,58 @@ class HPOPlanningPolicy:
             return "tpe"
         return "adaptive_search" if max_training_runs >= 5 else "random_search"
 
+    def select_components(
+        self,
+        requested_strategy: str,
+        requested_sampler: Optional[str],
+        requested_pruner: Optional[str],
+        search_space: SearchSpace,
+        budgets: List[TrialBudget],
+        max_training_runs: int,
+        available: List[str],
+    ) -> tuple[str, str]:
+        """Resolve independent candidate sampling and fidelity pruning policies."""
+        sampler_request = str(requested_sampler or "auto")
+        pruner_request = str(requested_pruner or "auto")
+        legacy_request = str(requested_strategy or "auto")
+
+        if sampler_request == "auto":
+            if legacy_request not in {"auto", "successive_halving"}:
+                sampler_request = legacy_request
+            else:
+                sampler_request = self._select_sampler(
+                    search_space,
+                    max_training_runs,
+                    available,
+                )
+        if sampler_request == "successive_halving" or sampler_request not in available:
+            raise ValueError(f"unsupported HPO sampler: {sampler_request}")
+
+        if pruner_request == "auto":
+            pruner_request = (
+                "successive_halving"
+                if legacy_request == "successive_halving" or len(budgets) > 1
+                else "none"
+            )
+        if pruner_request not in {"none", "successive_halving"}:
+            raise ValueError(f"unsupported HPO pruner: {pruner_request}")
+        if pruner_request == "successive_halving" and len(budgets) < 2:
+            raise ValueError("successive_halving pruner requires at least two budget rungs")
+        return sampler_request, pruner_request
+
+    def _select_sampler(
+        self,
+        search_space: SearchSpace,
+        max_training_runs: int,
+        available: List[str],
+    ) -> str:
+        cardinality = self.grid_cardinality(search_space)
+        if cardinality is not None and cardinality <= max_training_runs:
+            return "grid_search"
+        if max_training_runs >= 8 and "tpe" in available:
+            return "tpe"
+        return "adaptive_search" if max_training_runs >= 5 else "random_search"
+
     @staticmethod
     def grid_cardinality(search_space: SearchSpace) -> Optional[int]:
         sizes = []
@@ -324,6 +376,279 @@ class StrategyDecisionPolicy:
             reason_codes=reasons,
         )
 
+
+class OptimizationPlanDecisionPolicy:
+    """Review independent sampler, pruner, and allocation changes."""
+
+    def __init__(self, planning_policy: Optional[HPOPlanningPolicy] = None) -> None:
+        self.planning_policy = planning_policy or HPOPlanningPolicy()
+        self.strategy_policy = StrategyDecisionPolicy(self.planning_policy)
+
+    def review(
+        self,
+        proposal: Optional[StrategyProposal],
+        *,
+        base_sampler: str,
+        base_pruner: str,
+        base_search_space: SearchSpace,
+        base_budgets: List[TrialBudget],
+        hard_max_training_runs: int,
+        objectives: List[Objective],
+        available_strategies: List[str],
+        validate_plan: Callable[..., None],
+        base_initial_trial_count: Optional[int] = None,
+        base_promotion_limits: Optional[List[int]] = None,
+        base_reduction_factor: int = 3,
+    ) -> StrategyDecisionRecord:
+        sampler_request = None
+        if proposal is not None:
+            sampler_request = proposal.requested_sampler
+            if sampler_request is None and proposal.requested_strategy not in {
+                None,
+                "auto",
+                "successive_halving",
+            }:
+                sampler_request = proposal.requested_strategy
+
+        common_proposal = None
+        if proposal is not None:
+            common_proposal = StrategyProposal(
+                action=proposal.action,
+                requested_strategy=sampler_request,
+                search_space=proposal.search_space,
+                budgets=proposal.budgets,
+                max_training_runs=proposal.max_training_runs,
+                reason_codes=proposal.reason_codes,
+                evidence=proposal.evidence,
+                expected_effect=proposal.expected_effect,
+                confidence=proposal.confidence,
+            )
+            common_proposal.proposal_id = proposal.proposal_id
+            common_proposal.created_at = proposal.created_at
+
+        validation_pruner = base_pruner
+        if proposal is not None:
+            proposed_pruner = proposal.requested_pruner
+            if proposed_pruner is None and proposal.requested_strategy == "successive_halving":
+                proposed_pruner = "successive_halving"
+            if proposed_pruner in {"none", "successive_halving"}:
+                validation_pruner = str(proposed_pruner)
+
+        def validate_sampler_plan(
+            search_space: SearchSpace,
+            plan_objectives: List[Objective],
+            plan_budgets: List[TrialBudget],
+            *,
+            strategy: str,
+            **kwargs: Any,
+        ) -> None:
+            effective_pruner = (
+                validation_pruner if plan_budgets != base_budgets else base_pruner
+            )
+            validate_plan(
+                search_space,
+                plan_objectives,
+                plan_budgets,
+                strategy=(
+                    "successive_halving"
+                    if effective_pruner == "successive_halving"
+                    else strategy
+                ),
+                sampler_strategy=strategy,
+                pruner_strategy=effective_pruner,
+                **kwargs,
+            )
+
+        decision = self.strategy_policy.review(
+            common_proposal,
+            base_strategy=base_sampler,
+            base_search_space=base_search_space,
+            base_budgets=base_budgets,
+            hard_max_training_runs=hard_max_training_runs,
+            objectives=objectives,
+            available_strategies=[
+                item for item in available_strategies
+                if item != "successive_halving"
+            ],
+            validate_plan=validate_sampler_plan,
+        )
+        if proposal is not None:
+            decision.proposal_id = proposal.proposal_id
+            decision.proposal = proposal.to_dict()
+
+        accepted = list(decision.accepted_fields)
+        rejected = list(decision.rejected_fields)
+        if proposal is not None and proposal.requested_sampler is not None:
+            accepted = [
+                "requested_sampler" if item == "requested_strategy" else item
+                for item in accepted
+            ]
+
+        sampler = decision.adopted_strategy
+        pruner = base_pruner
+        initial_count = min(
+            int(base_initial_trial_count or decision.adopted_max_training_runs),
+            decision.adopted_max_training_runs,
+        )
+        promotion_limits = list(base_promotion_limits or [])
+        reduction_factor = int(base_reduction_factor)
+
+        def reject(field: str, reason: str) -> None:
+            rejected.append({"field": field, "reason": reason})
+
+        def validate_components(
+            next_pruner: str,
+            next_initial: int,
+            next_promotions: List[int],
+            next_reduction: int,
+        ) -> None:
+            legacy_strategy = (
+                "successive_halving"
+                if next_pruner == "successive_halving"
+                else sampler
+            )
+            validate_plan(
+                search_space_from_record(decision.adopted_search_space),
+                objectives,
+                [TrialBudget(**item) for item in decision.adopted_budgets],
+                strategy=legacy_strategy,
+                sampler_strategy=sampler,
+                pruner_strategy=next_pruner,
+                max_trials=decision.adopted_max_training_runs,
+                initial_trial_count=next_initial,
+                promotion_limits=next_promotions,
+                max_training_runs=decision.adopted_max_training_runs,
+                reduction_factor=next_reduction,
+            )
+
+        if proposal is not None:
+            requested_pruner = proposal.requested_pruner
+            pruner_field = "requested_pruner"
+            if requested_pruner is None and proposal.requested_strategy == "successive_halving":
+                requested_pruner = "successive_halving"
+                pruner_field = "requested_strategy"
+
+            allocation_fields = [
+                field for field, value in (
+                    (pruner_field, requested_pruner),
+                    ("initial_trial_count", proposal.initial_trial_count),
+                    ("promotion_limits", proposal.promotion_limits),
+                    ("reduction_factor", proposal.reduction_factor),
+                )
+                if value is not None
+            ]
+            allocation_applied = False
+            if allocation_fields:
+                try:
+                    candidate_pruner = str(requested_pruner or pruner)
+                    candidate_initial = int(
+                        proposal.initial_trial_count
+                        if proposal.initial_trial_count is not None else initial_count
+                    )
+                    candidate_promotions = (
+                        [int(item) for item in proposal.promotion_limits]
+                        if proposal.promotion_limits is not None
+                        else list(promotion_limits)
+                    )
+                    if candidate_pruner == "none" and proposal.promotion_limits is None:
+                        candidate_promotions = []
+                    candidate_reduction = int(
+                        proposal.reduction_factor
+                        if proposal.reduction_factor is not None else reduction_factor
+                    )
+                    validate_components(
+                        candidate_pruner,
+                        candidate_initial,
+                        candidate_promotions,
+                        candidate_reduction,
+                    )
+                    pruner = candidate_pruner
+                    initial_count = candidate_initial
+                    promotion_limits = candidate_promotions
+                    reduction_factor = candidate_reduction
+                    accepted.extend(allocation_fields)
+                    allocation_applied = True
+                except Exception:
+                    # An invalid combined plan falls back to independent field review
+                    # so harmless parts of an LLM proposal can still be retained.
+                    pass
+
+            if not allocation_applied:
+                if requested_pruner is not None:
+                    try:
+                        candidate_pruner = str(requested_pruner)
+                        candidate_promotions = promotion_limits
+                        if candidate_pruner == "none":
+                            candidate_promotions = []
+                        validate_components(
+                            candidate_pruner,
+                            initial_count,
+                            candidate_promotions,
+                            reduction_factor,
+                        )
+                        pruner = candidate_pruner
+                        promotion_limits = candidate_promotions
+                        if pruner_field not in accepted:
+                            accepted.append(pruner_field)
+                    except Exception as exc:
+                        reject(pruner_field, str(exc))
+
+                for field, raw_value in (
+                    ("reduction_factor", proposal.reduction_factor),
+                    ("initial_trial_count", proposal.initial_trial_count),
+                    ("promotion_limits", proposal.promotion_limits),
+                ):
+                    if raw_value is None:
+                        continue
+                    try:
+                        next_reduction = (
+                            int(raw_value) if field == "reduction_factor" else reduction_factor
+                        )
+                        next_initial = (
+                            int(raw_value) if field == "initial_trial_count" else initial_count
+                        )
+                        next_promotions = (
+                            [int(item) for item in raw_value]
+                            if field == "promotion_limits" else promotion_limits
+                        )
+                        validate_components(
+                            pruner,
+                            next_initial,
+                            next_promotions,
+                            next_reduction,
+                        )
+                        reduction_factor = next_reduction
+                        initial_count = next_initial
+                        promotion_limits = next_promotions
+                        accepted.append(field)
+                    except Exception as exc:
+                        reject(field, str(exc))
+        decision.adopted_sampler = sampler
+        decision.adopted_pruner = pruner
+        decision.adopted_strategy = (
+            "successive_halving" if pruner == "successive_halving" else sampler
+        )
+        decision.adopted_initial_trial_count = initial_count
+        decision.adopted_promotion_limits = promotion_limits
+        decision.adopted_reduction_factor = reduction_factor
+        decision.accepted_fields = list(dict.fromkeys(accepted))
+        decision.rejected_fields = rejected
+        if rejected:
+            decision.decision = (
+                "approved_with_changes" if decision.accepted_fields else "rejected"
+            )
+            decision.reason_codes = [
+                "proposal_partially_approved"
+                if decision.accepted_fields else "proposal_rejected"
+            ]
+        return decision
+
+
+def search_space_from_record(data: Dict[str, Any]) -> SearchSpace:
+    return SearchSpace(
+        [SearchParameter(**item) for item in data.get("parameters") or []],
+        list(data.get("constraints") or []),
+    )
 
 class EarlyStoppingPolicy:
     def __init__(self, patience: int = 3, min_improvement: float = 0.0) -> None:

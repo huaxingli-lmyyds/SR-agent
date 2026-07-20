@@ -128,3 +128,22 @@ def test_registry_hides_unavailable_optional_strategy(monkeypatch) -> None:
     assert "tpe" not in registry.names()
     with __import__("pytest").raises(ValueError, match="optional dependency"):
         registry.get("tpe")
+
+def test_auto_components_combine_tpe_with_successive_halving() -> None:
+    policy = HPOPlanningPolicy()
+    continuous = SearchSpace([SearchParameter("lr", "float", low=1e-5, high=1e-2)])
+    budgets = [TrialBudget("screen"), TrialBudget("confirm")]
+    available = ["random_search", "grid_search", "adaptive_search", "tpe", "successive_halving"]
+
+    sampler, pruner = policy.select_components(
+        "auto",
+        None,
+        None,
+        continuous,
+        budgets,
+        12,
+        available,
+    )
+
+    assert sampler == "tpe"
+    assert pruner == "successive_halving"

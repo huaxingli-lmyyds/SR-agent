@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,22 +11,24 @@ from typing import Any, Dict, List, Optional
 from agent.agents.base_agent import LangGraphAgent
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.hpo import (
+    HPOFeedbackAnalyzer,
     HPOPlanningPolicy,
     HPOScheduler,
     HPOService,
     Objective,
     OptimizationCampaign,
+    OptimizationPlanDecisionPolicy,
     CampaignPolicy,
     RetryPolicy,
     SearchParameter,
     SearchSpace,
-    StrategyDecisionPolicy,
     StrategyProposal,
     TrialBudget,
 )
 from agent.data_processing.handoff import resolve_data_handoff
 from agent.memory import EpisodeMemory, MemoryQuery, MemoryScope, MemoryService
 from agent.models import get_model_adapter
+from agent.prompt import render_prompt
 from agent.utils import ConfigParser, ExperimentTracker
 from agent.utils.path_tool import (
     get_config_file,
@@ -54,7 +57,7 @@ class HPOAgent(LangGraphAgent):
         runner: str = "speechbrain",
         enable_llm_advisor: bool = False,
         planning_policy: Optional[HPOPlanningPolicy] = None,
-        decision_policy: Optional[StrategyDecisionPolicy] = None,
+        decision_policy: Optional[OptimizationPlanDecisionPolicy] = None,
     ) -> None:
         super().__init__(model_name, temperature, max_iterations, verbose)
         self.config_path = str(resolve_config_path(config_path))
@@ -65,7 +68,7 @@ class HPOAgent(LangGraphAgent):
         self.runner = runner
         self.enable_llm_advisor = enable_llm_advisor
         self.planning_policy = planning_policy or HPOPlanningPolicy()
-        self.decision_policy = decision_policy or StrategyDecisionPolicy(self.planning_policy)
+        self.decision_policy = decision_policy or OptimizationPlanDecisionPolicy(self.planning_policy)
         self.memory_service = MemoryService()
         self.memory_scope = MemoryScope(
             agent_type="hpo_agent",
@@ -86,16 +89,25 @@ class HPOAgent(LangGraphAgent):
         search_space = self._resolve_search_space(request.context.get("search_space"))
         per_study_limit = int(request.budget.get("max_training_runs") or self.max_iterations)
         requested_strategy = str(request.context.get("strategy") or "auto")
-        budgets = self._build_budgets(request.context.get("budgets"), requested_strategy)
+        requested_sampler = request.context.get("sampler")
+        requested_pruner = request.context.get("pruner")
+        budgets = self._build_budgets(
+            request.context.get("budgets"),
+            requested_pruner or requested_strategy,
+        )
         self._validate_search_budget_compatibility(search_space, budgets)
         service = HPOService(tracker)
-        base_strategy = self.planning_policy.select_strategy(
+        base_sampler, base_pruner = self.planning_policy.select_components(
             requested_strategy,
+            str(requested_sampler) if requested_sampler is not None else None,
+            str(requested_pruner) if requested_pruner is not None else None,
             search_space,
             budgets,
             per_study_limit,
-            service.available_strategies(),
+            service.available_samplers(),
         )
+        if base_pruner == "none" and len(budgets) > 1:
+            budgets = [budgets[-1]]
         objectives = [Objective(
             str(request.context.get("primary_metric", "eer")),
             str(request.context.get("metric_mode", "min")),
@@ -114,37 +126,127 @@ class HPOAgent(LangGraphAgent):
         study_results: List[Dict[str, Any]] = []
         best_trial = None
         best_experiment_id = None
-        strategy = base_strategy
+        sampler = base_sampler
+        pruner = base_pruner
+        reduction_factor = int(request.budget.get("reduction_factor", 3))
+        campaign_history: List[Dict[str, Any]] = []
         for study_index in range(max_studies):
             remaining = campaign_policy.remaining_runs(campaign)
             run_limit = min(per_study_limit, remaining) if remaining is not None else per_study_limit
             if run_limit <= 0:
                 campaign.status, campaign.stop_reason = "completed", "max_total_training_runs_reached"
                 break
+            base_initial_count = min(
+                int(
+                    request.budget.get("initial_trial_count")
+                    or self._default_initial_trial_count(
+                        "successive_halving" if pruner == "successive_halving" else sampler,
+                        budgets,
+                        run_limit,
+                    )
+                ),
+                run_limit,
+            )
+            base_promotions = (
+                list(request.budget.get("promotion_limits") or self._default_promotion_limits(
+                    base_initial_count,
+                    budgets,
+                    reduction_factor,
+                ))
+                if pruner == "successive_halving"
+                else []
+            )
             proposal = (
-                self._planning_proposal(request, search_space, budgets, strategy, run_limit, campaign.to_dict())
+                self._planning_proposal(
+                    request,
+                    search_space,
+                    budgets,
+                    sampler,
+                    pruner,
+                    run_limit,
+                    base_initial_count,
+                    base_promotions,
+                    reduction_factor,
+                    campaign.to_dict(),
+                )
                 if self.enable_llm_advisor else None
             )
             decision = self.decision_policy.review(
                 proposal,
-                base_strategy=strategy,
+                base_sampler=sampler,
+                base_pruner=pruner,
                 base_search_space=search_space,
                 base_budgets=budgets,
                 hard_max_training_runs=run_limit,
                 objectives=objectives,
-                available_strategies=service.available_strategies(),
+                available_strategies=service.available_samplers(),
                 validate_plan=service.validate_study_plan,
+                base_initial_trial_count=base_initial_count,
+                base_promotion_limits=base_promotions,
+                base_reduction_factor=reduction_factor,
             )
-            strategy = decision.adopted_strategy
+            sampler = str(decision.adopted_sampler or sampler)
+            pruner = str(decision.adopted_pruner or pruner)
             search_space = self._resolve_search_space(decision.adopted_search_space)
-            budgets = self._build_budgets(decision.adopted_budgets, strategy)
+            budgets = self._build_budgets(decision.adopted_budgets, pruner)
+            if pruner == "none" and len(budgets) > 1:
+                budgets = [budgets[-1]]
             self._validate_search_budget_compatibility(search_space, budgets)
             run_limit = decision.adopted_max_training_runs
+            reduction_factor = decision.adopted_reduction_factor
+            initial_count = min(
+                int(decision.adopted_initial_trial_count or run_limit),
+                run_limit,
+            )
+            promotion_limits = (
+                list(decision.adopted_promotion_limits)
+                if pruner == "successive_halving"
+                else []
+            )
+            if initial_count + sum(promotion_limits) > run_limit:
+                initial_count = self._default_initial_trial_count(
+                    "successive_halving" if pruner == "successive_halving" else sampler,
+                    budgets,
+                    run_limit,
+                )
+                promotion_limits = (
+                    self._default_promotion_limits(initial_count, budgets, reduction_factor)
+                    if pruner == "successive_halving"
+                    else []
+                )
+            decision.adopted_initial_trial_count = initial_count
+            decision.adopted_promotion_limits = promotion_limits
+            legacy_strategy = (
+                "successive_halving"
+                if pruner == "successive_halving"
+                else sampler
+            )
+            resource_profile = self._resource_snapshot(
+                request.context.get("runtime_options"),
+                request.context.get("resource_profile"),
+            )
+            search_budget_analysis = self._search_budget_analysis(
+                search_space,
+                budgets,
+                run_limit,
+                initial_count,
+                promotion_limits,
+                reduction_factor,
+                campaign.to_dict(),
+            )
             adopted_plan = {
-                "strategy": strategy,
+                "strategy": legacy_strategy,
+                "sampler": sampler,
+                "pruner": pruner,
                 "search_space": search_space.to_dict(),
                 "budgets": [budget.to_dict() for budget in budgets],
                 "max_training_runs": run_limit,
+                "initial_trial_count": initial_count,
+                "promotion_limits": promotion_limits,
+                "reduction_factor": reduction_factor,
+                "warm_start_trial_count": len(campaign_history),
+                "resource_profile": resource_profile,
+                "search_budget_analysis": search_budget_analysis,
             }
             experiment_id = tracker.create_hpo_experiment(
                 config_path=self.config_path,
@@ -171,17 +273,21 @@ class HPOAgent(LangGraphAgent):
                     "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
                 }},
             )
-            initial_count = min(
-                int(request.budget.get("initial_trial_count") or self._default_initial_trial_count(strategy, budgets, run_limit)),
-                run_limit,
-            )
-            default_promotions = self._default_promotion_limits(initial_count, budgets)
-            promotion_limits = [] if strategy != "successive_halving" else request.budget.get("promotion_limits", default_promotions)
             study = service.create_study(
-                experiment_id, search_space, objectives, budgets, strategy=strategy,
-                max_trials=run_limit, initial_trial_count=initial_count, promotion_limits=promotion_limits,
+                experiment_id,
+                search_space,
+                objectives,
+                budgets,
+                strategy=legacy_strategy,
+                sampler_strategy=sampler,
+                pruner_strategy=pruner,
+                reduction_factor=reduction_factor,
+                max_trials=run_limit,
+                initial_trial_count=initial_count,
+                promotion_limits=promotion_limits,
                 max_training_runs=run_limit,
                 min_completed_per_rung=int(request.budget.get("min_completed_per_rung", 1)),
+                warm_start_trials=campaign_history,
                 random_seed=int(config.get("seed", 0) or 0) + study_index,
             )
             tracker.update_hpo_experiment(
@@ -212,7 +318,27 @@ class HPOAgent(LangGraphAgent):
             campaign.study_summaries[-1]["best_parameters"] = current_best.parameters
             campaign.study_summaries[-1]["best_metrics"] = self._best_metric_record(current_best, objectives[0])
             campaign.study_summaries[-1]["strategy_reviews"] = scheduled.study.strategy_reviews
+            campaign.study_summaries[-1]["sampler"] = scheduled.study.candidate_strategy or scheduled.study.sampler_strategy
+            campaign.study_summaries[-1]["pruner"] = scheduled.study.pruner_strategy
+            campaign.study_summaries[-1]["warm_start_trial_count"] = len(scheduled.study.warm_start_trials)
             campaign.study_summaries[-1]["learning_summary"] = self._study_learning_summary(scheduled.study, current_best, objectives[0])
+            study_feedback = HPOFeedbackAnalyzer().analyze(
+                scheduled.study,
+                scheduled.trials,
+            )
+            campaign.study_summaries[-1]["resource_summary"] = {
+                "failure_rate": study_feedback.get("failure_rate"),
+                "failure_clusters": study_feedback.get("failure_clusters") or {},
+                "cost_summary": study_feedback.get("cost_summary") or {},
+                "rung_summaries": study_feedback.get("rung_summaries") or [],
+            }
+            campaign_history = self._merge_campaign_history(
+                campaign_history,
+                scheduled.trials,
+                objectives[0],
+                scheduled.study.pruner_strategy or "none",
+            )
+            campaign.study_summaries[-1]["campaign_history_count"] = len(campaign_history)
             study_results.append({"experiment_id": experiment_id, "study_id": scheduled.study.study_id, "status": scheduled.study.status, "trial_count": len(scheduled.trials), "best_trial_id": scheduled.study.best_trial_id})
             if best_trial is None or (
                 current_value < float(best_trial.metrics[objectives[0].metric])
@@ -236,10 +362,13 @@ class HPOAgent(LangGraphAgent):
             )
             if not campaign_policy.should_continue(campaign):
                 break
-            strategy = scheduled.study.candidate_strategy or scheduled.study.strategy
+            sampler = (
+                scheduled.study.candidate_strategy
+                or scheduled.study.sampler_strategy
+                or sampler
+            )
+            pruner = scheduled.study.pruner_strategy or pruner
             search_space = scheduled.study.search_space
-            if strategy != "successive_halving" and len(budgets) > 1:
-                budgets = [budgets[-1]]
 
         if best_trial is None or best_experiment_id is None:
             raise RuntimeError("optimization campaign produced no valid completed Study")
@@ -253,7 +382,12 @@ class HPOAgent(LangGraphAgent):
         self.memory_service.remember_episode(EpisodeMemory(
             agent_type="hpo_agent",
             objective=request.objective,
-            action={"strategy": strategy, "best_config": best_trial.parameters},
+            action={
+                "strategy": "successive_halving" if pruner == "successive_halving" else sampler,
+                "sampler": sampler,
+                "pruner": pruner,
+                "best_config": best_trial.parameters,
+            },
             outcome={"best_metrics": best_trial.metrics, "campaign": campaign.to_dict(), "duration": duration},
             summary=f"campaign completed {len(campaign.study_summaries)} studies: {campaign.stop_reason}",
             experiment_ids=[item["experiment_id"] for item in study_results],
@@ -263,7 +397,9 @@ class HPOAgent(LangGraphAgent):
         return AgentTaskResult(
             status="success",
             summary={
-                "strategy": strategy,
+                "strategy": "successive_halving" if pruner == "successive_halving" else sampler,
+                "sampler": sampler,
+                "pruner": pruner,
                 "best_trial_id": best_trial.trial_id,
                 "best_parameters": best_trial.parameters,
                 "campaign": campaign.to_dict(),
@@ -278,12 +414,74 @@ class HPOAgent(LangGraphAgent):
         )
 
     @staticmethod
+    def _merge_campaign_history(
+        existing: List[Dict[str, Any]],
+        trials: List[Any],
+        objective: Objective,
+        pruner: str,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Keep fidelity-compatible observations for subsequent Study samplers."""
+        merged = {
+            json.dumps(item.get("parameters") or {}, sort_keys=True, default=str): dict(item)
+            for item in existing
+            if isinstance(item, dict)
+        }
+        for trial in trials:
+            if pruner == "successive_halving" and int(getattr(trial, "rung", 0)) != 0:
+                continue
+            value = (getattr(trial, "metrics", {}) or {}).get(objective.metric)
+            if not isinstance(value, (int, float)):
+                continue
+            if getattr(trial, "status", None) not in {"completed", "promoted"}:
+                continue
+            parameters = dict(getattr(trial, "parameters", {}) or {})
+            signature = json.dumps(parameters, sort_keys=True, default=str)
+            merged[signature] = {
+                "trial_id": f"warm_{getattr(trial, 'trial_id', signature)}",
+                "parameters": parameters,
+                "budget": trial.budget.to_dict(),
+                "status": "completed",
+                "parent_trial_id": getattr(trial, "parent_trial_id", None),
+                "rung": int(getattr(trial, "rung", 0)),
+                "metrics": dict(getattr(trial, "metrics", {}) or {}),
+                "intermediate_metrics": [],
+                "cost": {"source": "prior_study"},
+                "artifacts": [],
+                "stop_reason": None,
+                "created_at": getattr(trial, "created_at", ""),
+                "updated_at": getattr(trial, "updated_at", ""),
+            }
+        return list(merged.values())[-max(int(limit), 1):]
+
+    @staticmethod
     def _study_learning_summary(study: Any, best_trial: Any, objective: Objective) -> Dict[str, Any]:
         reviews = list(getattr(study, "strategy_reviews", []) or [])
         last_review = reviews[-1] if reviews else {}
         decision = last_review.get("decision") or {}
         proposal = last_review.get("proposal") or {}
-        final_strategy = getattr(study, "candidate_strategy", None) or getattr(study, "strategy", None)
+        final_sampler = (
+            getattr(study, "candidate_strategy", None)
+            or getattr(study, "sampler_strategy", None)
+            or (
+                "random_search"
+                if getattr(study, "strategy", None) == "successive_halving"
+                else getattr(study, "strategy", None)
+            )
+        )
+        final_pruner = (
+            getattr(study, "pruner_strategy", None)
+            or (
+                "successive_halving"
+                if getattr(study, "strategy", None) == "successive_halving"
+                else "none"
+            )
+        )
+        final_strategy = (
+            "successive_halving"
+            if final_pruner == "successive_halving"
+            else final_sampler
+        )
         final_search_space = study.search_space.to_dict()
         return {
             "local_search_anchor": {
@@ -293,8 +491,11 @@ class HPOAgent(LangGraphAgent):
                 "mode": objective.mode,
                 "value": (getattr(best_trial, "metrics", {}) or {}).get(objective.metric),
             },
-            "final_strategy": getattr(study, "strategy", None),
-            "final_candidate_strategy": final_strategy,
+            "final_strategy": final_strategy,
+            "final_candidate_strategy": final_sampler,
+            "final_sampler": final_sampler,
+            "final_pruner": final_pruner,
+            "warm_start_trial_count": len(getattr(study, "warm_start_trials", []) or []),
             "final_search_space": final_search_space,
             "last_review": {
                 "trigger": last_review.get("trigger"),
@@ -307,6 +508,8 @@ class HPOAgent(LangGraphAgent):
             },
             "next_study_recommendation": {
                 "strategy": final_strategy,
+                "sampler": final_sampler,
+                "pruner": final_pruner,
                 "search_space": final_search_space,
                 "anchor_parameters": dict(getattr(best_trial, "parameters", {}) or {}),
                 "reason_codes": proposal.get("reason_codes") or [],
@@ -459,8 +662,12 @@ class HPOAgent(LangGraphAgent):
         request: AgentTaskRequest,
         search_space: SearchSpace,
         budgets: List[TrialBudget],
-        selected_strategy: str,
+        selected_sampler: str,
+        selected_pruner: str,
         hard_max_training_runs: int,
+        initial_trial_count: int,
+        promotion_limits: List[int],
+        reduction_factor: int,
         campaign: Optional[Dict[str, Any]] = None,
     ) -> StrategyProposal:
         memory_context = self.memory_service.format_context(MemoryQuery(
@@ -475,11 +682,39 @@ class HPOAgent(LangGraphAgent):
             "objective": request.objective,
             "task_type": self.task_type,
             "model_family": self.model_family,
-            "selected_strategy": selected_strategy,
+            "selected_strategy": (
+                "successive_halving"
+                if selected_pruner == "successive_halving"
+                else selected_sampler
+            ),
+            "selected_sampler": selected_sampler,
+            "selected_pruner": selected_pruner,
+            "available_samplers": HPOService.available_samplers(),
+            "available_pruners": HPOService.available_pruners(),
             "requested_strategy": request.context.get("strategy", "auto"),
+            "requested_sampler": request.context.get("sampler"),
+            "requested_pruner": request.context.get("pruner"),
             "primary_metric": request.context.get("primary_metric", "eer"),
             "metric_mode": request.context.get("metric_mode", "min"),
             "hard_max_training_runs": hard_max_training_runs,
+            "allocation": {
+                "initial_trial_count": initial_trial_count,
+                "promotion_limits": promotion_limits,
+                "reduction_factor": reduction_factor,
+            },
+            "resource_profile": self._resource_snapshot(
+                request.context.get("runtime_options"),
+                request.context.get("resource_profile"),
+            ),
+            "search_budget_analysis": self._search_budget_analysis(
+                search_space,
+                budgets,
+                hard_max_training_runs,
+                initial_trial_count,
+                promotion_limits,
+                reduction_factor,
+                campaign,
+            ),
             "search_space": search_space.to_dict(),
             "budgets": [item.to_dict() for item in budgets],
             "campaign": self._compact_campaign(campaign or {}),
@@ -515,7 +750,23 @@ class HPOAgent(LangGraphAgent):
                 "task_type": self.task_type,
                 "model_family": self.model_family,
                 "study": self._compact_study(study),
+                "available_samplers": HPOService.available_samplers(),
+                "available_pruners": HPOService.available_pruners(),
+                "runtime_mutable_fields": ["requested_sampler", "search_space"],
                 "feedback": feedback,
+                "resource_profile": self._resource_snapshot(
+                    request.context.get("runtime_options"),
+                    request.context.get("resource_profile"),
+                ),
+                "search_budget_analysis": self._search_budget_analysis(
+                    study.search_space,
+                    list(study.budgets),
+                    int(study.max_training_runs or 1),
+                    int(study.initial_trial_count or 1),
+                    list(study.promotion_limits or []),
+                    int(study.reduction_factor or 3),
+                    campaign.to_dict(),
+                ),
                 "campaign": self._compact_campaign(campaign.to_dict()),
                 "cross_study_memory": self._cross_study_memory(campaign.to_dict()),
                 "reference_profile": self._reference_search_profile(self.model_family),
@@ -536,10 +787,17 @@ class HPOAgent(LangGraphAgent):
         if strategy != "successive_halving" or len(budgets) <= 1:
             return min(3, max(int(run_limit), 1))
         reduction_factor = 3
-        target = reduction_factor ** max(len(budgets) - 1, 1)
-        target = min(max(target, 3), max(int(run_limit), 1))
+        # Start from one complete 3x halving bracket: three rungs -> 9 + 3 + 1.
+        baseline = reduction_factor ** max(len(budgets) - 1, 0)
+        target = min(max(int(run_limit), 1), baseline)
         for count in range(target, 0, -1):
-            planned_runs = count + sum(HPOAgent._default_promotion_limits(count, budgets, reduction_factor))
+            planned_runs = count + sum(
+                HPOAgent._default_promotion_limits(
+                    count,
+                    budgets,
+                    reduction_factor,
+                )
+            )
             if planned_runs <= run_limit:
                 return count
         return 1
@@ -558,39 +816,153 @@ class HPOAgent(LangGraphAgent):
         return limits
 
     @staticmethod
-    def _strategy_proposal_prompt(context: Dict[str, Any]) -> str:
-        schema = {
-            "action": "keep_strategy",
-            "requested_strategy": None,
-            "search_space": None,
-            "budgets": None,
-            "max_training_runs": None,
-            "reason_codes": [],
-            "evidence": {},
-            "expected_effect": {},
-            "confidence": 0.0,
+    def _resource_snapshot(
+        runtime_options: Any = None,
+        declared_profile: Any = None,
+    ) -> Dict[str, Any]:
+        """Collect bounded planning evidence without making resources mandatory."""
+        runtime = dict(runtime_options or {}) if isinstance(runtime_options, dict) else {}
+        snapshot: Dict[str, Any] = {
+            "requested_runtime": {
+                key: runtime.get(key)
+                for key in ("device", "precision", "eval_precision")
+                if runtime.get(key) is not None
+            },
+            "cpu_count": os.cpu_count(),
         }
-        rules = [
-            "Return raw JSON only.",
-            "Do not use markdown, code fences, comments, or explanatory text.",
-            "Use exactly the schema keys shown in schema.",
-            "Allowed action values: keep_strategy, refine_search_space, expand_search_space, switch_strategy, adjust_budget.",
-            "If no change is useful, return action=keep_strategy and leave requested_strategy, search_space, budgets, max_training_runs as null.",
-            "Do not invent parameter names unless action=expand_search_space.",
-            "Treat reference_profile.baseline_parameters as the trusted recipe anchor.",
-            "Prefer local refinements around reference_profile.stable_search_space instead of broad global searches.",
-            "Change at most two sensitive parameters in one proposal unless failures require a resource fix.",
-            "For log-scale parameters, adjust boundaries by small multiplicative factors; do not jump by many orders of magnitude.",
-            "For margin, prefer narrow changes near the baseline unless completed evaluation evidence supports widening.",
-            "If evaluation or resource failures occur, first reduce resource-sensitive choices such as batch_size before changing optimization parameters.",
-            "Use keep_strategy when evidence is too weak; do not switch strategy only because a switch is allowed.",
-            "When phase=study_planning and cross_study_memory has prior studies, inherit the latest next_study_recommendation unless new evidence argues otherwise.",
-            "Use cross_study_memory.local_search_anchor to propose a local search_space around proven parameters for the next Study.",
-            "Do not exceed hard_max_training_runs when that field is present in context.",
-            "This is advisory only; deterministic validation may reject invalid fields.",
-        ]
-        payload = {"schema": schema, "rules": rules, "context": context}
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(declared_profile, dict) and declared_profile:
+            snapshot["declared_limits"] = dict(declared_profile)
+        try:
+            import psutil
+
+            memory = psutil.virtual_memory()
+            snapshot["system_memory_gb"] = {
+                "total": round(float(memory.total) / (1024 ** 3), 2),
+                "available": round(float(memory.available) / (1024 ** 3), 2),
+            }
+        except Exception:
+            snapshot["system_memory_gb"] = None
+        try:
+            import torch
+
+            cuda_available = bool(torch.cuda.is_available())
+            snapshot["cuda"] = {
+                "available": cuda_available,
+                "device_count": int(torch.cuda.device_count()) if cuda_available else 0,
+                "devices": [],
+            }
+            if cuda_available:
+                for index in range(int(torch.cuda.device_count())):
+                    properties = torch.cuda.get_device_properties(index)
+                    device = {
+                        "index": index,
+                        "name": str(properties.name),
+                        "total_memory_gb": round(
+                            float(properties.total_memory) / (1024 ** 3),
+                            2,
+                        ),
+                    }
+                    try:
+                        free_bytes, total_bytes = torch.cuda.mem_get_info(index)
+                        device["free_memory_gb"] = round(
+                            float(free_bytes) / (1024 ** 3),
+                            2,
+                        )
+                        device["observed_total_memory_gb"] = round(
+                            float(total_bytes) / (1024 ** 3),
+                            2,
+                        )
+                    except Exception:
+                        pass
+                    snapshot["cuda"]["devices"].append(device)
+        except Exception as exc:
+            snapshot["cuda"] = {
+                "available": None,
+                "probe_error": type(exc).__name__,
+            }
+        return snapshot
+
+    @staticmethod
+    def _search_budget_analysis(
+        search_space: SearchSpace,
+        budgets: List[TrialBudget],
+        hard_max_training_runs: int,
+        initial_trial_count: int,
+        promotion_limits: List[int],
+        reduction_factor: int,
+        campaign: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        counts = [int(initial_trial_count), *[int(item) for item in promotion_limits]]
+        counts = counts[:len(budgets)]
+        counts.extend([0] * max(len(budgets) - len(counts), 0))
+        rung_plan = []
+        estimated_work_units = 0.0
+        work_is_complete = True
+        for budget, count in zip(budgets, counts):
+            unit_work = None
+            if budget.epochs is not None and budget.data_fraction is not None:
+                unit_work = float(budget.epochs) * float(budget.data_fraction)
+                estimated_work_units += count * unit_work
+            else:
+                work_is_complete = False
+            rung_plan.append({
+                "stage": budget.stage,
+                "planned_runs": count,
+                "epochs": budget.epochs,
+                "data_fraction": budget.data_fraction,
+                "max_duration_seconds": budget.max_duration_seconds,
+                "relative_work_per_run": unit_work,
+            })
+        campaign = campaign or {}
+        summaries = list(campaign.get("study_summaries") or [])
+        used_runs = sum(int(item.get("training_runs") or 0) for item in summaries)
+        total_limit = campaign.get("max_total_training_runs")
+        remaining_runs = (
+            max(int(total_limit) - used_runs, 0)
+            if total_limit is not None else None
+        )
+        resource_sensitive = {
+            "batch_size",
+            "sentence_len",
+            "sample_rate",
+            "embedding_dim",
+            "channels",
+        }
+        return {
+            "search_dimension_count": len(search_space.parameters),
+            "search_parameter_names": [
+                parameter.name for parameter in search_space.parameters
+            ],
+            "resource_sensitive_parameters": [
+                parameter.name
+                for parameter in search_space.parameters
+                if parameter.name in resource_sensitive
+            ],
+            "finite_grid_cardinality": HPOPlanningPolicy.grid_cardinality(
+                search_space
+            ),
+            "hard_max_training_runs": int(hard_max_training_runs),
+            "planned_training_runs": sum(counts),
+            "unused_training_run_capacity": max(
+                int(hard_max_training_runs) - sum(counts),
+                0,
+            ),
+            "reduction_factor": int(reduction_factor),
+            "rung_plan": rung_plan,
+            "estimated_relative_work_units": (
+                round(estimated_work_units, 4) if work_is_complete else None
+            ),
+            "campaign_used_training_runs": used_runs,
+            "campaign_remaining_training_runs": remaining_runs,
+            "recent_resource_summaries": [
+                item.get("resource_summary")
+                for item in summaries[-3:]
+                if item.get("resource_summary")
+            ],
+        }
+    @staticmethod
+    def _strategy_proposal_prompt(context: Dict[str, Any]) -> str:
+        return render_prompt("hpo_strategy_proposal", context=context)
 
     @staticmethod
     def _compact_campaign(campaign: Dict[str, Any]) -> Dict[str, Any]:
@@ -619,10 +991,16 @@ class HPOAgent(LangGraphAgent):
             "experiment_id": getattr(study, "experiment_id", None),
             "status": getattr(study, "status", None),
             "strategy": getattr(study, "strategy", None),
+            "sampler_strategy": getattr(study, "sampler_strategy", None),
+            "pruner_strategy": getattr(study, "pruner_strategy", None),
             "candidate_strategy": getattr(study, "candidate_strategy", None),
             "best_trial_id": getattr(study, "best_trial_id", None),
             "trial_count": len(getattr(study, "trial_ids", []) or []),
             "max_training_runs": getattr(study, "max_training_runs", None),
+            "initial_trial_count": getattr(study, "initial_trial_count", None),
+            "promotion_limits": list(getattr(study, "promotion_limits", []) or []),
+            "reduction_factor": getattr(study, "reduction_factor", None),
+            "warm_start_trial_count": len(getattr(study, "warm_start_trials", []) or []),
             "search_space": study.search_space.to_dict(),
             "budgets": [item.to_dict() for item in getattr(study, "budgets", [])],
             "recent_reviews": list(getattr(study, "strategy_reviews", []) or [])[-3:],
@@ -758,9 +1136,10 @@ class HPOAgent(LangGraphAgent):
         return {
             "action": self.action,
             "workflow": "langgraph",
-            "available_strategies": HPOService.available_strategies(),
+            "available_samplers": HPOService.available_samplers(),
+            "available_pruners": HPOService.available_pruners(),
             "llm_role": "structured_strategy_proposal",
-            "decision_authority": "HPOService + StrategyDecisionPolicy",
+            "decision_authority": "HPOService + OptimizationPlanDecisionPolicy",
             "feedback_loop": "trial/rung reviews + historical memory + optimization campaign",
             "enable_llm_advisor": self.enable_llm_advisor,
         }

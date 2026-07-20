@@ -19,6 +19,7 @@ from agent.agents.coordination import (
 from agent.agents.orchestration_workflow import OrchestrationWorkflow
 from agent.tasks import get_task_adapter
 from agent.memory import EpisodeMemory, MemoryScope, MemoryService
+from agent.prompt import render_prompt
 from agent.utils import ConfigParser, ExperimentTracker
 from agent.utils.path_tool import (
     get_config_file,
@@ -257,21 +258,7 @@ class CoordinatorAgent(AdvisoryAgentBase):
 
     def _coordination_advisor(self, agents: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
         compact_context = self._compact_request_context(context)
-        prompt = json.dumps({
-            "schema": {
-                "diagnostics": [],
-                "risks": [],
-                "notes": [],
-            },
-            "rules": [
-                "Return raw JSON only.",
-                "Do not use markdown, code fences, comments, or explanatory text.",
-                "Do not choose agent order, assign tasks, or execute tools.",
-                "Only provide diagnostics about the current multi-agent run.",
-            ],
-            "agents": agents,
-            "context": compact_context,
-        }, ensure_ascii=False, separators=(",", ":"))
+        prompt = render_prompt("orchestration_coordination_advisor", agents=agents, context=compact_context)
         response = self.llm.invoke(prompt)
         try:
             value = json.loads(self._extract_message_content(response))

@@ -44,7 +44,8 @@ class DecisionPolicy:
     """Deterministic branch decisions; HPOService still enforces all rules."""
 
     def initial_count(self, study: HPOStudy) -> int:
-        if study.strategy == "adaptive_search":
+        sampler = study.candidate_strategy or study.sampler_strategy or study.strategy
+        if sampler == "adaptive_search" and HPOService._active_pruner(study) == "none":
             return 1
         return study.initial_trial_count or study.max_trials or 1
 
@@ -59,7 +60,7 @@ class DecisionPolicy:
         )
 
     def should_promote(self, study: HPOStudy, service: HPOService) -> bool:
-        if study.strategy != "successive_halving":
+        if service._active_pruner(study) != "successive_halving":
             return False
         trials = service.list_trials(study.experiment_id)
         return any(
@@ -69,7 +70,7 @@ class DecisionPolicy:
 
     def should_suggest(self, study: HPOStudy, service: HPOService) -> bool:
         return (
-            study.strategy != "successive_halving"
+            service._active_pruner(study) == "none"
             and service.remaining_training_runs(study) > 0
         )
 
@@ -174,7 +175,7 @@ class HPOScheduler:
 
     def _suggest(self, state: HPOGraphState) -> Dict[str, Any]:
         count = self.decision_policy.initial_count(self.study)
-        if self.study.strategy != "successive_halving":
+        if self.service._active_pruner(self.study) == "none":
             count = min(count, self.review_interval_trials)
         created = self.service.suggest_trials(
             self.study,
@@ -263,7 +264,7 @@ class HPOScheduler:
 
     def _review_strategy(self, state: HPOGraphState) -> Dict[str, Any]:
         completed = int(state.get("completed_since_review", 0))
-        if self.study.strategy == "successive_halving" or completed < self.review_interval_trials:
+        if self.service._active_pruner(self.study) == "successive_halving" or completed < self.review_interval_trials:
             return {}
         proposal = self._make_strategy_proposal("interval_review")
         self.service.review_strategy(self.study, proposal, trigger=f"after_{completed}_trials")
@@ -295,7 +296,7 @@ class HPOScheduler:
             )
 
     def _next_promotable_rung(self) -> Optional[int]:
-        if self.study.strategy != "successive_halving":
+        if self.service._active_pruner(self.study) != "successive_halving":
             return None
         trials = self.service.list_trials(self.study.experiment_id)
         completed_by_rung: Dict[int, List[Trial]] = {}

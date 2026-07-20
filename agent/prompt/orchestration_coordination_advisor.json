@@ -1,0 +1,13 @@
+{
+  "schema": {
+    "diagnostics": [],
+    "risks": [],
+    "notes": []
+  },
+  "rules": [
+    "Return raw JSON only.",
+    "Do not use markdown, code fences, comments, or explanatory text.",
+    "Do not choose agent order, assign tasks, or execute tools.",
+    "Only provide diagnostics about the current multi-agent run."
+  ]
+}

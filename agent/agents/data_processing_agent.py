@@ -12,6 +12,7 @@ from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.data_processing.workflow import DataProcessingWorkflow
 from agent.data_processing.handoff import build_data_handoff
 from agent.memory import EpisodeMemory, MemoryScope, MemoryService
+from agent.prompt import render_prompt
 from agent.utils import ConfigParser, ExperimentTracker
 from agent.utils.path_tool import (
     get_config_file,
@@ -171,20 +172,7 @@ class DataProcessingAgent(LangGraphAgent):
             "target_goal": state.get("target_goal"),
             "requested_operations": state.get("requested_operations") or [],
         }
-        prompt = json.dumps({
-            "schema": {
-                "diagnostics": [],
-                "suggested_operations": [],
-                "notes": [],
-            },
-            "rules": [
-                "Return raw JSON only.",
-                "Do not use markdown, code fences, comments, or explanatory text.",
-                "suggested_operations are advisory only and will be validated before execution.",
-                "Only suggest operations when they are useful for the current dataset goal.",
-            ],
-            "context": context,
-        }, ensure_ascii=False, separators=(",", ":"))
+        prompt = render_prompt("data_processing_planning_advice", context=context)
         response = self.llm.invoke(prompt)
         try:
             value = json.loads(self._extract_message_content(response))

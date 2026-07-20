@@ -47,6 +47,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="auto",
     )
     parser.add_argument(
+        "--sampler",
+        choices=["auto", "random_search", "grid_search", "adaptive_search", "tpe"],
+        default=None,
+        help="Candidate sampler; independent from the fidelity pruner.",
+    )
+    parser.add_argument(
+        "--pruner",
+        choices=["auto", "none", "successive_halving"],
+        default=None,
+        help="Fidelity scheduler; use successive_halving with multiple budget rungs.",
+    )
+    parser.add_argument(
         "--enable-llm-advisor",
         action="store_true",
         help="Allow LLMs to submit structured strategy/data-processing proposals.",
@@ -70,6 +82,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated promotion limits for successive halving, e.g. 2,1.",
     )
     parser.add_argument("--min-completed-per-rung", type=int, default=1)
+    parser.add_argument("--reduction-factor", type=int, default=3)
     parser.add_argument("--strategy-review-interval-trials", type=int, default=3)
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument(
@@ -156,6 +169,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "primary_metric": args.primary_metric,
         "metric_mode": args.metric_mode,
     }
+    if args.sampler is not None:
+        context["sampler"] = args.sampler
+    if args.pruner is not None:
+        context["pruner"] = args.pruner
     if args.data_folder is not None:
         context["data_folder"] = args.data_folder
         context["dataset_uri"] = args.data_folder
@@ -205,6 +222,7 @@ def build_budget(args: argparse.Namespace) -> dict[str, Any]:
         "max_studies": args.max_studies,
         "campaign_min_improvement": args.campaign_min_improvement,
         "min_completed_per_rung": args.min_completed_per_rung,
+        "reduction_factor": args.reduction_factor,
         "strategy_review_interval_trials": args.strategy_review_interval_trials,
         "max_retries": args.max_retries,
     }

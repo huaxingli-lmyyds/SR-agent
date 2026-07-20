@@ -26,7 +26,17 @@ def _study() -> HPOStudy:
 def test_feedback_clusters_failures_and_detects_search_boundary() -> None:
     study = _study()
     trials = [
-        Trial("a", {"lr": 0.01}, study.budgets[0], status="completed", metrics={"eer": 0.1}),
+        Trial(
+            "a",
+            {"lr": 0.01},
+            study.budgets[0],
+            status="completed",
+            metrics={"eer": 0.1},
+            cost={
+                "training": {"duration_seconds": 120.0},
+                "evaluation": {"duration_seconds": 20.0},
+            },
+        ),
         Trial("b", {"lr": 0.5}, study.budgets[0], status="failed", cost={"failure_category": "resource"}),
         Trial("c", {"lr": 0.6}, study.budgets[0], status="failed", cost={"failure_category": "resource"}),
     ]
@@ -43,6 +53,15 @@ def test_feedback_clusters_failures_and_detects_search_boundary() -> None:
     assert feedback["rung_summaries"][0]["failed"] == 2
     assert feedback["parameter_observations"]["lr"]["top_values"] == [0.01]
     assert feedback["failed_trial_examples"][0]["failure_category"] == "resource"
+    assert feedback["cost_summary"]["stages"]["training"] == {
+        "observations": 1,
+        "average_duration_seconds": 120.0,
+        "max_duration_seconds": 120.0,
+        "total_duration_seconds": 120.0,
+    }
+    assert feedback["cost_summary"]["stages"]["evaluation"][
+        "average_duration_seconds"
+    ] == 20.0
     assert proposal.requested_strategy == "random_search"
     assert proposal.search_space["parameters"][0]["low"] < 0.0
 

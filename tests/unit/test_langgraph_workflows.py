@@ -192,7 +192,7 @@ def test_hpo_best_metric_record_separates_training_and_evaluation_metrics() -> N
     assert record["evaluation"] == {"eer": 0.03, "min_dcf": 0.1}
 
 
-def test_hpo_successive_halving_defaults_use_larger_startup_cohort() -> None:
+def test_hpo_successive_halving_defaults_use_conservative_complete_bracket() -> None:
     from agent.agents.hpo_agent import HPOAgent
 
     budgets = [
@@ -245,7 +245,9 @@ def test_hpo_study_learning_summary_records_next_study_guidance() -> None:
     assert summary["local_search_anchor"]["value"] == 0.31
     assert summary["final_candidate_strategy"] == "tpe"
     assert summary["last_review"]["accepted_fields"] == ["requested_strategy", "search_space"]
-    assert summary["next_study_recommendation"]["strategy"] == "tpe"
+    assert summary["next_study_recommendation"]["strategy"] == "successive_halving"
+    assert summary["next_study_recommendation"]["sampler"] == "tpe"
+    assert summary["next_study_recommendation"]["pruner"] == "successive_halving"
     assert summary["next_study_recommendation"]["search_space"] == search_space.to_dict()
 
 
@@ -378,3 +380,92 @@ def test_data_processing_advice_prompt_allows_validated_suggestions(monkeypatch)
     assert advice["suggested_operations"] == []
     assert "suggested_operations are advisory only" in " ".join(payload["rules"])
     assert "profile" not in payload["context"]
+
+
+def test_hpo_campaign_history_keeps_valid_base_fidelity_and_deduplicates() -> None:
+    from agent.hpo import Objective, Trial
+
+    budget = TrialBudget("screening", epochs=3, data_fraction=0.25)
+    existing = [{
+        "trial_id": "warm_old",
+        "parameters": {"lr": 0.001},
+        "budget": budget.to_dict(),
+        "status": "completed",
+        "rung": 0,
+        "metrics": {"eer": 0.4},
+    }]
+    trials = [
+        Trial(
+            "trial_new",
+            {"lr": 0.001},
+            budget,
+            status="completed",
+            rung=0,
+            metrics={"eer": 0.3},
+        ),
+        Trial(
+            "trial_promoted_child",
+            {"lr": 0.002},
+            TrialBudget("full", epochs=20, data_fraction=1.0),
+            status="completed",
+            rung=1,
+            metrics={"eer": 0.2},
+        ),
+        Trial(
+            "trial_failed",
+            {"lr": 0.003},
+            budget,
+            status="failed",
+            rung=0,
+            metrics={"eer": 0.1},
+        ),
+    ]
+
+    history = HPOAgent._merge_campaign_history(
+        existing, trials, Objective("eer", "min"), "successive_halving"
+    )
+
+    assert len(history) == 1
+    assert history[0]["trial_id"] == "warm_trial_new"
+    assert history[0]["metrics"]["eer"] == 0.3
+
+
+def test_hpo_resource_snapshot_and_budget_analysis_are_structured() -> None:
+    budgets = [
+        TrialBudget("screening", epochs=3, data_fraction=0.25),
+        TrialBudget("promotion", epochs=8, data_fraction=0.5),
+        TrialBudget("confirmation", epochs=20, data_fraction=1.0),
+    ]
+    space = SearchSpace([
+        SearchParameter("lr", "float", low=3e-4, high=3e-3, scale="log"),
+        SearchParameter("batch_size", "categorical", choices=[16, 24, 32]),
+    ])
+
+    resources = HPOAgent._resource_snapshot(
+        {"device": "cuda:0", "precision": "fp16"},
+        {"max_wall_time_seconds": 7200},
+    )
+    analysis = HPOAgent._search_budget_analysis(
+        space,
+        budgets,
+        30,
+        9,
+        [3, 1],
+        3,
+        {
+            "max_total_training_runs": 60,
+            "study_summaries": [{"training_runs": 13}],
+        },
+    )
+
+    assert resources["requested_runtime"] == {
+        "device": "cuda:0",
+        "precision": "fp16",
+    }
+    assert resources["declared_limits"] == {"max_wall_time_seconds": 7200}
+    assert "cuda" in resources
+    assert analysis["planned_training_runs"] == 13
+    assert analysis["unused_training_run_capacity"] == 17
+    assert analysis["estimated_relative_work_units"] == 38.75
+    assert analysis["campaign_remaining_training_runs"] == 47
+    assert analysis["resource_sensitive_parameters"] == ["batch_size"]

@@ -12,7 +12,7 @@ from agent.utils import ExperimentTracker, get_experiment_artifact_dir
 
 from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, StrategyProposal, Trial, TrialBudget
 from .feedback import HPOFeedbackAnalyzer
-from .policies import EarlyStoppingPolicy, StopDecision, StrategyDecisionPolicy
+from .policies import EarlyStoppingPolicy, OptimizationPlanDecisionPolicy, StopDecision
 from .strategies import STRATEGIES, CandidateStrategy, SuccessiveHalvingStrategy
 
 TRIAL_STATUSES = {"suggested", "running", "completed", "promoted", "stopped", "failed"}
@@ -41,6 +41,39 @@ class HPOService:
     def available_strategies() -> List[str]:
         return STRATEGIES.names()
 
+    @staticmethod
+    def available_samplers() -> List[str]:
+        return [
+            name for name in STRATEGIES.names()
+            if name != "successive_halving"
+        ]
+
+    @staticmethod
+    def available_pruners() -> List[str]:
+        return ["none", "successive_halving"]
+
+    @staticmethod
+    def _strategy_components(
+        strategy: str,
+        sampler_strategy: Optional[str],
+        pruner_strategy: Optional[str],
+    ) -> tuple[str, str]:
+        sampler = sampler_strategy or (
+            "random_search" if strategy == "successive_halving" else strategy
+        )
+        pruner = pruner_strategy or (
+            "successive_halving" if strategy == "successive_halving" else "none"
+        )
+        return sampler, pruner
+
+    @classmethod
+    def _active_pruner(cls, study: HPOStudy) -> str:
+        return cls._strategy_components(
+            study.strategy,
+            study.sampler_strategy,
+            study.pruner_strategy,
+        )[1]
+
     def create_study(
         self,
         experiment_id: str,
@@ -49,6 +82,8 @@ class HPOService:
         budgets: List[TrialBudget],
         *,
         strategy: str = "successive_halving",
+        sampler_strategy: Optional[str] = None,
+        pruner_strategy: Optional[str] = None,
         reduction_factor: int = 3,
         random_seed: int = 0,
         max_trials: Optional[int] = None,
@@ -56,7 +91,10 @@ class HPOService:
         promotion_limits: Optional[List[int]] = None,
         max_training_runs: Optional[int] = None,
         min_completed_per_rung: int = 1,
+        warm_start_trials: Optional[List[Dict[str, Any]]] = None,
     ) -> HPOStudy:
+        if pruner_strategy is None and strategy == "successive_halving" and len(budgets) < 2:
+            pruner_strategy = "none"
         if self.tracker.get_experiment(experiment_id) is None:
             raise ValueError(f"HPO experiment not found: {experiment_id}")
         self.validate_study_plan(
@@ -64,12 +102,19 @@ class HPOService:
             objectives,
             budgets,
             strategy=strategy,
+            sampler_strategy=sampler_strategy,
+            pruner_strategy=pruner_strategy,
             reduction_factor=reduction_factor,
             max_trials=max_trials,
             initial_trial_count=initial_trial_count,
             promotion_limits=promotion_limits,
             max_training_runs=max_training_runs,
             min_completed_per_rung=min_completed_per_rung,
+        )
+        sampler_strategy, pruner_strategy = self._strategy_components(
+            strategy,
+            sampler_strategy,
+            pruner_strategy,
         )
         now = datetime.now().isoformat()
         study = HPOStudy(
@@ -79,12 +124,15 @@ class HPOService:
             search_space=search_space,
             objectives=objectives,
             budgets=budgets,
+            sampler_strategy=sampler_strategy,
+            pruner_strategy=pruner_strategy,
             reduction_factor=reduction_factor,
             max_trials=max_trials,
             initial_trial_count=initial_trial_count,
             promotion_limits=list(promotion_limits or []),
             max_training_runs=max_training_runs or max_trials,
             min_completed_per_rung=min_completed_per_rung,
+            warm_start_trials=list(warm_start_trials or []),
             random_seed=random_seed,
             created_at=now,
             updated_at=now,
@@ -99,6 +147,8 @@ class HPOService:
         budgets: List[TrialBudget],
         *,
         strategy: str = "successive_halving",
+        sampler_strategy: Optional[str] = None,
+        pruner_strategy: Optional[str] = None,
         reduction_factor: int = 3,
         max_trials: Optional[int] = None,
         initial_trial_count: Optional[int] = None,
@@ -107,6 +157,8 @@ class HPOService:
         min_completed_per_rung: int = 1,
     ) -> None:
         """Validate a proposed Study plan without creating records or artifacts."""
+        if pruner_strategy is None and strategy == "successive_halving" and len(budgets) < 2:
+            pruner_strategy = "none"
         if not search_space.parameters:
             raise ValueError("search space must contain at least one parameter")
         parameter_names = [parameter.name for parameter in search_space.parameters]
@@ -116,8 +168,19 @@ class HPOService:
             raise ValueError("study must contain at least one objective")
         if not budgets:
             raise ValueError("study must contain at least one budget rung")
-        candidate_strategy = STRATEGIES.get(strategy)
+        sampler_strategy, pruner_strategy = self._strategy_components(
+            strategy,
+            sampler_strategy,
+            pruner_strategy,
+        )
+        candidate_strategy = STRATEGIES.get(sampler_strategy)
         candidate_strategy.validate(search_space)
+        if pruner_strategy not in self.available_pruners():
+            raise ValueError(f"unsupported HPO pruner: {pruner_strategy}")
+        if pruner_strategy == "successive_halving" and len(budgets) < 2:
+            raise ValueError("successive_halving pruner requires at least two budget rungs")
+        if pruner_strategy == "none" and len(budgets) != 1:
+            raise ValueError("pruner 'none' requires exactly one budget rung")
         if reduction_factor < 2:
             raise ValueError("reduction_factor must be at least 2")
         if max_trials is not None and max_trials <= 0:
@@ -136,6 +199,15 @@ class HPOService:
                 raise ValueError("initial_trial_count cannot exceed max_training_runs")
         if len(promotion_limits or []) > max(len(budgets) - 1, 0):
             raise ValueError("promotion_limits cannot exceed the number of promotion rungs")
+        if pruner_strategy == "none" and promotion_limits:
+            raise ValueError("promotion_limits require a fidelity pruner")
+        if (
+            pruner_strategy == "successive_halving"
+            and initial_trial_count is not None
+            and effective_run_limit is not None
+            and initial_trial_count + sum(promotion_limits or []) > effective_run_limit
+        ):
+            raise ValueError("planned initial and promotion runs exceed max_training_runs")
         for objective in objectives:
             if objective.mode not in {"min", "max"}:
                 raise ValueError(f"unsupported objective mode: {objective.mode}")
@@ -152,7 +224,7 @@ class HPOService:
         initial_trials = [trial for trial in existing_trials if trial.rung == 0]
         initial_limit = (
             study.initial_trial_count or study.max_trials
-            if study.strategy == "successive_halving"
+            if self._active_pruner(study) == "successive_halving"
             else study.max_training_runs or study.max_trials
         )
         if initial_limit is not None:
@@ -160,13 +232,23 @@ class HPOService:
         count = min(count, self.remaining_training_runs(study))
         if count <= 0:
             return []
-        candidate_strategy = study.candidate_strategy or study.strategy
-        candidates = STRATEGIES.get(candidate_strategy).suggest(
+        warm_start_trials = [
+            trial_from_dict(item)
+            for item in study.warm_start_trials
+            if isinstance(item, dict) and item.get("budget")
+        ]
+        sampler_strategy = (
+            study.candidate_strategy
+            or study.sampler_strategy
+            or self._strategy_components(study.strategy, None, None)[0]
+        )
+        all_history = [*warm_start_trials, *existing_trials]
+        candidates = STRATEGIES.get(sampler_strategy).suggest(
             study.search_space,
             count,
             seed=study.random_seed + len(existing_trials),
-            existing=[trial.parameters for trial in existing_trials],
-            history=existing_trials,
+            existing=[trial.parameters for trial in all_history],
+            history=all_history,
             objective=study.objectives[0],
         )
         now = datetime.now().isoformat()
@@ -201,32 +283,61 @@ class HPOService:
         analyzer = HPOFeedbackAnalyzer()
         feedback = analyzer.analyze(study, trials)
         if proposal is None:
-            proposal = analyzer.propose(study, feedback, self.available_strategies())
+            proposal = analyzer.propose(study, feedback, self.available_samplers())
         original_proposal = proposal
         blocked_fields = []
-        if proposal is not None and (proposal.max_training_runs is not None or proposal.budgets is not None):
-            if proposal.max_training_runs is not None:
-                blocked_fields.append({"field": "max_training_runs", "reason": "runtime reviews cannot change Study run quota"})
-            if proposal.budgets is not None:
-                blocked_fields.append({"field": "budgets", "reason": "runtime reviews cannot change active Study rung budgets"})
+        legacy_pruner_request = (
+            proposal.requested_strategy
+            if proposal is not None
+            and proposal.requested_strategy == "successive_halving"
+            else None
+        )
+        runtime_blocked = {
+            "max_training_runs": proposal.max_training_runs if proposal else None,
+            "budgets": proposal.budgets if proposal else None,
+            "requested_strategy": legacy_pruner_request,
+            "requested_pruner": proposal.requested_pruner if proposal else None,
+            "initial_trial_count": proposal.initial_trial_count if proposal else None,
+            "promotion_limits": proposal.promotion_limits if proposal else None,
+            "reduction_factor": proposal.reduction_factor if proposal else None,
+        }
+        if proposal is not None and any(value is not None for value in runtime_blocked.values()):
+            for field, value in runtime_blocked.items():
+                if value is not None:
+                    blocked_fields.append({
+                        "field": field,
+                        "reason": f"runtime reviews cannot change active Study {field}",
+                    })
             proposal = StrategyProposal(
                 action=proposal.action,
-                requested_strategy=proposal.requested_strategy,
+                requested_strategy=(
+                    None if legacy_pruner_request else proposal.requested_strategy
+                ),
+                requested_sampler=proposal.requested_sampler,
                 search_space=proposal.search_space,
                 reason_codes=proposal.reason_codes,
                 evidence=proposal.evidence,
                 expected_effect=proposal.expected_effect,
                 confidence=proposal.confidence,
             )
-        decision = StrategyDecisionPolicy().review(
+        sampler_strategy, pruner_strategy = self._strategy_components(
+            study.strategy,
+            study.sampler_strategy,
+            study.pruner_strategy,
+        )
+        decision = OptimizationPlanDecisionPolicy().review(
             proposal,
-            base_strategy=study.candidate_strategy or study.strategy,
+            base_sampler=study.candidate_strategy or sampler_strategy,
+            base_pruner=pruner_strategy,
             base_search_space=study.search_space,
             base_budgets=study.budgets,
             hard_max_training_runs=int(study.max_training_runs or study.max_trials or 1),
             objectives=study.objectives,
-            available_strategies=self.available_strategies(),
+            available_strategies=self.available_samplers(),
             validate_plan=self.validate_study_plan,
+            base_initial_trial_count=study.initial_trial_count,
+            base_promotion_limits=study.promotion_limits,
+            base_reduction_factor=study.reduction_factor,
         )
         if blocked_fields:
             decision.proposal_id = original_proposal.proposal_id
@@ -234,7 +345,7 @@ class HPOService:
             decision.rejected_fields.extend(blocked_fields)
             decision.decision = "approved_with_changes" if decision.accepted_fields else "rejected"
             decision.reason_codes = ["runtime_proposal_partially_approved" if decision.accepted_fields else "runtime_proposal_rejected"]
-        study.candidate_strategy = decision.adopted_strategy
+        study.candidate_strategy = decision.adopted_sampler
         study.search_space = search_space_from_dict(decision.adopted_search_space)
         review = {
             "trigger": trigger,
@@ -242,6 +353,7 @@ class HPOService:
             "proposal": original_proposal.to_dict() if original_proposal else None,
             "decision": decision.to_dict(),
             "applied_candidate_strategy": study.candidate_strategy,
+            "active_pruner_strategy": pruner_strategy,
             "applied_search_space": study.search_space.to_dict(),
             "created_at": datetime.now().isoformat(),
         }
@@ -596,6 +708,8 @@ def study_from_dict(data: Dict[str, Any]) -> HPOStudy:
         search_space=search_space_from_dict(data["search_space"]),
         objectives=[Objective(**item) for item in data.get("objectives") or []],
         budgets=[TrialBudget(**item) for item in data.get("budgets") or []],
+        sampler_strategy=data.get("sampler_strategy"),
+        pruner_strategy=data.get("pruner_strategy"),
         candidate_strategy=data.get("candidate_strategy"),
         reduction_factor=data.get("reduction_factor", 3),
         max_trials=data.get("max_trials"),
@@ -605,6 +719,7 @@ def study_from_dict(data: Dict[str, Any]) -> HPOStudy:
         min_completed_per_rung=data.get("min_completed_per_rung", 1),
         constraints=data.get("constraints") or [],
         strategy_reviews=data.get("strategy_reviews") or [],
+        warm_start_trials=data.get("warm_start_trials") or [],
         trial_ids=data.get("trial_ids") or [],
         best_trial_id=data.get("best_trial_id"),
         status=data.get("status", "created"),

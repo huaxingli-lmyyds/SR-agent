@@ -130,3 +130,19 @@ def test_cli_passes_runtime_options_to_context() -> None:
         "precision": "fp32",
         "eval_precision": "fp32",
     }
+
+
+def test_cli_builds_independent_sampler_pruner_controls() -> None:
+    args = parse_args(
+        "--strategy", "auto",
+        "--sampler", "tpe",
+        "--pruner", "successive_halving",
+        "--reduction-factor", "4",
+    )
+
+    context = build_context(args)
+    budget = build_budget(args)
+
+    assert context["sampler"] == "tpe"
+    assert context["pruner"] == "successive_halving"
+    assert budget["reduction_factor"] == 4

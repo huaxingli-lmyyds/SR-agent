@@ -69,9 +69,14 @@ class StrategyProposal:
 
     action: str
     requested_strategy: Optional[str] = None
+    requested_sampler: Optional[str] = None
+    requested_pruner: Optional[str] = None
     search_space: Optional[Dict[str, Any]] = None
     budgets: Optional[List[Dict[str, Any]]] = None
     max_training_runs: Optional[int] = None
+    initial_trial_count: Optional[int] = None
+    promotion_limits: Optional[List[int]] = None
+    reduction_factor: Optional[int] = None
     reason_codes: List[str] = field(default_factory=list)
     evidence: Dict[str, Any] = field(default_factory=dict)
     expected_effect: Dict[str, Any] = field(default_factory=dict)
@@ -86,9 +91,14 @@ class StrategyProposal:
         return cls(
             action=str(value.get("action") or ""),
             requested_strategy=value.get("requested_strategy"),
+            requested_sampler=value.get("requested_sampler"),
+            requested_pruner=value.get("requested_pruner"),
             search_space=value.get("search_space"),
             budgets=value.get("budgets"),
             max_training_runs=value.get("max_training_runs"),
+            initial_trial_count=value.get("initial_trial_count"),
+            promotion_limits=value.get("promotion_limits"),
+            reduction_factor=value.get("reduction_factor"),
             reason_codes=list(value.get("reason_codes") or []),
             evidence=dict(value.get("evidence") or {}),
             expected_effect=dict(value.get("expected_effect") or {}),
@@ -108,6 +118,11 @@ class StrategyDecisionRecord:
     adopted_search_space: Dict[str, Any]
     adopted_budgets: List[Dict[str, Any]]
     adopted_max_training_runs: int
+    adopted_sampler: Optional[str] = None
+    adopted_pruner: str = "none"
+    adopted_initial_trial_count: Optional[int] = None
+    adopted_promotion_limits: List[int] = field(default_factory=list)
+    adopted_reduction_factor: int = 3
     proposal_id: Optional[str] = None
     proposal: Optional[Dict[str, Any]] = None
     accepted_fields: List[str] = field(default_factory=list)
@@ -150,6 +165,8 @@ class HPOStudy:
     search_space: SearchSpace
     objectives: List[Objective]
     budgets: List[TrialBudget]
+    sampler_strategy: Optional[str] = None
+    pruner_strategy: Optional[str] = None
     candidate_strategy: Optional[str] = None
     reduction_factor: int = 3
     max_trials: Optional[int] = None
@@ -159,6 +176,7 @@ class HPOStudy:
     min_completed_per_rung: int = 1
     constraints: List[Dict[str, Any]] = field(default_factory=list)
     strategy_reviews: List[Dict[str, Any]] = field(default_factory=list)
+    warm_start_trials: List[Dict[str, Any]] = field(default_factory=list)
     trial_ids: List[str] = field(default_factory=list)
     best_trial_id: Optional[str] = None
     status: str = "created"
