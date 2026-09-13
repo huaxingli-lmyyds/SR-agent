@@ -56,7 +56,7 @@ The base package intentionally does not install `torch`, `torchaudio`, or `speec
 ## Script Layout
 
 - `demo/`: real runnable demo framework for submission.
-- `scripts/experiments/`: comparison and model HPO launchers.
+- `scripts/experiments/`: five-group HPO benchmark and fixed expert-config baseline.
 - `scripts/evaluation/`: evaluate a specific trained checkpoint.
 - `scripts/admin/`: archive and clear experiment records/artifacts.
 - `scripts/tools/`: environment and runtime inspection utilities.
@@ -66,12 +66,125 @@ Common commands:
 ```bash
 python scripts/tools/check_remote_environment.py --require-cuda
 python scripts/evaluation/evaluate_checkpoint.py --help
-bash scripts/experiments/run_comparison_experiments.sh --suite smoke --dry-run
-bash scripts/experiments/run_resnet_hpo_comparison.sh --dry-run
-bash scripts/experiments/run_xvector_hpo_comparison.sh --dry-run
+python scripts/experiments/run_hpo_benchmark.py --dry-run
+python scripts/experiments/run_hpo_benchmark.py --help
+python scripts/experiments/run_expert_baseline.py --dry-run
 bash scripts/admin/archive_experiments.sh --model-family ecapa_tdnn
 bash scripts/admin/clear_experiments.sh --model-family ecapa_tdnn
 ```
+
+The [expert baseline guide](scripts/experiments/EXPERT_BASELINE.md) describes
+training a supplied YAML without HPO or an LLM. It preserves the recipe's epochs
+and hyperparameters; verification and held-out test results never select parameters.
+
+## Agent-controlled HPO
+
+Enable the advisor to inspect existing HPO evidence through bounded, read-only
+tools and select, configure, or switch the active candidate sampler between
+batches. Each batch uses exactly one sampler: `random_search`, `grid_search`,
+`adaptive_search`, `tpe`, or `agent_proposal`. The last option lets the agent
+submit evidence-backed parameter sets as a standalone search method; it is not
+mixed with TPE candidates.
+
+```bash
+python main.py \
+  --enable-llm-advisor \
+  --controller-mode llm \
+  --strategy tpe \
+  --sampler-config-json '{"n_startup_trials":3,"multivariate":false}' \
+  --candidate-batch-size 3 \
+  --strategy-review-interval-trials 3 \
+  --verification-config configs/verification_ecapa_tdnn.yaml \
+  --validation-pairs datasets/protocols/hpo_validation.txt
+```
+
+Both validation arguments are mandatory for a new HPO run. The validation-pair
+speakers are excluded from training and every Trial is evaluated only on that
+split. A broader `--training-exclusion-pairs` file may be supplied when it must
+also exclude a separately held-out test population; it must contain all
+validation speakers. Held-out test pairs are never accepted by the HPO command.
+EER is recorded as a ratio in `[0,1]`, while minDCF is recorded as `×100`.
+
+`--controller-mode` is explicit and persistent: `fixed` never changes the
+requested search policy, `rule` uses only deterministic feedback rules, and
+`llm` is the only mode that invokes or applies LLM proposals. The five-group
+benchmark assigns `fixed` to every baseline and `llm` only to the system group.
+
+Candidate batches are executed before the next runtime review, so completed
+Trials can change the sampler, sampler configuration, safe search space, and
+hypotheses within the same Study. Agent-proposed candidates are deterministically
+validated before use. Trial records retain their search phase, sampler,
+`proposal_id`, `hypothesis_id`, governing `decision_id`, and provenance for
+audit. Runtime LLM changes pass a deterministic evidence gate (same-fidelity
+sample count, finite confidence, parameter observations, and TPE startup-history
+retention). A bounded, high-confidence `agent_proposal` probe is the only
+low-sample exception; repeated failures have a separately recorded safety
+exception.
+
+The Campaign freezes its final confirmation budget, objective, metric units,
+validation hashes, dataset/model identity, configuration hash, and runner before
+Studies are compared. Runtime reviews cannot alter allocation or confirmation
+budgets. Once the current Study has no generation capacity (including an
+exhausted finite grid), advice is stored as `next_study_proposal` and is never
+applied retroactively. In `rule` and `llm` modes, that stored proposal is passed
+through deterministic plan validation and applied as the next Study's base plan;
+`fixed` mode deliberately ignores it. A fresh LLM planning failure therefore
+does not discard already-approved next-Study advice. Applied reviews record
+their effective Trial index, affected Trial IDs, and realized metric/time
+outcome. They also report a decision-before, same-Study, same-rung and exact-
+budget observational reference when one exists. This estimate is explicitly
+non-causal; causal system claims still require frozen multi-seed control runs.
+
+The LLM read-only history tool returns only successful experiments with a finite
+best objective and an exact full confirmation signature match (final budget,
+objective/units, dataset/version, model/runner, config, validation and exclusion
+hashes). A merely similar metric or dataset name is not considered comparable.
+
+`max_duration_seconds` is an enforced per-training-run deadline. SpeechBrain
+training runs in a child process; a run that exceeds the deadline is terminated
+and recorded with `terminated_by_budget`, timeout, exit code, and failure status.
+
+Resume an interrupted Study from its persisted experiment record:
+
+```bash
+python main.py --resume-experiment-id YYYYMMDD_HHMMSS_0
+```
+
+For an LLM-controlled Study, also pass `--enable-llm-advisor
+--controller-mode llm`. Resume rejects a controller-mode mismatch instead of
+silently changing the experiment policy.
+
+Completed and already-suggested Trials are reused. A Trial left in `running`
+state is reopened with the same Trial ID and output directory, so the scheduler
+does not generate a duplicate candidate. SpeechBrain can then recover from a
+checkpoint already present in that Trial directory; if no trainer checkpoint
+exists, only that interrupted Trial is rerun while completed Trials are kept.
+
+Resume also rebuilds Study summaries from durable Trial results, reconciles
+partially written promotions, and performs any pending batch review before
+generating new candidates. Committed reviews are not replayed. Training Trials
+use the experiment's frozen `config.yaml`, including legacy records whose
+snapshot reference is missing. If that snapshot is lost, restore it before
+resuming; the mutable source configuration is not used as a fallback.
+
+Optimization safety boundaries:
+
+- Raw verification scores must be finite, and score files must contain valid
+  positive and negative pairs. A declared score file that is missing, malformed,
+  or cannot be scored fails evaluation; the tool does not fall back to a
+  potentially misleading Runner metric. Finite, genuinely perfect scores remain valid.
+- Cross-Study observations enter samplers only when actual epochs, data fraction,
+  duration budget, and recorded experiment context match. Stage names alone do
+  not establish compatibility. Incompatible or unverified legacy history is
+  retained for reference but excluded from both sampler observations and candidate
+  deduplication, allowing those parameters to be evaluated at the new fidelity.
+  History merge keys include budget and context, not just parameter values.
+- Successive-halving retries remain inside `max_training_runs` and may use only
+  slots beyond the remaining initial/promotion allocation. A skipped retry records
+  its budget reason. Completion requires a valid result at the plan's highest
+  reachable confirmation rung (an explicit zero promotion limit ends the plan).
+  Otherwise the Study is `failed`, with confirmation progress and a clear reason;
+  screening-only results are not silently reported as a fully confirmed optimum.
 
 Evaluate one ECAPA-TDNN training checkpoint on an explicit verification list:
 

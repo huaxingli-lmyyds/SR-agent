@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from typing import Optional, Dict, Any, List, Tuple, Union
 from pathlib import Path
+from contextlib import contextmanager
 import hashlib
 import json
 import re
+import random
 import os
 import shutil
 import traceback
@@ -125,8 +127,8 @@ def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
     return best
 
 
-def _get_prep_cache_dir(tag: str) -> Path:
-    cache_dir = get_prep_cache_dir(tag)
+def _get_prep_cache_dir(tag: str, root: Optional[str] = None) -> Path:
+    cache_dir = resolve_project_path(root) / tag if root else get_prep_cache_dir(tag)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -135,6 +137,45 @@ def _prep_cache_tag(stage: str, **parameters: Any) -> str:
     payload = json.dumps(parameters, sort_keys=True, ensure_ascii=False, default=str)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
     return f"{stage}_{digest}"
+
+
+@contextmanager
+def _data_prep_random_state(seed):
+    """Do not let a cold preparation cache consume the training RNG stream."""
+    state = random.getstate()
+    try:
+        if seed is not None:
+            random.seed(seed)
+        yield
+    finally:
+        if seed is not None:
+            random.setstate(state)
+
+
+def _prepare_cached_data(stage, params, splits, sentence_len, random_segment=False):
+    arguments = {
+        "data_folder": params["data_folder"],
+        "verification_file": params["verification_file"],
+        "split_ratio": params["split_ratio"],
+        "sentence_len": sentence_len,
+        "splits": splits,
+        "skip_prep": False,
+        "source": params.get("voxceleb_source"),
+        "random_segment": random_segment,
+        "amp_th": params.get("amp_th", 5e-4),
+        "split_speaker": params.get("split_speaker", False),
+        "data_prep_seed": params.get("data_prep_seed"),
+    }
+    pairs = Path(arguments["verification_file"])
+    pairs_hash = hashlib.sha256(pairs.read_bytes()).hexdigest() if pairs.is_file() else None
+    cache_dir = _get_prep_cache_dir(
+        _prep_cache_tag(stage, **arguments, pairs_sha256=pairs_hash), params.get("prep_cache_root")
+    )
+    result = run_data_prep(**arguments, save_folder=str(cache_dir))
+    if params.get("prep_cache_root") and result.get("status") != "success":
+        # An isolated benchmark must not fall back to different preparation semantics.
+        raise RuntimeError(f"isolated data preparation failed: {result.get('error')}")
+    return result
 
 
 def _required_prep_files(splits: List[str], verification_file: str) -> List[str]:
@@ -174,7 +215,8 @@ def run_data_prep(
     random_segment: bool,
     amp_th: float,
     split_speaker: bool,
-    signal:str = None
+    signal:str = None,
+    data_prep_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     try:
         require_speechbrain()
@@ -199,19 +241,20 @@ def run_data_prep(
         save_path.mkdir(parents=True, exist_ok=True)
         verification_local = save_path / os.path.basename(str(verification_file))
         download_file(str(verification_file), str(verification_local))
-        prepare_module.prepare_voxceleb(
-            data_folder=data_folder,
-            save_folder=str(save_folder),
-            verification_pairs_file=str(verification_local),
-            splits=splits,
-            split_ratio=split_ratio,
-            seg_dur=sentence_len,
-            amp_th=amp_th,
-            source=source,
-            split_speaker=split_speaker,
-            random_segment=random_segment,
-            skip_prep=skip_prep,
-        )
+        with _data_prep_random_state(data_prep_seed):
+            prepare_module.prepare_voxceleb(
+                data_folder=data_folder,
+                save_folder=str(save_folder),
+                verification_pairs_file=str(verification_local),
+                splits=splits,
+                split_ratio=split_ratio,
+                seg_dur=sentence_len,
+                amp_th=amp_th,
+                source=source,
+                split_speaker=split_speaker,
+                random_segment=random_segment,
+                skip_prep=skip_prep,
+            )
 
         return {
             "status": "success",
@@ -313,26 +356,7 @@ def run_evaluation(
                 params[key] = str(resolved)
 
         splits = ["train", "dev", "test"]
-        cache_dir = _get_prep_cache_dir(_prep_cache_tag(
-            "eval",
-            data_folder=params["data_folder"],
-            verification_file=params["verification_file"],
-            split_ratio=params["split_ratio"],
-            splits=splits,
-        ))
-        cache_result = run_data_prep(
-            data_folder=params["data_folder"],
-            save_folder=str(cache_dir),
-            verification_file=params["verification_file"],
-            split_ratio=params["split_ratio"],
-            sentence_len=3.0,
-            splits=splits,
-            skip_prep=False,
-            source=params.get("voxceleb_source"),
-            random_segment=False,
-            amp_th=params.get("amp_th", 5e-4),
-            split_speaker=params.get("split_speaker", False),
-        )
+        cache_result = _prepare_cached_data("eval", params, splits, 3.0)
 
         if cache_result.get("status") == "success":
             required_files = _required_prep_files(splits, params["verification_file"])
@@ -392,6 +416,13 @@ def run_evaluation(
             veri_test
         )
 
+        from agent.utils.metrics import MetricsCalculator
+
+        # Recipe scores may be scalar tensors (including CUDA tensors).
+        positive_scores = [float(value) for value in positive_scores]
+        negative_scores = [float(value) for value in negative_scores]
+        MetricsCalculator.validate_score_arrays(positive_scores, negative_scores)
+
         eer, _ = verification_module.EER(
             torch.tensor(positive_scores), torch.tensor(negative_scores)
         )
@@ -404,7 +435,7 @@ def run_evaluation(
         return {
             "status": "success",
             "error": None,
-            "eer": float(eer) * 100,
+            "eer": float(eer),
             "min_dcf": float(min_dcf) * 100,
             "output_folder": str(params["output_folder"]),
             "scores_path": str(scores_path),
@@ -491,28 +522,8 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 hparams[key] = str(resolved)
 
         splits = ["train", "dev"]
-        cache_dir = _get_prep_cache_dir(_prep_cache_tag(
-            "train",
-            data_folder=hparams["data_folder"],
-            verification_file=hparams["verification_file"],
-            split_ratio=hparams["split_ratio"],
-            sentence_len=hparams["sentence_len"],
-            splits=splits,
-            random_chunk=hparams.get("random_chunk", False),
-            split_speaker=hparams.get("split_speaker", False),
-        ))
-        cache_result = run_data_prep(
-            data_folder=hparams["data_folder"],
-            save_folder=str(cache_dir),
-            verification_file=hparams["verification_file"],
-            split_ratio=hparams["split_ratio"],
-            sentence_len=hparams["sentence_len"],
-            splits=splits,
-            skip_prep=False,
-            source=hparams.get("voxceleb_source"),
-            random_segment=hparams.get("random_chunk", False),
-            amp_th=hparams.get("amp_th", 5e-4),
-            split_speaker=hparams.get("split_speaker", False),
+        cache_result = _prepare_cached_data(
+            "train", hparams, splits, hparams["sentence_len"], hparams.get("random_chunk", False)
         )
 
         if cache_result.get("status") == "success":

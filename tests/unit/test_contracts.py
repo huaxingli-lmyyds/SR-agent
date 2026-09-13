@@ -58,7 +58,10 @@ def test_agent_and_domain_contracts_keep_required_fields(tmp_path: Path) -> None
 def test_hpo_strategy_audit_contracts_are_json_serializable() -> None:
     proposal = StrategyProposal(
         action="switch_strategy",
-        requested_strategy="adaptive_search",
+        requested_sampler="agent_proposal",
+        sampler_config={},
+        hypotheses=[{"id": "h1", "claim": "local search should improve"}],
+        candidate_proposals=[{"parameters": {"lr": 0.001}, "hypothesis_id": "h1"}],
         reason_codes=["use_history"],
     )
     decision = StrategyDecisionRecord(
@@ -69,11 +72,15 @@ def test_hpo_strategy_audit_contracts_are_json_serializable() -> None:
         adopted_search_space={"parameters": [], "constraints": []},
         adopted_budgets=[{"stage": "full", "epochs": 10}],
         adopted_max_training_runs=4,
+        adopted_sampler="agent_proposal",
+        adopted_sampler_config={},
         accepted_fields=["requested_strategy"],
         reason_codes=["proposal_approved"],
     )
 
     assert proposal.to_dict()["proposal_id"].startswith("proposal_")
+    assert proposal.to_dict()["hypotheses"][0]["id"] == "h1"
+    assert proposal.to_dict()["candidate_proposals"][0]["parameters"]["lr"] == 0.001
     assert decision.to_dict()["proposal_id"] == proposal.proposal_id
 
 

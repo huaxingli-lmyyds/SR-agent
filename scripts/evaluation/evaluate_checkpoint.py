@@ -201,7 +201,7 @@ def evaluate_checkpoint(
             "seed": args.seed,
         },
         "metrics": {
-            "eer_percent": raw.get("eer"),
+            "eer": raw.get("eer"),
             "min_dcf": raw.get("min_dcf"),
         },
         "artifacts": {

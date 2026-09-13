@@ -6,6 +6,7 @@ from agent.core.contracts import OperationResult
 from agent.runners.contracts import collect_training_result, validate_runner_compatibility
 from agent.runners.registry import RunnerRegistry
 from agent.runners.speechbrain import SpeechBrainRunnerAdapter
+import agent.runners.speechbrain as speechbrain_runner_module
 
 
 class ExternalRunner:
@@ -79,3 +80,184 @@ def test_speechbrain_runner_owns_log_and_checkpoint_discovery(tmp_path: Path) ->
 
     assert collected["model_paths"] == [str(checkpoint)]
     assert collected["metrics"]["best_error_rate"] == 0.05
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True, "1"])
+def test_speechbrain_runner_rejects_invalid_training_deadlines(value) -> None:
+    with pytest.raises(ValueError, match="finite positive"):
+        SpeechBrainRunnerAdapter().run_training(
+            "unused.yaml", {"_hpo_max_duration_seconds": value}
+        )
+
+
+def test_speechbrain_runner_terminates_training_at_deadline(monkeypatch) -> None:
+    class FakeConnection:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        exitcode = None
+
+        def __init__(self):
+            self.alive = True
+            self.joins = []
+            self.terminated = False
+            self.sentinel = object()
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+            self.exitcode = -15
+
+    receive_connection = FakeConnection()
+    send_connection = FakeConnection()
+    process = FakeProcess()
+
+    class FakeContext:
+        def Pipe(self, duplex):
+            assert duplex is False
+            return receive_connection, send_connection
+
+        def Process(self, **kwargs):
+            assert kwargs["args"][2]["_hpo_max_duration_seconds"] == 2.5
+            return process
+
+    monkeypatch.setattr(
+        speechbrain_runner_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        speechbrain_runner_module,
+        "wait_for_process_io",
+        lambda objects, timeout: [],
+    )
+    result = SpeechBrainRunnerAdapter().run_training(
+        "unused.yaml", {"_hpo_max_duration_seconds": 2.5}
+    )
+
+    assert result["status"] == "failed"
+    assert result["terminated_by_budget"] is True
+    assert result["timeout_seconds"] == 2.5
+    assert process.terminated is True
+    assert process.joins == [10.0]
+    assert receive_connection.closed and send_connection.closed
+
+
+def test_speechbrain_runner_returns_child_result_before_join(monkeypatch) -> None:
+    expected = {"status": "success", "valid_error_rate": 0.2}
+
+    class FakeReceiveConnection:
+        def recv(self):
+            return expected
+
+        def close(self):
+            pass
+
+    class FakeSendConnection:
+        def close(self):
+            pass
+
+    class FakeProcess:
+        exitcode = 0
+        sentinel = object()
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            assert timeout == 10.0
+
+        def is_alive(self):
+            return False
+
+    class FakeContext:
+        def Pipe(self, duplex):
+            assert duplex is False
+            return receive_connection, FakeSendConnection()
+
+        def Process(self, **kwargs):
+            return FakeProcess()
+
+    receive_connection = FakeReceiveConnection()
+    monkeypatch.setattr(
+        speechbrain_runner_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        speechbrain_runner_module,
+        "wait_for_process_io",
+        lambda objects, timeout: [receive_connection],
+    )
+
+    assert SpeechBrainRunnerAdapter().run_training(
+        "unused.yaml", {"_hpo_max_duration_seconds": 3.0}
+    ) == expected
+
+
+def test_speechbrain_runner_reports_early_child_crash_without_waiting_for_deadline(
+    monkeypatch,
+) -> None:
+    class FakeReceiveConnection:
+        def poll(self):
+            return False
+
+        def close(self):
+            pass
+
+    class FakeSendConnection:
+        def close(self):
+            pass
+
+    class FakeProcess:
+        exitcode = 9
+        sentinel = object()
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            assert timeout == 10.0
+
+        def is_alive(self):
+            return False
+
+    process = FakeProcess()
+
+    class FakeContext:
+        def Pipe(self, duplex):
+            return FakeReceiveConnection(), FakeSendConnection()
+
+        def Process(self, **kwargs):
+            return process
+
+    monkeypatch.setattr(
+        speechbrain_runner_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        speechbrain_runner_module,
+        "wait_for_process_io",
+        lambda objects, timeout: [process.sentinel],
+    )
+
+    result = SpeechBrainRunnerAdapter().run_training(
+        "unused.yaml", {"_hpo_max_duration_seconds": 36000.0}
+    )
+    assert result["status"] == "failed"
+    assert result["process_exitcode"] == 9
+    assert result["terminated_by_budget"] is False

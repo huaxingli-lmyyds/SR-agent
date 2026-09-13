@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from math import prod
+from dataclasses import dataclass, field
+from math import isfinite, prod
 from typing import Any, Callable, Dict, List, Optional
 
 from .contracts import (
+    HPOStudy,
     Objective,
     SearchParameter,
     SearchSpace,
@@ -14,6 +15,7 @@ from .contracts import (
     StrategyProposal,
     TrialBudget,
 )
+from .history import budget_key
 
 
 @dataclass
@@ -52,6 +54,8 @@ class FailurePolicy:
 
     def classify(self, error: Optional[str]) -> FailureDecision:
         text = str(error or "").lower()
+        if "invalidmetricerror" in text or "invalid metric " in text:
+            return FailureDecision("invalid_metric", False)
         if any(marker in text for marker in self.NON_RECOVERABLE_MARKERS):
             return FailureDecision("configuration", False)
         if "timeout" in text:
@@ -169,6 +173,220 @@ class HPOPlanningPolicy:
         return prod(sizes)
 
 
+@dataclass
+class EvidenceGateResult:
+    proposal: Optional[StrategyProposal]
+    rejected_fields: List[Dict[str, Any]] = field(default_factory=list)
+    reason_codes: List[str] = field(default_factory=list)
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+
+class EvidenceGate:
+    """Require reproducible evidence before an LLM changes live search policy."""
+
+    PERFORMANCE_FIELDS = (
+        "requested_strategy",
+        "requested_sampler",
+        "sampler_config",
+        "search_space",
+        "candidate_proposals",
+    )
+
+    def __init__(
+        self,
+        *,
+        min_same_fidelity_trials: int = 6,
+        min_confidence: float = 0.65,
+        max_probe_candidates: int = 3,
+    ) -> None:
+        self.min_same_fidelity_trials = max(int(min_same_fidelity_trials), 1)
+        self.min_confidence = float(min_confidence)
+        self.max_probe_candidates = max(int(max_probe_candidates), 1)
+
+    def review(
+        self,
+        study: HPOStudy,
+        feedback: Dict[str, Any],
+        proposal: Optional[StrategyProposal],
+        *,
+        compatible_history_count: Optional[Callable[[Dict[str, Any]], int]] = None,
+    ) -> EvidenceGateResult:
+        if proposal is None:
+            return EvidenceGateResult(None)
+
+        comparable_rung = feedback.get("comparable_rung")
+        rung_summary = next(
+            (
+                item for item in feedback.get("rung_summaries") or []
+                if item.get("rung") == comparable_rung
+            ),
+            None,
+        )
+        comparable_count = int((
+            (rung_summary or {}).get("completed")
+            if comparable_rung is not None
+            else feedback.get("completed_trials")
+        ) or 0)
+        failure_driven = (
+            int(feedback.get("failed_trials") or 0) >= 2
+            and float(feedback.get("failure_rate") or 0.0) >= 0.5
+        )
+        candidate_confidences = []
+        for item in proposal.candidate_proposals:
+            if not isinstance(item, dict):
+                continue
+            value = item.get("confidence")
+            if (
+                value is not None
+                and not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and isfinite(float(value))
+                and 0 <= float(value) <= 1
+            ):
+                candidate_confidences.append(float(value))
+        confidence = proposal.confidence
+        invalid_proposal_confidence = (
+            confidence is not None
+            and (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not isfinite(float(confidence))
+                or not 0 <= float(confidence) <= 1
+            )
+        )
+        if invalid_proposal_confidence:
+            confidence = None
+        if confidence is None and candidate_confidences:
+            confidence = min(candidate_confidences)
+        targeted_probe = (
+            proposal.requested_sampler == "agent_proposal"
+            and 0 < len(proposal.candidate_proposals) <= self.max_probe_candidates
+        )
+        rejected: List[Dict[str, Any]] = []
+        blocked = set()
+
+        def reject(field_name: str, reason: str) -> None:
+            if field_name in blocked:
+                return
+            blocked.add(field_name)
+            rejected.append({"field": field_name, "reason": reason})
+
+        has_mutation = any(
+            getattr(proposal, name) not in (None, {}, [])
+            for name in self.PERFORMANCE_FIELDS
+        )
+        if has_mutation and invalid_proposal_confidence:
+            for name in self.PERFORMANCE_FIELDS:
+                if getattr(proposal, name) not in (None, {}, []):
+                    reject(name, "LLM confidence must be a finite number in [0, 1]")
+        elif has_mutation and not failure_driven:
+            if confidence is None or confidence < self.min_confidence:
+                for name in self.PERFORMANCE_FIELDS:
+                    if getattr(proposal, name) not in (None, {}, []):
+                        reject(name, f"LLM confidence must be at least {self.min_confidence}")
+            if comparable_count < self.min_same_fidelity_trials:
+                for name in ("requested_strategy", "requested_sampler", "sampler_config"):
+                    if getattr(proposal, name) not in (None, {}, []):
+                        if targeted_probe and name == "requested_sampler":
+                            continue
+                        reject(
+                            name,
+                            "performance-driven policy changes require at least "
+                            f"{self.min_same_fidelity_trials} completed same-fidelity Trials",
+                        )
+                if proposal.search_space is not None:
+                    reject(
+                        "search_space",
+                        "search-space changes require at least "
+                        f"{self.min_same_fidelity_trials} completed same-fidelity Trials",
+                    )
+                if proposal.candidate_proposals and not targeted_probe:
+                    reject(
+                        "candidate_proposals",
+                        "candidate proposals without a bounded agent_proposal probe need "
+                        "the normal evidence threshold",
+                    )
+
+        if proposal.search_space is not None and "search_space" not in blocked:
+            old_parameters = {
+                item.name: item.to_dict() for item in study.search_space.parameters
+            }
+            new_parameters = {
+                item.get("name"): item
+                for item in proposal.search_space.get("parameters") or []
+                if isinstance(item, dict) and item.get("name")
+            }
+            changed = [
+                name for name in set(old_parameters) | set(new_parameters)
+                if old_parameters.get(name) != new_parameters.get(name)
+            ]
+            observations = feedback.get("parameter_observations") or {}
+            unsupported = [
+                name for name in changed
+                if len((observations.get(name) or {}).get("unique_values") or []) < 2
+            ]
+            if unsupported and not failure_driven:
+                reject(
+                    "search_space",
+                    "changed parameters lack two distinct same-fidelity observations: "
+                    + ", ".join(sorted(unsupported)),
+                )
+            selected_sampler = proposal.requested_sampler or study.candidate_strategy or study.sampler_strategy
+            if (
+                selected_sampler == "tpe"
+                and compatible_history_count is not None
+                and not failure_driven
+            ):
+                retained = compatible_history_count(proposal.search_space)
+                startup = int((proposal.sampler_config or study.sampler_config).get("n_startup_trials", 3))
+                if retained < startup:
+                    reject(
+                        "search_space",
+                        f"search-space change retains {retained} TPE observations; {startup} required",
+                    )
+
+        if targeted_probe and "candidate_proposals" not in blocked:
+            invalid_confidence = any(
+                not isinstance(item, dict)
+                or isinstance(item.get("confidence"), bool)
+                or not isinstance(item.get("confidence"), (int, float))
+                or not isfinite(float(item["confidence"]))
+                or not 0 <= float(item["confidence"]) <= 1
+                or float(item["confidence"]) < self.min_confidence
+                for item in proposal.candidate_proposals
+            )
+            if invalid_confidence and not failure_driven:
+                reject(
+                    "candidate_proposals",
+                    f"every targeted probe requires confidence >= {self.min_confidence}",
+                )
+                reject("requested_sampler", "agent_proposal has no evidence-approved candidates")
+
+        value = proposal.to_dict()
+        for field_name in blocked:
+            value[field_name] = {} if field_name == "sampler_config" else [] if field_name == "candidate_proposals" else None
+        if not any(value.get(name) not in (None, {}, []) for name in self.PERFORMANCE_FIELDS):
+            value["action"] = "keep_strategy"
+        value["reason_codes"] = list(dict.fromkeys([
+            *(value.get("reason_codes") or []),
+            *(["evidence_gate_rejected_fields"] if rejected else []),
+        ]))
+        return EvidenceGateResult(
+            StrategyProposal.from_dict(value, preserve_audit_fields=True),
+            rejected_fields=rejected,
+            reason_codes=["evidence_gate_rejected_fields"] if rejected else [],
+            evidence={
+                "comparable_rung": comparable_rung,
+                "same_fidelity_completed_trials": comparable_count,
+                "minimum_same_fidelity_trials": self.min_same_fidelity_trials,
+                "proposal_confidence": confidence,
+                "minimum_confidence": self.min_confidence,
+                "failure_driven_exception": failure_driven,
+                "targeted_probe_exception": targeted_probe,
+            },
+        )
+
+
 class StrategyDecisionPolicy:
     """Apply only proposal fields that pass deterministic service-layer validation."""
 
@@ -194,6 +412,7 @@ class StrategyDecisionPolicy:
         objectives: List[Objective],
         available_strategies: List[str],
         validate_plan: Callable[..., None],
+        confirmation_budget: Optional[TrialBudget] = None,
     ) -> StrategyDecisionRecord:
         strategy = base_strategy
         search_space = base_search_space
@@ -211,6 +430,13 @@ class StrategyDecisionPolicy:
             next_budgets: List[TrialBudget],
             next_runs: int,
         ) -> None:
+            if confirmation_budget is not None:
+                if not next_budgets or budget_key(next_budgets[-1].to_dict()) != budget_key(
+                    confirmation_budget.to_dict()
+                ):
+                    raise ValueError(
+                        "final budget differs from the frozen Campaign confirmation budget"
+                    )
             validate_plan(
                 next_space,
                 objectives,
@@ -228,6 +454,10 @@ class StrategyDecisionPolicy:
             )
         if proposal.action not in self.ACTIONS:
             reject("action", f"unsupported proposal action: {proposal.action}")
+            return self._record(
+                "rejected", proposal, strategy, search_space, budgets,
+                max_training_runs, accepted, rejected, ["proposal_rejected"],
+            )
         if proposal.confidence is not None and (
             isinstance(proposal.confidence, bool)
             or not isinstance(proposal.confidence, (int, float))
@@ -399,6 +629,7 @@ class OptimizationPlanDecisionPolicy:
         base_initial_trial_count: Optional[int] = None,
         base_promotion_limits: Optional[List[int]] = None,
         base_reduction_factor: int = 3,
+        confirmation_budget: Optional[TrialBudget] = None,
     ) -> StrategyDecisionRecord:
         sampler_request = None
         if proposal is not None:
@@ -471,6 +702,7 @@ class OptimizationPlanDecisionPolicy:
                 if item != "successive_halving"
             ],
             validate_plan=validate_sampler_plan,
+            confirmation_budget=confirmation_budget,
         )
         if proposal is not None:
             decision.proposal_id = proposal.proposal_id

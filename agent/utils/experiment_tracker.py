@@ -9,6 +9,7 @@ from typing import Union, Dict, List, Optional, Any
 from datetime import datetime
 import json
 import shutil
+from uuid import uuid4
 
 # 导入路径工具
 from .path_tool import (
@@ -19,6 +20,21 @@ from .path_tool import (
     resolve_config_value_path,
 )
 from .experiment_versioning import sync_experiment_catalog
+
+
+def _write_json_atomic(path: Path, value: Dict[str, Any]) -> None:
+    """Replace a JSON record only after its complete content reaches disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(value, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 @dataclass
@@ -170,8 +186,7 @@ class ExperimentTracker:
         
         # 保存实验记录
         record_path = exp_dir / "experiment_record.json"
-        with open(record_path, 'w', encoding='utf-8') as f:
-            json.dump(experiment_record, f, indent=2, ensure_ascii=False)
+        _write_json_atomic(record_path, experiment_record)
         sync_experiment_catalog(experiments_dir, exp_dir, experiment_record)
         
         # 更新历史记录
@@ -272,7 +287,7 @@ class ExperimentTracker:
                 record["completed_at"] = now
         if error is not None:
             record["error"] = error
-        elif status == "success":
+        elif status in {"running", "success"}:
             record["error"] = None
         if duration is not None:
             record["duration_seconds"] = duration
@@ -315,8 +330,7 @@ class ExperimentTracker:
         
         # 保存更新后的记录
         record_path = record_dir / experiment_id / "experiment_record.json"
-        with open(record_path, 'w', encoding='utf-8') as f:
-            json.dump(record, f, indent=2, ensure_ascii=False)
+        _write_json_atomic(record_path, record)
         sync_experiment_catalog(record_dir, record_dir / experiment_id, record)
         
         # 更新历史记录
@@ -370,6 +384,31 @@ class ExperimentTracker:
         """
         record, _ = self._load_record(experiment_id)
         return record
+
+    def get_config_snapshot(self, experiment_id: str) -> Path:
+        """Resolve the experiment's immutable config, including legacy records.
+
+        Never fall back to the mutable source config for a resumed Trial.
+        Prefer the local snapshot so moved stores and missing legacy references
+        still work.
+        """
+        if not experiment_id or any(
+            not (char.isalnum() or char in "_-") for char in experiment_id
+        ):
+            raise ValueError("invalid experiment_id")
+        record, record_dir = self._load_record(experiment_id)
+        if record is None:
+            raise ValueError(f"experiment not found: {experiment_id}")
+        local_snapshot = record_dir / experiment_id / "config.yaml"
+        if local_snapshot.is_file():
+            return local_snapshot
+        recorded = (record.get("execution") or {}).get("config_backup_path")
+        if recorded and Path(recorded).is_file():
+            return Path(recorded)
+        raise FileNotFoundError(
+            f"config snapshot missing for experiment {experiment_id}; "
+            "restore its config.yaml before resuming"
+        )
     
     def list_experiments(self, 
                        status: Optional[str] = None,
@@ -785,9 +824,10 @@ class ExperimentTracker:
                 "implementation": "unknown",
                 "config_path": config_path,
             },
-            "execution": execution or {
+            "execution": {
                 "runner": "unknown",
                 "output_folder": output_folder,
+                **(execution or {}),
                 "config_backup_path": config_backup_path,
             },
         }
@@ -847,6 +887,8 @@ class ExperimentTracker:
         return get_experiment_type_dir(experiment_type) / "experiments_history.json"
 
     def _load_record(self, experiment_id: str, experiment_type: Optional[str] = None) -> tuple[Optional[Dict], Path]:
+        if not experiment_id or any(c in experiment_id for c in ("/", "\\", ":")) or experiment_id in {".", ".."}:
+            return None, self.experiments_dir
         if experiment_type:
             record_dir = self._record_dir(experiment_type)
             record_path = record_dir / experiment_id / "experiment_record.json"
@@ -856,10 +898,11 @@ class ExperimentTracker:
             return None, record_dir
 
         candidate_dirs = [self.experiments_dir]
-        for candidate_type in ("hpo", "data_processing", "orchestration"):
-            record_dir = get_experiment_type_dir(candidate_type)
-            if record_dir not in candidate_dirs:
-                candidate_dirs.append(record_dir)
+        if not self._custom_experiments_dir:
+            for candidate_type in ("hpo", "data_processing", "orchestration"):
+                record_dir = get_experiment_type_dir(candidate_type)
+                if record_dir not in candidate_dirs:
+                    candidate_dirs.append(record_dir)
 
         for record_dir in candidate_dirs:
             record_path = record_dir / experiment_id / "experiment_record.json"
@@ -867,12 +910,7 @@ class ExperimentTracker:
                 with open(record_path, 'r', encoding='utf-8') as f:
                     return json.load(f), record_dir
 
-        record_dir = self.experiments_dir
-        record_path = record_dir / experiment_id / "experiment_record.json"
-        if record_path.exists():
-            with open(record_path, 'r', encoding='utf-8') as f:
-                return json.load(f), record_dir
-        return None, record_dir
+        return None, self.experiments_dir
 
     def _record_dir(self, experiment_type: str) -> Path:
         return self.experiments_dir if self._custom_experiments_dir else get_experiment_type_dir(experiment_type)

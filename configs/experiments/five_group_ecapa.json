@@ -1,0 +1,35 @@
+{
+  "model_family": "ecapa_tdnn",
+  "train_config": "configs/train_ecapa_tdnn.yaml",
+  "validation_config": "configs/verification_ecapa.yaml",
+  "runner": "speechbrain",
+  "implementation": "speechbrain",
+  "model_name": "GLM-4.7",
+  "temperature": 0.0,
+  "seeds": [11, 22, 33],
+  "data_prep_seed": 0,
+  "full_epochs": 24,
+  "full_trials": 9,
+  "sh_initial_trials": 9,
+  "promotion_limits": [3, 1],
+  "budgets": [
+    {"stage": "screen", "epochs": 3, "data_fraction": 0.25},
+    {"stage": "promote", "epochs": 8, "data_fraction": 0.5},
+    {"stage": "full", "epochs": 24, "data_fraction": 1.0}
+  ],
+  "candidate_batch_size": 3,
+  "n_startup_trials": 3,
+  "max_retries": 0,
+  "device": "cuda:0",
+  "precision": "fp32",
+  "eval_precision": "fp32",
+  "search_space": {
+    "parameters": [
+      {"name": "lr", "parameter_type": "float", "low": 0.0003, "high": 0.003, "scale": "log"},
+      {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
+      {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
+      {"name": "weight_decay", "parameter_type": "float", "low": 0.0000005, "high": 0.00002, "scale": "log"}
+    ],
+    "constraints": []
+  }
+}

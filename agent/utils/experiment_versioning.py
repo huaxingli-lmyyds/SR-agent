@@ -33,6 +33,9 @@ def build_version_manifest(record: Dict[str, Any], experiment_dir: Path, root: P
         "implementation": str(model.get("implementation") or "unknown"),
         "runner": str(execution.get("runner") or "unknown"),
         "dataset": str(task.get("dataset") or ""),
+        "primary_metric": task.get("primary_metric"),
+        "metric_mode": task.get("metric_mode"),
+        "metric_protocol": task.get("metric_protocol"),
     }
     return {
         "schema_version": "1.0",
@@ -78,6 +81,8 @@ def sync_experiment_catalog(root: Path, experiment_dir: Path, record: Dict[str, 
         "study_index": manifest["study_index"],
         "status": manifest["status"],
         "primary_metric": (record.get("task") or {}).get("primary_metric"),
+        "metric_mode": (record.get("task") or {}).get("metric_mode"),
+        "metric_protocol": (record.get("task") or {}).get("metric_protocol"),
         "metrics": record.get("metrics") or {},
         "manifest_path": manifest_path.relative_to(root).as_posix(),
         "updated_at": manifest["updated_at"],

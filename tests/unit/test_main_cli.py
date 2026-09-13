@@ -14,6 +14,12 @@ def test_cli_accepts_tpe_and_llm_advisor_flag() -> None:
     assert args.enable_llm_advisor is True
 
 
+def test_cli_exposes_resume_experiment_id() -> None:
+    args = parse_args("--resume-experiment-id", "hpo_abc123")
+
+    assert build_context(args)["resume_experiment_id"] == "hpo_abc123"
+
+
 def test_cli_builds_single_budget_from_budget_flags() -> None:
     args = parse_args(
         "--strategy",
@@ -63,6 +69,10 @@ def test_cli_builds_budget_controls() -> None:
         "2",
         "--strategy-review-interval-trials",
         "4",
+        "--candidate-batch-size",
+        "2",
+        "--sampler-config-json",
+        '{"n_startup_trials":3,"multivariate":false}',
         "--max-retries",
         "2",
     )
@@ -80,8 +90,13 @@ def test_cli_builds_budget_controls() -> None:
     assert budget["promotion_limits"] == [2, 1]
     assert budget["min_completed_per_rung"] == 2
     assert budget["strategy_review_interval_trials"] == 4
+    assert budget["candidate_batch_size"] == 2
     assert budget["max_retries"] == 2
     assert context["target_value"] == 2.5
+    assert context["sampler_config"] == {
+        "n_startup_trials": 3,
+        "multivariate": False,
+    }
 
 
 def test_cli_accepts_json_budgets_and_search_space() -> None:
@@ -121,6 +136,12 @@ def test_cli_passes_runtime_options_to_context() -> None:
         "fp32",
         "--eval-precision",
         "fp32",
+        "--verification-config",
+        "validation.yaml",
+        "--validation-pairs",
+        "validation_pairs.txt",
+        "--training-exclusion-pairs",
+        "all_exclusions.txt",
     )
 
     context = build_context(args)
@@ -129,6 +150,9 @@ def test_cli_passes_runtime_options_to_context() -> None:
         "device": "cuda:0",
         "precision": "fp32",
         "eval_precision": "fp32",
+        "verification_config": "validation.yaml",
+        "validation_pairs": "validation_pairs.txt",
+        "training_exclusion_pairs": "all_exclusions.txt",
     }
 
 

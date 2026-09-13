@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 
 def _load_env() -> None:
@@ -71,6 +71,51 @@ class AdvisoryAgentBase:
         else:
             content = getattr(message, "content", message)
         return str(content)
+
+    def _invoke_with_readonly_tools(
+        self,
+        prompt: str,
+        tools: List[Any],
+        *,
+        max_tool_rounds: int = 2,
+    ) -> Any:
+        """Run a bounded read-only tool loop, then require a final model answer."""
+        if not tools or not hasattr(self.llm, "bind_tools"):
+            return self.llm.invoke(prompt)
+        try:
+            from langchain_core.messages import HumanMessage, ToolMessage
+
+            bound = self.llm.bind_tools(tools)
+            messages: List[Any] = [HumanMessage(content=prompt)]
+            by_name = {getattr(item, "name", ""): item for item in tools}
+            for _ in range(max(int(max_tool_rounds), 0)):
+                response = bound.invoke(messages)
+                tool_calls = list(getattr(response, "tool_calls", None) or [])
+                if not tool_calls:
+                    return response
+                messages.append(response)
+                for call in tool_calls:
+                    name = str(call.get("name") or "")
+                    call_id = str(call.get("id") or name or "tool_call")
+                    selected = by_name.get(name)
+                    if selected is None:
+                        result = f"read-only tool is not available: {name}"
+                    else:
+                        try:
+                            result = str(selected.invoke(call.get("args") or {}))
+                        except Exception as exc:
+                            result = f"{type(exc).__name__}: {exc}"
+                    messages.append(ToolMessage(content=result, tool_call_id=call_id))
+            messages.append(HumanMessage(
+                content=(
+                    "Using the read-only evidence already collected, return the final raw JSON "
+                    "object required by the original schema. Do not call another tool."
+                )
+            ))
+            return self.llm.invoke(messages)
+        except Exception:
+            # Provider/tool-calling incompatibility must not disable the advisor.
+            return self.llm.invoke(prompt)
 
 
 class LangGraphAgent(AdvisoryAgentBase):

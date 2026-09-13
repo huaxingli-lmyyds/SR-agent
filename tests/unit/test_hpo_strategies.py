@@ -1,5 +1,6 @@
 from agent.hpo import (
     AdaptiveSearchStrategy,
+    AgentProposalStrategy,
     GridSearchStrategy,
     HPOPlanningPolicy,
     Objective,
@@ -22,6 +23,64 @@ def test_grid_search_enumerates_unique_combinations() -> None:
 
     assert len(suggestions) == 4
     assert len({tuple(sorted(item.items())) for item in suggestions}) == 4
+
+
+def test_grid_search_omits_inactive_conditions_regardless_of_field_order() -> None:
+    space = SearchSpace([
+        SearchParameter("momentum", "categorical", choices=[0.8, 0.9], condition={"optimizer": "sgd"}),
+        SearchParameter("optimizer", "categorical", choices=["adam", "sgd"]),
+    ])
+
+    suggestions = GridSearchStrategy().suggest(space, 10)
+
+    assert {tuple(sorted(item.items())) for item in suggestions} == {
+        (("optimizer", "adam"),),
+        (("momentum", 0.8), ("optimizer", "sgd")),
+        (("momentum", 0.9), ("optimizer", "sgd")),
+    }
+
+
+def test_agent_proposal_is_a_standalone_candidate_strategy() -> None:
+    space = SearchSpace([
+        SearchParameter("lr", "categorical", choices=[0.1, 0.2, 0.3]),
+    ])
+
+    suggestions = AgentProposalStrategy().suggest(
+        space,
+        2,
+        proposed_candidates=[{
+            "parameters": {"lr": 0.2},
+            "proposal_id": "proposal_a",
+            "hypothesis_id": "hypothesis_a",
+            "rationale": "probe the middle of the grid",
+        }],
+    )
+
+    assert suggestions == [{"lr": 0.2}]
+
+
+def test_adaptive_search_clamps_all_values_to_a_revised_search_space() -> None:
+    space = SearchSpace([
+        SearchParameter("lr", "float", low=0.0, high=0.5),
+        SearchParameter("weight_decay", "float", low=0.0, high=0.5),
+    ])
+    history = [Trial(
+        "trial_old",
+        {"lr": 0.9, "weight_decay": 0.9},
+        TrialBudget("full"),
+        status="completed",
+        metrics={"eer": 0.1},
+    )]
+
+    suggestions = AdaptiveSearchStrategy().suggest(
+        space, 2, history=history, objective=Objective("eer", "min")
+    )
+
+    assert suggestions
+    assert all(
+        0.0 <= item["lr"] <= 0.5 and 0.0 <= item["weight_decay"] <= 0.5
+        for item in suggestions
+    )
 
 
 def test_adaptive_search_moves_around_best_completed_trial() -> None:

@@ -36,6 +36,18 @@ class OrchestrationDecisionPolicy:
             item for item in available if item not in preferred
         ]
 
+    def order_for_context(
+        self,
+        registry: AgentRegistry,
+        context: Dict[str, Any],
+    ) -> List[str]:
+        if context.get("resume_experiment_id"):
+            available = {
+                item["agent_type"] for item in registry.describe()
+            }
+            return ["hpo_agent"] if "hpo_agent" in available else []
+        return self.order(registry)
+
 
 class OrchestrationWorkflow:
     def __init__(
@@ -89,8 +101,15 @@ class OrchestrationWorkflow:
             advice = self.advisor(descriptions, state.get("context") or {}) if self.advisor else {}
         except Exception as exc:
             advice = {"advice_error": f"{type(exc).__name__}: {exc}"}
+        context = state.get("context") or {}
+        context_order = getattr(self.decision_policy, "order_for_context", None)
+        pending_agents = (
+            context_order(self.registry, context)
+            if callable(context_order)
+            else self.decision_policy.order(self.registry)
+        )
         return {
-            "pending_agents": self.decision_policy.order(self.registry),
+            "pending_agents": pending_agents,
             "advice": dict(advice or {}),
         }
 

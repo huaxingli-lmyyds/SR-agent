@@ -53,6 +53,7 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "AnalyzeTrainingCurves": ("agent.tools.training_diagnostics_tools", "AnalyzeTrainingCurves"),
     "DiagnoseFitStatus": ("agent.tools.training_diagnostics_tools", "DiagnoseFitStatus"),
     "ScoreExperiment": ("agent.tools.reward_tools", "ScoreExperiment"),
+    "build_hpo_analysis_tools": ("agent.tools.hpo_analysis_tools", "build_hpo_analysis_tools"),
 }
 
 

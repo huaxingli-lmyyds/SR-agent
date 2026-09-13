@@ -1,11 +1,16 @@
+import pytest
+
 from agent.hpo import (
     CampaignPolicy,
+    EvidenceGate,
     HPOFeedbackAnalyzer,
     HPOStudy,
     Objective,
     OptimizationCampaign,
     SearchParameter,
     SearchSpace,
+    StrategyDecisionPolicy,
+    StrategyProposal,
     Trial,
     TrialBudget,
 )
@@ -62,7 +67,18 @@ def test_feedback_clusters_failures_and_detects_search_boundary() -> None:
     assert feedback["cost_summary"]["stages"]["evaluation"][
         "average_duration_seconds"
     ] == 20.0
-    assert proposal.requested_strategy == "random_search"
+    assert feedback["search_phase_summaries"] == [{
+        "search_phase": 0,
+        "sampler": None,
+        "sampler_config": {},
+        "rung": 0,
+        "total": 3,
+        "completed": 1,
+        "failed": 2,
+        "best_metric": 0.1,
+        "average_metric": 0.1,
+    }]
+    assert proposal.requested_sampler == "random_search"
     assert proposal.search_space["parameters"][0]["low"] < 0.0
 
 
@@ -105,7 +121,7 @@ def test_feedback_uses_adaptive_generation_when_history_is_available() -> None:
 
     proposal = HPOFeedbackAnalyzer().propose(study, HPOFeedbackAnalyzer().analyze(study, trials))
 
-    assert proposal.requested_strategy == "adaptive_search"
+    assert proposal.requested_sampler == "adaptive_search"
 
 
 def test_feedback_preserves_tpe_and_does_not_select_it_when_unavailable() -> None:
@@ -123,9 +139,9 @@ def test_feedback_preserves_tpe_and_does_not_select_it_when_unavailable() -> Non
     analyzer = HPOFeedbackAnalyzer()
     feedback = analyzer.analyze(study, trials)
 
-    assert analyzer.propose(study, feedback, ["adaptive_search"]).requested_strategy == "adaptive_search"
+    assert analyzer.propose(study, feedback, ["adaptive_search"]).requested_sampler == "adaptive_search"
     study.candidate_strategy = "tpe"
-    assert analyzer.propose(study, feedback, ["tpe"]).requested_strategy == "tpe"
+    assert analyzer.propose(study, feedback, ["tpe"]).requested_sampler == "tpe"
 
 
 def test_failed_trial_metric_is_not_counted_as_completed_feedback() -> None:
@@ -158,3 +174,78 @@ def test_campaign_stops_on_target_patience_and_total_cost() -> None:
     policy.record_study(cost, experiment_id="a", study_id="a", best_value=0.1, training_runs=2)
     assert not policy.should_continue(cost)
     assert cost.stop_reason == "max_total_training_runs_reached"
+
+
+def test_campaign_rejects_a_changed_confirmation_protocol() -> None:
+    campaign = OptimizationCampaign(Objective("eer", "min"), max_studies=2)
+    policy = CampaignPolicy()
+    frozen = {
+        "objective": {"metric": "eer", "mode": "min"},
+        "final_budget": {"epochs": 20, "data_fraction": 1.0},
+        "validation_pairs_sha256": "validation-a",
+    }
+    policy.record_study(
+        campaign, experiment_id="a", study_id="a", best_value=0.1,
+        training_runs=1, confirmation_signature=frozen,
+    )
+
+    changed = {**frozen, "validation_pairs_sha256": "validation-b"}
+    with pytest.raises(ValueError, match="frozen Campaign protocol"):
+        policy.record_study(
+            campaign, experiment_id="b", study_id="b", best_value=0.09,
+            training_runs=1, confirmation_signature=changed,
+        )
+    assert campaign.confirmation_signature == frozen
+    assert len(campaign.study_summaries) == 1
+
+
+def test_planning_policy_cannot_change_frozen_final_budget() -> None:
+    study = _study()
+    decision = StrategyDecisionPolicy().review(
+        StrategyProposal(
+            action="adjust_budget",
+            budgets=[{"stage": "full", "epochs": 2}],
+        ),
+        base_strategy="random_search",
+        base_search_space=study.search_space,
+        base_budgets=study.budgets,
+        hard_max_training_runs=4,
+        objectives=study.objectives,
+        available_strategies=["random_search"],
+        validate_plan=lambda *args, **kwargs: None,
+        confirmation_budget=study.budgets[-1],
+    )
+
+    assert decision.adopted_budgets == [study.budgets[-1].to_dict()]
+    assert "budgets" in {item["field"] for item in decision.rejected_fields}
+
+
+def test_evidence_gate_requires_same_fidelity_evidence_and_finite_confidence() -> None:
+    study = _study()
+    feedback = {
+        "comparable_rung": 0,
+        "rung_summaries": [{"rung": 0, "completed": 5}],
+        "completed_trials": 5,
+        "failed_trials": 0,
+        "failure_rate": 0.0,
+    }
+    gate = EvidenceGate(min_same_fidelity_trials=6)
+    proposal = StrategyProposal(
+        action="switch_strategy", requested_sampler="adaptive_search",
+        confidence=0.9,
+    )
+
+    blocked = gate.review(study, feedback, proposal)
+    assert blocked.proposal.requested_sampler is None
+    assert blocked.proposal.action == "keep_strategy"
+    assert blocked.evidence["same_fidelity_completed_trials"] == 5
+
+    feedback["rung_summaries"][0]["completed"] = 6
+    approved = gate.review(study, feedback, proposal)
+    assert approved.proposal.requested_sampler == "adaptive_search"
+    assert approved.rejected_fields == []
+
+    proposal.confidence = float("nan")
+    malformed = gate.review(study, feedback, proposal)
+    assert malformed.proposal.requested_sampler is None
+    assert malformed.rejected_fields

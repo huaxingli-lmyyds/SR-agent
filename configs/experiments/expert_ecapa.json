@@ -1,0 +1,12 @@
+{
+  "model_family": "ecapa_tdnn",
+  "implementation": "speechbrain",
+  "runner": "speechbrain",
+  "train_config": "configs/train_ecapa_tdnn.yaml",
+  "validation_config": "configs/verification_ecapa.yaml",
+  "seeds": null,
+  "data_prep_seed": 0,
+  "device": "cuda:0",
+  "precision": "fp32",
+  "eval_precision": "fp32"
+}

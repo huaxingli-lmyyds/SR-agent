@@ -69,6 +69,7 @@ for name in (
     "MetricsVisualizer",
     "extract_log_metrics",
     "extract_scores_data",
+    "resolve_evaluation_metrics",
     "compute_metrics_from_scores",
     "compare_experiments",
 ):

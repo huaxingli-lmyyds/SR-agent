@@ -70,6 +70,7 @@ class StrategyProposal:
     action: str
     requested_strategy: Optional[str] = None
     requested_sampler: Optional[str] = None
+    sampler_config: Dict[str, Any] = field(default_factory=dict)
     requested_pruner: Optional[str] = None
     search_space: Optional[Dict[str, Any]] = None
     budgets: Optional[List[Dict[str, Any]]] = None
@@ -77,6 +78,8 @@ class StrategyProposal:
     initial_trial_count: Optional[int] = None
     promotion_limits: Optional[List[int]] = None
     reduction_factor: Optional[int] = None
+    hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    candidate_proposals: List[Dict[str, Any]] = field(default_factory=list)
     reason_codes: List[str] = field(default_factory=list)
     evidence: Dict[str, Any] = field(default_factory=dict)
     expected_effect: Dict[str, Any] = field(default_factory=dict)
@@ -85,13 +88,19 @@ class StrategyProposal:
     created_at: str = field(default_factory=_now)
 
     @classmethod
-    def from_dict(cls, value: Dict[str, Any]) -> "StrategyProposal":
+    def from_dict(
+        cls,
+        value: Dict[str, Any],
+        *,
+        preserve_audit_fields: bool = False,
+    ) -> "StrategyProposal":
         if not isinstance(value, dict):
             raise ValueError("strategy proposal must be a JSON object")
-        return cls(
+        proposal = cls(
             action=str(value.get("action") or ""),
             requested_strategy=value.get("requested_strategy"),
             requested_sampler=value.get("requested_sampler"),
+            sampler_config=dict(value.get("sampler_config") or {}),
             requested_pruner=value.get("requested_pruner"),
             search_space=value.get("search_space"),
             budgets=value.get("budgets"),
@@ -99,11 +108,26 @@ class StrategyProposal:
             initial_trial_count=value.get("initial_trial_count"),
             promotion_limits=value.get("promotion_limits"),
             reduction_factor=value.get("reduction_factor"),
+            hypotheses=[
+                dict(item) for item in (value.get("hypotheses") or [])
+                if isinstance(item, dict)
+            ],
+            candidate_proposals=[
+                dict(item) for item in (value.get("candidate_proposals") or [])
+                if isinstance(item, dict)
+            ],
             reason_codes=list(value.get("reason_codes") or []),
             evidence=dict(value.get("evidence") or {}),
             expected_effect=dict(value.get("expected_effect") or {}),
             confidence=value.get("confidence"),
         )
+        # IDs and timestamps supplied by an LLM are untrusted.  Internal policy
+        # transformations may opt in to preserving already-issued audit fields.
+        if preserve_audit_fields and value.get("proposal_id"):
+            proposal.proposal_id = str(value["proposal_id"])
+        if preserve_audit_fields and value.get("created_at"):
+            proposal.created_at = str(value["created_at"])
+        return proposal
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -119,6 +143,7 @@ class StrategyDecisionRecord:
     adopted_budgets: List[Dict[str, Any]]
     adopted_max_training_runs: int
     adopted_sampler: Optional[str] = None
+    adopted_sampler_config: Dict[str, Any] = field(default_factory=dict)
     adopted_pruner: str = "none"
     adopted_initial_trial_count: Optional[int] = None
     adopted_promotion_limits: List[int] = field(default_factory=list)
@@ -128,6 +153,12 @@ class StrategyDecisionRecord:
     accepted_fields: List[str] = field(default_factory=list)
     rejected_fields: List[Dict[str, Any]] = field(default_factory=list)
     reason_codes: List[str] = field(default_factory=list)
+    scope: str = "study_planning"
+    applied: bool = False
+    effective_from_trial_index: Optional[int] = None
+    affected_trial_ids: List[str] = field(default_factory=list)
+    realized_outcome: Dict[str, Any] = field(default_factory=dict)
+    effect_estimate: Dict[str, Any] = field(default_factory=dict)
     decision_id: str = field(default_factory=lambda: _record_id("decision"))
     created_at: str = field(default_factory=_now)
 
@@ -148,6 +179,11 @@ class Trial:
     cost: Dict[str, Any] = field(default_factory=dict)
     artifacts: List[Dict[str, Any]] = field(default_factory=list)
     stop_reason: Optional[str] = None
+    candidate_source: str = "optimizer"
+    search_phase: int = 0
+    proposal_id: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+    provenance: Dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 
@@ -168,15 +204,26 @@ class HPOStudy:
     sampler_strategy: Optional[str] = None
     pruner_strategy: Optional[str] = None
     candidate_strategy: Optional[str] = None
+    controller_mode: str = "auto"
     reduction_factor: int = 3
     max_trials: Optional[int] = None
     initial_trial_count: Optional[int] = None
     promotion_limits: List[int] = field(default_factory=list)
     max_training_runs: Optional[int] = None
     min_completed_per_rung: int = 1
+    candidate_batch_size: Optional[int] = None
+    sampler_config: Dict[str, Any] = field(default_factory=dict)
+    search_phases: List[Dict[str, Any]] = field(default_factory=list)
+    hypotheses: List[Dict[str, Any]] = field(default_factory=list)
+    pending_candidate_proposals: List[Dict[str, Any]] = field(default_factory=list)
+    candidate_proposal_reviews: List[Dict[str, Any]] = field(default_factory=list)
+    candidate_generation_reviews: List[Dict[str, Any]] = field(default_factory=list)
+    scheduler_state: Dict[str, Any] = field(default_factory=dict)
     constraints: List[Dict[str, Any]] = field(default_factory=list)
     strategy_reviews: List[Dict[str, Any]] = field(default_factory=list)
+    next_study_proposal: Optional[Dict[str, Any]] = None
     warm_start_trials: List[Dict[str, Any]] = field(default_factory=list)
+    history_context: Dict[str, Any] = field(default_factory=dict)
     trial_ids: List[str] = field(default_factory=list)
     best_trial_id: Optional[str] = None
     status: str = "created"
@@ -202,6 +249,7 @@ class OptimizationCampaign:
     patience: int = 1
     min_improvement: float = 0.0
     max_total_training_runs: Optional[int] = None
+    confirmation_signature: Dict[str, Any] = field(default_factory=dict)
     campaign_id: str = field(default_factory=lambda: _record_id("campaign"))
     study_summaries: List[Dict[str, Any]] = field(default_factory=list)
     best_value: Optional[float] = None

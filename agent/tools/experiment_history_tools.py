@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.tools import tool
 
+from agent.hpo.protocol import METRIC_PROTOCOL_ID
 from agent.utils import ExperimentTracker
 from agent.utils.path_tool import (
     get_data_processing_experiments_dir,
@@ -69,11 +70,30 @@ def _compare(
     ids: Optional[List[str]],
     metric: str,
     mode: Optional[str] = None,
+    required_metric_protocol: Optional[str] = None,
 ) -> str:
     records = (
         [tracker.get_experiment(item) for item in ids]
         if ids else tracker.list_experiments(limit=5)
     )
+    incompatible = [
+        record["experiment_id"]
+        for record in records
+        if record
+        and required_metric_protocol is not None
+        and (record.get("task") or {}).get("metric_protocol")
+        != required_metric_protocol
+    ]
+    records = [
+        record
+        for record in records
+        if record
+        and (
+            required_metric_protocol is None
+            or (record.get("task") or {}).get("metric_protocol")
+            == required_metric_protocol
+        )
+    ]
     values = {
         record["experiment_id"]: _field(record, metric)
         for record in records if record and _field(record, metric) is not None
@@ -83,11 +103,18 @@ def _compare(
     best = None
     if numeric:
         best = (max if selected_mode == "max" else min)(numeric, key=numeric.get)
-    return json.dumps(
-        {"metric": metric, "mode": selected_mode, "values": values, "best_experiment_id": best},
-        ensure_ascii=False,
-        default=str,
-    )
+    payload = {
+        "metric": metric,
+        "mode": selected_mode,
+        "values": values,
+        "best_experiment_id": best,
+    }
+    if required_metric_protocol is not None:
+        payload.update({
+            "metric_protocol": required_metric_protocol,
+            "ignored_incompatible_experiment_ids": incompatible,
+        })
+    return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 def _metric_mode(records: List[Optional[Dict[str, Any]]], metric: str) -> str:
@@ -101,7 +128,13 @@ def _metric_mode(records: List[Optional[Dict[str, Any]]], metric: str) -> str:
 @tool
 def CompareHPOExperiments(experiment_ids: Optional[List[str]] = None, metric: str = "eer", mode: Optional[str] = None) -> str:
     """Compare HPO experiments using a selected metric and optimization mode."""
-    return _compare(ExperimentTracker(get_hpo_experiments_dir()), experiment_ids, metric, mode)
+    return _compare(
+        ExperimentTracker(get_hpo_experiments_dir()),
+        experiment_ids,
+        metric,
+        mode,
+        required_metric_protocol=METRIC_PROTOCOL_ID,
+    )
 
 
 @tool

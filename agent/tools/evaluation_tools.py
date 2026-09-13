@@ -10,12 +10,18 @@ from langchain_core.tools import tool
 
 from agent.core.adapters import resolve_adapter_bundle
 from agent.core.contracts import OperationResult
+from agent.core.metrics import require_finite_metric
 from agent.core.experiment_service import ExperimentService
 from agent.hpo import HPOService
+from agent.hpo.protocol import (
+    METRIC_PROTOCOL_ID,
+    METRIC_UNITS,
+    file_sha256,
+    resolve_hpo_validation_protocol,
+)
 from agent.utils import (
     ExperimentTracker,
-    MetricsCalculator,
-    extract_scores_data,
+    resolve_evaluation_metrics,
     get_experiment_artifact_dir,
     resolve_config_path,
     resolve_data_path,
@@ -50,6 +56,8 @@ def _checkpoint_path(record: dict, trial_id: Optional[str] = None) -> Optional[s
 def _run_evaluation(
     model_path: Optional[str] = None,
     verification_config: Optional[str] = None,
+    verification_pairs: Optional[str] = None,
+    evaluation_split: Optional[str] = None,
     data_folder: Optional[str] = None,
     experiment_id: Optional[str] = None,
     trial_id: Optional[str] = None,
@@ -97,12 +105,16 @@ def _run_evaluation(
             experiment_id=experiment_id,
         ).to_json()
     data_folder = str(resolve_data_path(data_folder or (record.get("task") or {}).get("dataset")))
-    output_folder = get_experiment_artifact_dir(
-        experiment_id,
-        "evaluation",
-        record.get("experiment_type") or "hpo",
-        create=True,
-    )
+    if experiments_dir:
+        output_folder = Path(experiments_dir).resolve() / experiment_id / "evaluation"
+        output_folder.mkdir(parents=True, exist_ok=True)
+    else:
+        output_folder = get_experiment_artifact_dir(
+            experiment_id,
+            "evaluation",
+            record.get("experiment_type") or "hpo",
+            create=True,
+        )
     if trial_id:
         output_folder = output_folder / trial_id
         output_folder.mkdir(parents=True, exist_ok=True)
@@ -115,14 +127,87 @@ def _run_evaluation(
     runner_name = runner or execution.get("runner") or implementation
     adapters = resolve_adapter_bundle(task_type, model_family, implementation, runner_name)
     task_adapter, model_adapter, runner_adapter = adapters.task, adapters.model, adapters.runner
-    config_candidate = (
-        verification_config
-        or execution.get("evaluation_config_path")
-        or getattr(model_adapter, "default_evaluation_config", None)
-        or getattr(runner_adapter, "default_evaluation_config", None)
-        or record.get("config_path")
-    )
+    split = str(evaluation_split or ("validation" if trial_id else "test")).lower()
+    if split not in {"validation", "test"}:
+        raise ValueError("evaluation_split must be 'validation' or 'test'")
+    if trial_id and split != "validation":
+        raise ValueError("HPO Trials may only be evaluated on the validation split")
+
+    study = None
+    if trial_id:
+        study = HPOService(tracker).load_study(experiment_id)
+        objective = study.objectives[0]
+        primary_metric, metric_mode = objective.metric, objective.mode
+    else:
+        primary_metric = task.get("primary_metric") or task_adapter.primary_metric
+        metric_mode = task.get("metric_mode") or task_adapter.metric_mode
+
+    pairs_path = None
+    if record.get("experiment_type") == "hpo" and trial_id:
+        protocol_runtime = resolve_hpo_validation_protocol(
+            {
+                "verification_config": verification_config,
+                "validation_pairs": verification_pairs,
+            },
+            persisted_execution=execution,
+            require_explicit=False,
+        )
+        config_candidate = protocol_runtime["verification_config"]
+        pairs_path = protocol_runtime["validation_pairs"]
+    elif record.get("experiment_type") == "hpo" and split == "test":
+        # Never let final held-out evaluation reuse the Study's validation
+        # config by fallback. Both test inputs must be deliberately supplied.
+        if not verification_config or not verification_pairs:
+            raise ValueError(
+                "final HPO test evaluation requires explicit verification_config "
+                "and verification_pairs after model lock"
+            )
+        config_candidate = verification_config
+        resolved_pairs = resolve_optional_project_path(verification_pairs)
+        if resolved_pairs is None or not resolved_pairs.is_file():
+            raise ValueError(f"verification_pairs file not found: {verification_pairs}")
+        pairs_path = str(resolved_pairs)
+        optimization = (record.get("extensions") or {}).get("optimization") or {}
+        recorded_study_id = optimization.get("study_id") or (
+            optimization.get("study") or {}
+        ).get("study_id")
+        if recorded_study_id:
+            locked_study = HPOService(tracker).load_study(experiment_id)
+            if (
+                locked_study.status != "completed"
+                or not locked_study.best_trial_id
+            ):
+                raise ValueError(
+                    "held-out test evaluation is allowed only after the HPO Study "
+                    "has completed and locked a best Trial"
+                )
+            locked_checkpoint = _checkpoint_path(
+                record, str(locked_study.best_trial_id)
+            )
+            if locked_checkpoint is not None and (
+                resolve_optional_project_path(locked_checkpoint) != resolved_model
+            ):
+                raise ValueError(
+                    "held-out test model_path is not the locked best Trial checkpoint"
+                )
+    else:
+        config_candidate = (
+            verification_config
+            or execution.get("evaluation_config_path")
+            or getattr(model_adapter, "default_evaluation_config", None)
+            or getattr(runner_adapter, "default_evaluation_config", None)
+            or record.get("config_path")
+        )
+        if verification_pairs:
+            resolved_pairs = resolve_optional_project_path(verification_pairs)
+            if resolved_pairs is None or not resolved_pairs.is_file():
+                raise ValueError(f"verification_pairs file not found: {verification_pairs}")
+            pairs_path = str(resolved_pairs)
     config_path = str(resolve_config_path(config_candidate))
+    if not Path(config_path).is_file():
+        raise ValueError(f"verification_config file not found: {config_path}")
+    config_sha256 = file_sha256(Path(config_path))
+    pairs_sha256 = file_sha256(Path(pairs_path)) if pairs_path else None
 
     started_at = datetime.now()
     run_opts = {}
@@ -133,6 +218,8 @@ def _run_evaluation(
     if eval_precision:
         run_opts["eval_precision"] = eval_precision
     overrides = {"output_folder": str(output_folder)}
+    if pairs_path:
+        overrides["verification_file"] = pairs_path
     if run_opts:
         overrides["_run_opts"] = run_opts
     raw = runner_adapter.run_evaluation(
@@ -142,20 +229,14 @@ def _run_evaluation(
         overrides=overrides,
     )
 
-    metrics = dict(raw.get("metrics") or {})
-    for key in ("eer", "min_dcf"):
-        if raw.get(key) is not None:
-            metrics[key] = raw[key]
+    metrics = resolve_evaluation_metrics(raw)
     scores_path = raw.get("scores_path")
-    if scores_path and Path(scores_path).exists():
-        scores = extract_scores_data(scores_path)
-        if not scores.get("error"):
-            metrics.update(MetricsCalculator.compute_all_metrics(
-                scores.get("genuine_scores", []),
-                scores.get("impostor_scores", []),
-            ))
 
-    task_adapter.validate_metrics(metrics)
+    # A failed runner may have no metrics; retain its real error for retry policy.
+    if raw.get("status") == "success":
+        task_adapter.validate_metrics(metrics)
+        if trial_id:
+            require_finite_metric(metrics, primary_metric)
     result = runner_adapter.normalize_evaluation_result({
         "status": raw.get("status", "failed"),
         "error": raw.get("error"),
@@ -164,12 +245,18 @@ def _run_evaluation(
         "scores_path": scores_path,
         "output_folder": raw.get("output_folder") or str(output_folder),
     })
+    normalized_metrics = {}
+    for values in result.metrics.values():
+        normalized_metrics.update(values or {})
+    result.metrics = {split: normalized_metrics}
     result.task = {
         **task,
         "type": task_type,
         "dataset": data_folder,
-        "primary_metric": task_adapter.primary_metric,
-        "metric_mode": task_adapter.metric_mode,
+        "primary_metric": primary_metric,
+        "metric_mode": metric_mode,
+        "metric_protocol": task.get("metric_protocol") or METRIC_PROTOCOL_ID,
+        "metric_units": task.get("metric_units") or dict(METRIC_UNITS),
     }
     result.model = {
         **model,
@@ -180,12 +267,24 @@ def _run_evaluation(
         "runner": runner_name,
         "output_folder": raw.get("output_folder") or str(output_folder),
         "trial_id": trial_id,
+        "evaluation_split": split,
+        "verification_config_path": config_path,
+        "verification_pairs_path": pairs_path,
+        "verification_config_sha256": config_sha256,
+        "verification_pairs_sha256": pairs_sha256,
+        "metric_protocol": task.get("metric_protocol") or METRIC_PROTOCOL_ID,
         "runtime_options": run_opts,
     })
     for artifact in result.artifacts:
         if trial_id:
             artifact.metadata["trial_id"] = trial_id
-    result.parameters = {"model_path": model_path, "data_path": data_folder}
+    result.parameters = {
+        "model_path": model_path,
+        "data_path": data_folder,
+        "evaluation_split": split,
+        "verification_config": config_path,
+        "verification_pairs": pairs_path,
+    }
     ExperimentService(tracker).record_result(
         experiment_id,
         result,
@@ -204,11 +303,19 @@ def _run_evaluation(
             trial_id,
             status="completed" if result.status == "success" else "failed",
             metrics=trial_metrics,
-            cost={"evaluation": {
-                "duration_seconds": (datetime.now() - started_at).total_seconds(),
-                "status": result.status,
-                "metrics": trial_metrics,
-            }},
+            cost={
+                "evaluated_checkpoint": model_path,
+                "evaluation": {
+                    "duration_seconds": (datetime.now() - started_at).total_seconds(),
+                    "status": result.status,
+                    "metrics": trial_metrics,
+                    "split": split,
+                    "verification_config_sha256": config_sha256,
+                    "verification_pairs_sha256": pairs_sha256,
+                    "metric_protocol": task.get("metric_protocol")
+                    or METRIC_PROTOCOL_ID,
+                },
+            },
             artifacts=[artifact.to_dict() for artifact in result.artifacts],
             stop_reason=result.error,
         )
@@ -228,6 +335,8 @@ def _run_evaluation(
 def RunEvaluation(
     model_path: Optional[str] = None,
     verification_config: Optional[str] = None,
+    verification_pairs: Optional[str] = None,
+    evaluation_split: Optional[str] = None,
     data_folder: Optional[str] = None,
     experiment_id: Optional[str] = None,
     trial_id: Optional[str] = None,
@@ -245,6 +354,8 @@ def RunEvaluation(
         return _run_evaluation(
             model_path=model_path,
             verification_config=verification_config,
+            verification_pairs=verification_pairs,
+            evaluation_split=evaluation_split,
             data_folder=data_folder,
             experiment_id=experiment_id,
             trial_id=trial_id,

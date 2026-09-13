@@ -7,6 +7,7 @@ import random
 from itertools import product
 from typing import Any, Dict, List, Optional, Protocol
 
+from agent.core.metrics import is_finite_metric
 from .contracts import Objective, SearchParameter, SearchSpace, Trial
 
 
@@ -25,15 +26,55 @@ class CandidateStrategy(Protocol):
         existing: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[Trial]] = None,
         objective: Optional[Objective] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         ...
 
+
+class AgentProposalStrategy:
+    """Use validated candidates proposed by the HPO agent as one standalone sampler."""
+
+    strategy_name = "agent_proposal"
+
+    @staticmethod
+    def validate(search_space: SearchSpace) -> None:
+        _ordered_parameters(search_space)
+        for parameter in search_space.parameters:
+            _validate_sampled_parameter(parameter)
+
+    def suggest(
+        self,
+        search_space: SearchSpace,
+        count: int,
+        *,
+        proposed_candidates: Optional[List[Dict[str, Any]]] = None,
+        seed: int = 0,
+        existing: Optional[List[Dict[str, Any]]] = None,
+        history: Optional[List[Trial]] = None,
+        objective: Optional[Objective] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        if count <= 0:
+            return []
+        seen = {_signature(item) for item in (existing or [])}
+        suggestions: List[Dict[str, Any]] = []
+        for item in proposed_candidates or []:
+            parameters = dict(item.get("parameters") or {})
+            signature = _signature(parameters)
+            if not parameters or signature in seen:
+                continue
+            seen.add(signature)
+            suggestions.append(parameters)
+            if len(suggestions) >= count:
+                break
+        return suggestions[:count]
 
 class RandomSearchStrategy:
     strategy_name = "random_search"
 
     @staticmethod
     def validate(search_space: SearchSpace) -> None:
+        _ordered_parameters(search_space)
         for parameter in search_space.parameters:
             _validate_sampled_parameter(parameter)
 
@@ -46,6 +87,7 @@ class RandomSearchStrategy:
         existing: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[Trial]] = None,
         objective: Optional[Objective] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         rng = random.Random(seed)
         seen = {_signature(item) for item in (existing or [])}
@@ -54,7 +96,7 @@ class RandomSearchStrategy:
         while len(suggestions) < count and attempts < max(100, count * 50):
             attempts += 1
             candidate: Dict[str, Any] = {}
-            for parameter in search_space.parameters:
+            for parameter in _ordered_parameters(search_space):
                 if _condition_matches(parameter.condition, candidate):
                     candidate[parameter.name] = _sample_parameter(parameter, rng)
             signature = _signature(candidate)
@@ -69,6 +111,7 @@ class GridSearchStrategy:
     strategy_name = "grid_search"
 
     def validate(self, search_space: SearchSpace) -> None:
+        _ordered_parameters(search_space)
         for parameter in search_space.parameters:
             _grid_values(parameter)
 
@@ -81,15 +124,22 @@ class GridSearchStrategy:
         existing: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[Trial]] = None,
         objective: Optional[Objective] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         seen = {_signature(item) for item in (existing or [])}
-        names = [parameter.name for parameter in search_space.parameters]
-        values = [_grid_values(parameter) for parameter in search_space.parameters]
+        parameters = _ordered_parameters(search_space)
+        names = [parameter.name for parameter in parameters]
+        values = [_grid_values(parameter) for parameter in parameters]
         suggestions = []
         for combination in product(*values):
-            candidate = dict(zip(names, combination))
+            raw = dict(zip(names, combination))
+            candidate: Dict[str, Any] = {}
+            for parameter in parameters:
+                if _condition_matches(parameter.condition, candidate):
+                    candidate[parameter.name] = raw[parameter.name]
             if _signature(candidate) in seen or not _constraints_match(candidate, search_space.constraints):
                 continue
+            seen.add(_signature(candidate))
             suggestions.append(candidate)
             if len(suggestions) >= count:
                 break
@@ -103,6 +153,7 @@ class AdaptiveSearchStrategy:
 
     @staticmethod
     def validate(search_space: SearchSpace) -> None:
+        _ordered_parameters(search_space)
         for parameter in search_space.parameters:
             _validate_sampled_parameter(parameter)
 
@@ -115,11 +166,13 @@ class AdaptiveSearchStrategy:
         existing: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[Trial]] = None,
         objective: Optional[Objective] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         completed = [
             trial for trial in (history or [])
-            if objective
-            and isinstance(trial.metrics.get(objective.metric), (int, float))
+            if trial.status in {"completed", "promoted"}
+            and objective
+            and is_finite_metric(trial.metrics.get(objective.metric))
         ]
         if not completed:
             return RandomSearchStrategy().suggest(
@@ -135,10 +188,11 @@ class AdaptiveSearchStrategy:
         seen = {_signature(item) for item in (existing or [])}
         suggestions = []
         attempts = 0
+        parameters = _ordered_parameters(search_space)
         while len(suggestions) < count and attempts < max(100, count * 50):
             attempts += 1
             candidate = dict(best)
-            parameter = search_space.parameters[attempts % len(search_space.parameters)]
+            parameter = parameters[attempts % len(parameters)]
             if parameter.parameter_type == "categorical":
                 value = _nearby_categorical_value(parameter, candidate.get(parameter.name), attempts + seed)
                 if value is not None:
@@ -148,6 +202,7 @@ class AdaptiveSearchStrategy:
                 if value is None:
                     continue
                 candidate[parameter.name] = value
+            candidate = _normalize_conditional_candidate(search_space, candidate, rng)
             signature = _signature(candidate)
             if signature in seen or not _constraints_match(candidate, search_space.constraints):
                 continue
@@ -215,6 +270,7 @@ class OptunaTPEStrategy:
 
     @staticmethod
     def validate(search_space: SearchSpace) -> None:
+        _ordered_parameters(search_space)
         for parameter in search_space.parameters:
             _validate_sampled_parameter(parameter)
         _import_optuna()
@@ -228,19 +284,25 @@ class OptunaTPEStrategy:
         existing: Optional[List[Dict[str, Any]]] = None,
         history: Optional[List[Trial]] = None,
         objective: Optional[Objective] = None,
+        config: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         optuna = _import_optuna()
+        sampler_config = dict(config or {})
         sampler = optuna.samplers.TPESampler(
             seed=seed,
-            multivariate=False,
-            n_startup_trials=5,
+            multivariate=bool(sampler_config.get("multivariate", False)),
+            n_startup_trials=int(sampler_config.get("n_startup_trials", 3)),
         )
         study = optuna.create_study(
             direction="maximize" if objective and objective.mode == "max" else "minimize",
             sampler=sampler,
         )
         for item in history or []:
-            if not objective or not isinstance(item.metrics.get(objective.metric), (int, float)):
+            if (
+                item.status not in {"completed", "promoted"}
+                or not objective
+                or not is_finite_metric(item.metrics.get(objective.metric))
+            ):
                 continue
             params, distributions = _optuna_history(item.parameters, search_space, optuna)
             if not params:
@@ -262,7 +324,7 @@ class OptunaTPEStrategy:
             attempts += 1
             trial = study.ask()
             candidate: Dict[str, Any] = {}
-            for parameter in search_space.parameters:
+            for parameter in _ordered_parameters(search_space):
                 if _condition_matches(parameter.condition, candidate):
                     candidate[parameter.name] = _optuna_suggest(trial, parameter)
             signature = _signature(candidate)
@@ -309,6 +371,7 @@ STRATEGIES = CandidateStrategyRegistry()
 STRATEGIES.register(RandomSearchStrategy())
 STRATEGIES.register(GridSearchStrategy())
 STRATEGIES.register(AdaptiveSearchStrategy())
+STRATEGIES.register(AgentProposalStrategy())
 STRATEGIES.register(OptunaTPEStrategy())
 
 
@@ -326,16 +389,19 @@ class SuccessiveHalvingStrategy:
     ) -> List[Trial]:
         eligible = [
             trial for trial in trials
-            if trial.status == "completed"
-            and objective.metric in trial.metrics
+            if trial.status in {"completed", "promoted"}
+            and is_finite_metric(trial.metrics.get(objective.metric))
             and (rung is None or trial.rung == rung)
         ]
         reverse = objective.mode == "max"
         eligible.sort(key=lambda trial: trial.metrics[objective.metric], reverse=reverse)
         keep = max(1, math.ceil(len(eligible) / max(reduction_factor, 2)))
+        # Rank the original cohort, including already committed promotions.
+        # Retrying a partial batch must not shrink its quota or promote losers.
+        pending = [trial for trial in eligible[:keep] if trial.status == "completed"]
         if limit is not None:
-            keep = min(keep, max(limit, 0))
-        return eligible[:keep]
+            pending = pending[:max(limit, 0)]
+        return pending
 
 
 def _sample_parameter(parameter: SearchParameter, rng: random.Random) -> Any:
@@ -387,7 +453,7 @@ def _optuna_suggest(trial: Any, parameter: SearchParameter) -> Any:
 def _optuna_history(parameters: Dict[str, Any], search_space: SearchSpace, optuna: Any) -> tuple:
     params: Dict[str, Any] = {}
     distributions: Dict[str, Any] = {}
-    for parameter in search_space.parameters:
+    for parameter in _ordered_parameters(search_space):
         if parameter.name not in parameters or not _condition_matches(parameter.condition, parameters):
             continue
         params[parameter.name] = parameters[parameter.name]
@@ -437,6 +503,60 @@ def _condition_matches(condition: Dict[str, Any], candidate: Dict[str, Any]) -> 
     return not condition or all(candidate.get(key) == value for key, value in condition.items())
 
 
+def _ordered_parameters(search_space: SearchSpace) -> List[SearchParameter]:
+    """Return a stable dependency order for conditional parameters."""
+    names = [parameter.name for parameter in search_space.parameters]
+    if len(names) != len(set(names)):
+        raise ValueError("search space parameter names must be unique")
+    known = set(names)
+    for parameter in search_space.parameters:
+        unknown = sorted(set(parameter.condition) - known)
+        if unknown:
+            raise ValueError(
+                f"condition for {parameter.name} references unknown parameters: "
+                f"{', '.join(unknown)}"
+            )
+    remaining = list(search_space.parameters)
+    resolved = set()
+    ordered: List[SearchParameter] = []
+    while remaining:
+        ready = [
+            parameter for parameter in remaining
+            if set(parameter.condition).issubset(resolved)
+        ]
+        if not ready:
+            cycle = ", ".join(parameter.name for parameter in remaining)
+            raise ValueError(f"cyclic search-space conditions: {cycle}")
+        for parameter in ready:
+            remaining.remove(parameter)
+            resolved.add(parameter.name)
+            ordered.append(parameter)
+    return ordered
+
+
+def _normalize_conditional_candidate(
+    search_space: SearchSpace,
+    values: Dict[str, Any],
+    rng: random.Random,
+) -> Dict[str, Any]:
+    candidate: Dict[str, Any] = {}
+    for parameter in _ordered_parameters(search_space):
+        if not _condition_matches(parameter.condition, candidate):
+            continue
+        value = values.get(parameter.name)
+        if parameter.parameter_type == "categorical":
+            candidate[parameter.name] = (
+                value if value in parameter.choices else _sample_parameter(parameter, rng)
+            )
+            continue
+        if isinstance(value, (int, float)) and parameter.low is not None and parameter.high is not None:
+            numeric = min(max(float(value), float(parameter.low)), float(parameter.high))
+            candidate[parameter.name] = int(round(numeric)) if parameter.parameter_type == "int" else numeric
+        else:
+            candidate[parameter.name] = _sample_parameter(parameter, rng)
+    return candidate
+
+
 def _constraints_match(candidate: Dict[str, Any], constraints: List[Dict[str, Any]]) -> bool:
     for constraint in constraints:
         parameter = constraint.get("parameter")
@@ -445,13 +565,20 @@ def _constraints_match(candidate: Dict[str, Any], constraints: List[Dict[str, An
         current = candidate.get(parameter)
         if current is None:
             continue
-        if operator == "lte" and not current <= value:
-            return False
-        if operator == "gte" and not current >= value:
-            return False
-        if operator == "eq" and not current == value:
-            return False
-        if operator == "in" and not current in value:
+        try:
+            if operator == "lte":
+                matches = current <= value
+            elif operator == "gte":
+                matches = current >= value
+            elif operator == "eq":
+                matches = current == value
+            elif operator == "in":
+                matches = current in value
+            else:
+                return False
+            if not matches:
+                return False
+        except (TypeError, ValueError):
             return False
     return True
 

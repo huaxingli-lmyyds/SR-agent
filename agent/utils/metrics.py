@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Union, Dict, List, Optional, Any
 import re
 
+from agent.core.metrics import InvalidMetricError, is_finite_metric
+
 
 class MetricsExtractor:
     """性能指标提取器"""
@@ -99,7 +101,8 @@ class MetricsExtractor:
         eer_matches = self.eer_pattern.findall(content)
         if eer_matches:
             try:
-                metrics["eer"] = float(eer_matches[-1])
+                # SpeechBrain logs EER(%) while the system contract stores [0, 1].
+                metrics["eer"] = float(eer_matches[-1]) / 100
             except ValueError:
                 pass
         
@@ -136,30 +139,29 @@ class MetricsExtractor:
         raw_data = []
         
         with open(scores_path, 'r', encoding='utf-8') as f:
-            for line in f:
+            for line_number, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 
                 parts = line.split()
-                if len(parts) >= 4:
-                    try:
-                        label = int(parts[2])
-                        score = float(parts[3])
-                        
-                        raw_data.append({
-                            "enrol": parts[0],
-                            "test": parts[1],
-                            "label": label,
-                            "score": score
-                        })
-                        
-                        if label == 1:
-                            genuine_scores.append(score)
-                        elif label == 0:
-                            impostor_scores.append(score)
-                    except (ValueError, IndexError):
-                        continue
+                try:
+                    if len(parts) != 4 or parts[2] not in {"0", "1"}:
+                        raise ValueError("expected enrol, test, binary label and score")
+                    label = int(parts[2])
+                    score = float(parts[3])
+                    if not is_finite_metric(score):
+                        raise ValueError("score must be finite")
+                except (ValueError, IndexError) as exc:
+                    raise InvalidMetricError(
+                        f"invalid metric scores at {scores_path}:{line_number}: {exc}"
+                    ) from exc
+                raw_data.append({
+                    "enrol": parts[0], "test": parts[1], "label": label, "score": score,
+                })
+                (genuine_scores if label == 1 else impostor_scores).append(score)
+        if not genuine_scores or not impostor_scores:
+            raise InvalidMetricError("invalid metric scores: both positive and negative pairs are required")
         
         return {
             "genuine_scores": genuine_scores,
@@ -175,6 +177,28 @@ class MetricsCalculator:
     """性能指标计算器"""
     
     @staticmethod
+    def validate_score_arrays(genuine_scores, impostor_scores):
+        """Reject malformed observations before comparisons can turn NaN into zero."""
+        import numpy as np
+
+        arrays = []
+        for name, values in (("genuine", genuine_scores), ("impostor", impostor_scores)):
+            try:
+                array = np.asarray(values)
+                if array.ndim != 1 or array.size == 0 or array.dtype.kind not in "iuf":
+                    raise ValueError("expected a nonempty one-dimensional numeric array")
+                # Preserve detection of mixed booleans before NumPy coerces them.
+                if any(isinstance(value, (bool, np.bool_)) for value in values):
+                    raise ValueError("boolean scores are not permitted")
+                array = array.astype(float)
+                if not np.isfinite(array).all():
+                    raise ValueError("all scores must be finite")
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise InvalidMetricError(f"invalid metric {name} scores: {exc}") from exc
+            arrays.append(array)
+        return tuple(arrays)
+
+    @staticmethod
     def calculate_eer(genuine_scores: List[float], 
                      impostor_scores: List[float]) -> float:
         """
@@ -185,16 +209,12 @@ class MetricsCalculator:
             impostor_scores: 冒充者分数列表
         
         Returns:
-            EER 值（百分比）
+            EER 值（[0, 1] 比例）
         """
         import numpy as np
         
-        if not genuine_scores or not impostor_scores:
-            raise ValueError("genuine_scores 和 impostor_scores 不能为空")
-        
         # 合并所有分数并打标签
-        genuine_arr = np.asarray(genuine_scores, dtype=float)
-        impostor_arr = np.asarray(impostor_scores, dtype=float)
+        genuine_arr, impostor_arr = MetricsCalculator.validate_score_arrays(genuine_scores, impostor_scores)
         all_scores = np.concatenate([genuine_arr, impostor_arr])
         
         # 排序
@@ -221,7 +241,7 @@ class MetricsCalculator:
         frr_arr = np.array(frr_list)
         
         eer_index = np.argmin(np.abs(far_arr - frr_arr))
-        eer = (far_arr[eer_index] + frr_arr[eer_index]) / 2 * 100  # 转换为百分比
+        eer = (far_arr[eer_index] + frr_arr[eer_index]) / 2
         
         return eer
     
@@ -242,15 +262,11 @@ class MetricsCalculator:
             c_fa: 错误接受代价
         
         Returns:
-            minDCF 值
+            minDCF 值（百分数，与 SpeechBrain 后端返回约定一致）
         """
         import numpy as np
         
-        if not genuine_scores or not impostor_scores:
-            raise ValueError("genuine_scores 和 impostor_scores 不能为空")
-        
-        genuine_arr = np.asarray(genuine_scores, dtype=float)
-        impostor_arr = np.asarray(impostor_scores, dtype=float)
+        genuine_arr, impostor_arr = MetricsCalculator.validate_score_arrays(genuine_scores, impostor_scores)
         all_scores = np.concatenate([genuine_arr, impostor_arr])
         thresholds = np.linspace(np.min(all_scores), np.max(all_scores), 1000)
         
@@ -268,7 +284,7 @@ class MetricsCalculator:
             dcf = p_target * c_miss * frr + (1 - p_target) * c_fa * far
             dcf_values.append(dcf)
         
-        return min(dcf_values)
+        return min(dcf_values) * 100
     
     @staticmethod
     def compute_all_metrics(genuine_scores: List[float],
@@ -712,6 +728,43 @@ def extract_scores_data(scores_path: Union[str, Path]) -> Dict[str, Any]:
     """快速从 scores.txt 提取数据的便捷函数"""
     extractor = MetricsExtractor()
     return extractor.extract_from_scores(scores_path)
+
+
+def resolve_evaluation_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return backend metrics and use validated scores only for missing values.
+
+    The system convention is EER in [0, 1] and minDCF multiplied by 100.
+    A present but invalid backend value is deliberately preserved so task-level
+    validation rejects it instead of silently replacing it with a better value.
+    """
+    metrics = dict(raw.get("metrics") or {})
+    for key in ("eer", "min_dcf"):
+        if raw.get(key) is not None:
+            metrics[key] = raw[key]
+
+    scores_path = raw.get("scores_path")
+    if raw.get("status") != "success" or not scores_path:
+        return metrics
+
+    scores = extract_scores_data(scores_path)
+    if scores.get("error"):
+        raise InvalidMetricError(f"invalid metric scores: {scores['error']}")
+
+    missing = [key for key in ("eer", "min_dcf") if metrics.get(key) is None]
+    if not missing:
+        return metrics
+
+    calculated = MetricsCalculator.compute_all_metrics(
+        scores.get("genuine_scores", []), scores.get("impostor_scores", [])
+    )
+    if calculated.get("error"):
+        raise InvalidMetricError(
+            f"invalid metric computation: {calculated['error']}"
+        )
+    for key in missing:
+        if calculated.get(key) is not None:
+            metrics[key] = calculated[key]
+    return metrics
 
 
 def compute_metrics_from_scores(scores_path: Union[str, Path]) -> Dict[str, float]:

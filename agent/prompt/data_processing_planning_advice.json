@@ -7,7 +7,10 @@
   "rules": [
     "Return raw JSON only.",
     "Do not use markdown, code fences, comments, or explanatory text.",
-    "suggested_operations are advisory only and will be validated before execution.",
-    "Only suggest operations when they are useful for the current dataset goal."
+    "Analyze the compact profile and suggest at most five useful operations.",
+    "Use only operation names and parameters listed in context.available_operations.",
+    "Do not change parameters marked advisor_allowed=false.",
+    "Treat explicit requested_operations as higher priority than suggestions.",
+    "Your suggestions are validated, previewed, and quality-gated before execution."
   ]
 }

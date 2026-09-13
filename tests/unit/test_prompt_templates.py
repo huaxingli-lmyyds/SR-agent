@@ -11,7 +11,16 @@ from agent.prompt import load_prompt_template, render_prompt
     [
         (
             "hpo_strategy_proposal",
-            {"action", "requested_strategy", "search_space", "budgets", "max_training_runs"},
+            {
+                "action",
+                "requested_strategy",
+                "search_space",
+                "budgets",
+                "max_training_runs",
+                "hypotheses",
+                "candidate_proposals",
+                "sampler_config",
+            },
         ),
         ("data_processing_planning_advice", {"diagnostics", "suggested_operations", "notes"}),
         ("orchestration_coordination_advisor", {"diagnostics", "risks", "notes"}),

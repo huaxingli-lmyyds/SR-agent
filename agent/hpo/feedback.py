@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
+from agent.core.metrics import is_finite_metric
+from .protocol import METRIC_PROTOCOL_ID, METRIC_UNITS
 from .contracts import HPOStudy, StrategyProposal, Trial
 
 
@@ -14,16 +16,24 @@ class HPOFeedbackAnalyzer:
         completed = [
             trial for trial in trials
             if trial.status in {"completed", "promoted"}
-            and isinstance(trial.metrics.get(objective.metric), (int, float))
+            and is_finite_metric(trial.metrics.get(objective.metric))
         ]
+        comparable = list(completed)
+        comparable_rung = None
+        active_pruner = study.pruner_strategy or (
+            "successive_halving" if study.strategy == "successive_halving" else "none"
+        )
+        if comparable and active_pruner == "successive_halving":
+            comparable_rung = max(trial.rung for trial in comparable)
+            comparable = [trial for trial in comparable if trial.rung == comparable_rung]
         failures = Counter(
             str(trial.cost.get("failure_category") or "unknown")
             for trial in trials if trial.status == "failed"
         )
         boundary_hits: List[Dict[str, Any]] = []
-        if completed:
+        if comparable:
             reverse = objective.mode == "max"
-            best = sorted(completed, key=lambda item: item.metrics[objective.metric], reverse=reverse)[0]
+            best = sorted(comparable, key=lambda item: item.metrics[objective.metric], reverse=reverse)[0]
             for parameter in study.search_space.parameters:
                 value = best.parameters.get(parameter.name)
                 if not isinstance(value, (int, float)) or parameter.low is None or parameter.high is None:
@@ -44,13 +54,20 @@ class HPOFeedbackAnalyzer:
         best_metric = None
         best_parameters = None
         ranked_trials: List[Dict[str, Any]] = []
-        if completed:
+        if comparable:
             reverse = objective.mode == "max"
-            ranked = sorted(completed, key=lambda item: item.metrics[objective.metric], reverse=reverse)
+            ranked = sorted(comparable, key=lambda item: item.metrics[objective.metric], reverse=reverse)
             best_metric = ranked[0].metrics[objective.metric]
             best_parameters = dict(ranked[0].parameters)
             ranked_trials = [self._trial_summary(trial, objective.metric) for trial in ranked[:5]]
         return {
+            "objective": objective.to_dict(),
+            "metric_protocol": study.history_context.get(
+                "metric_protocol", METRIC_PROTOCOL_ID
+            ),
+            "metric_units": study.history_context.get(
+                "metric_units", dict(METRIC_UNITS)
+            ),
             "completed_trials": len(completed),
             "failed_trials": failure_total,
             "terminal_trials": terminal_count,
@@ -60,9 +77,16 @@ class HPOFeedbackAnalyzer:
             "boundary_hits": boundary_hits,
             "best_metric": best_metric,
             "best_parameters": best_parameters,
+            "comparable_rung": comparable_rung,
             "ranked_trials": ranked_trials,
             "rung_summaries": self._rung_summaries(trials, objective.metric, objective.mode),
-            "parameter_observations": self._parameter_observations(completed, objective.metric, objective.mode),
+            "search_phase_summaries": self._search_phase_summaries(
+                study, trials, objective.metric, objective.mode
+            ),
+            "hypothesis_summaries": self._hypothesis_summaries(
+                trials, objective.metric, objective.mode
+            ),
+            "parameter_observations": self._parameter_observations(comparable, objective.metric, objective.mode),
             "failed_trial_examples": self._failed_trial_examples(trials),
             "cost_summary": self._cost_summary(trials),
         }
@@ -103,7 +127,7 @@ class HPOFeedbackAnalyzer:
             reasons.append("best_trial_at_search_boundary")
         return StrategyProposal(
             action="refine_search_space" if search_space else "switch_strategy",
-            requested_strategy=strategy,
+            requested_sampler=strategy,
             search_space=search_space,
             reason_codes=reasons or ["keep_current_candidate_generation"],
             evidence=feedback,
@@ -117,6 +141,10 @@ class HPOFeedbackAnalyzer:
             "rung": trial.rung,
             "stage": trial.budget.stage,
             "status": trial.status,
+            "candidate_source": trial.candidate_source,
+            "search_phase": trial.search_phase,
+            "proposal_id": trial.proposal_id,
+            "hypothesis_id": trial.hypothesis_id,
             "parameters": dict(trial.parameters),
             "primary_metric": trial.metrics.get(primary_metric),
             "training": {
@@ -140,7 +168,11 @@ class HPOFeedbackAnalyzer:
         summaries: List[Dict[str, Any]] = []
         for rung in sorted(by_rung):
             items = by_rung[rung]
-            metric_values = [float(trial.metrics[metric]) for trial in items if isinstance(trial.metrics.get(metric), (int, float))]
+            metric_values = [
+                float(trial.metrics[metric]) for trial in items
+                if trial.status in {"completed", "promoted"}
+                and is_finite_metric(trial.metrics.get(metric))
+            ]
             best_value = None
             if metric_values:
                 best_value = min(metric_values) if mode == "min" else max(metric_values)
@@ -156,6 +188,79 @@ class HPOFeedbackAnalyzer:
         return summaries
 
     @staticmethod
+    def _search_phase_summaries(
+        study: HPOStudy,
+        trials: List[Trial],
+        metric: str,
+        mode: str,
+    ) -> List[Dict[str, Any]]:
+        grouped: Dict[tuple[int, int], List[Trial]] = defaultdict(list)
+        for trial in trials:
+            grouped[(int(trial.search_phase), int(trial.rung))].append(trial)
+        phases = {
+            int(item.get("phase_index", index)): item
+            for index, item in enumerate(study.search_phases)
+            if isinstance(item, dict)
+        }
+        return [
+            HPOFeedbackAnalyzer._group_summary(
+                items,
+                metric,
+                mode,
+                {
+                    "search_phase": phase,
+                    "sampler": phases.get(phase, {}).get("sampler"),
+                    "sampler_config": phases.get(phase, {}).get("sampler_config", {}),
+                    "rung": rung,
+                },
+            )
+            for (phase, rung), items in sorted(grouped.items())
+        ]
+
+    @staticmethod
+    def _hypothesis_summaries(
+        trials: List[Trial],
+        metric: str,
+        mode: str,
+    ) -> List[Dict[str, Any]]:
+        grouped: Dict[tuple[str, int], List[Trial]] = defaultdict(list)
+        for trial in trials:
+            if trial.hypothesis_id:
+                grouped[(str(trial.hypothesis_id), int(trial.rung))].append(trial)
+        return [
+            HPOFeedbackAnalyzer._group_summary(
+                items,
+                metric,
+                mode,
+                {"hypothesis_id": hypothesis_id, "rung": rung},
+            )
+            for (hypothesis_id, rung), items in sorted(grouped.items())
+        ]
+
+    @staticmethod
+    def _group_summary(
+        trials: List[Trial],
+        metric: str,
+        mode: str,
+        identity: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        values = [
+            float(trial.metrics[metric]) for trial in trials
+            if trial.status in {"completed", "promoted"}
+            and is_finite_metric(trial.metrics.get(metric))
+        ]
+        return {
+            **identity,
+            "total": len(trials),
+            "completed": len(values),
+            "failed": len([trial for trial in trials if trial.status == "failed"]),
+            "best_metric": (
+                min(values) if mode == "min" else max(values)
+            ) if values else None,
+            "average_metric": round(sum(values) / len(values), 8) if values else None,
+        }
+
+    @staticmethod
     def _parameter_observations(trials: List[Trial], metric: str, mode: str) -> Dict[str, Any]:
         observations: Dict[str, Any] = {}
         if not trials:
@@ -166,18 +271,32 @@ class HPOFeedbackAnalyzer:
         for name in sorted({key for trial in trials for key in trial.parameters}):
             values = [trial.parameters.get(name) for trial in trials if name in trial.parameters]
             top_values = [trial.parameters.get(name) for trial in top if name in trial.parameters]
-            numeric = [float(value) for value in values if isinstance(value, (int, float))]
+            numeric = [
+                float(value) for value in values
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            numeric_top = [
+                float(value) for value in top_values
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
+            unique_values = []
+            for value in values:
+                if not any(value == existing for existing in unique_values):
+                    unique_values.append(value)
             observations[name] = {
                 "top_values": top_values,
-                "unique_values": sorted(set(values)) if all(isinstance(value, (int, float, str)) for value in values) else list({str(value) for value in values}),
+                "unique_values": sorted(unique_values, key=lambda value: (type(value).__name__, repr(value))),
             }
             if numeric:
                 observations[name].update({
                     "min": min(numeric),
                     "max": max(numeric),
-                    "top_min": min(float(value) for value in top_values if isinstance(value, (int, float))),
-                    "top_max": max(float(value) for value in top_values if isinstance(value, (int, float))),
                 })
+                if numeric_top:
+                    observations[name].update({
+                        "top_min": min(numeric_top),
+                        "top_max": max(numeric_top),
+                    })
         return observations
 
     @staticmethod
@@ -187,7 +306,7 @@ class HPOFeedbackAnalyzer:
         keys = ("train_loss", "valid_loss", "valid_error_rate", "eer")
         summary: Dict[str, Any] = {"points": len(history)}
         for key in keys:
-            values = [float(item[key]) for item in history if isinstance(item.get(key), (int, float))]
+            values = [float(item[key]) for item in history if is_finite_metric(item.get(key))]
             if len(values) >= 2:
                 summary[key] = {
                     "first": values[0],

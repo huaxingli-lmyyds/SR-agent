@@ -18,6 +18,7 @@ from agent.agents.coordination import (
 )
 from agent.agents.orchestration_workflow import OrchestrationWorkflow
 from agent.tasks import get_task_adapter
+from agent.hpo.protocol import METRIC_PROTOCOL_ID, METRIC_UNITS
 from agent.memory import EpisodeMemory, MemoryScope, MemoryService
 from agent.prompt import render_prompt
 from agent.utils import ConfigParser, ExperimentTracker
@@ -144,24 +145,39 @@ class CoordinatorAgent(AdvisoryAgentBase):
         budget: Optional[Dict[str, Any]] = None,
     ) -> OrchestrationResult:
         self._run_started_at = datetime.now()
-        config = ConfigParser(self.config_path).load_config(resolve_references=True)
         run_context = context or {}
+        run_config_path = self.config_path
+        if run_context.get("resume_experiment_id"):
+            run_config_path = str(
+                ExperimentTracker(get_hpo_experiments_dir()).get_config_snapshot(
+                    str(run_context["resume_experiment_id"])
+                )
+            )
+        config = ConfigParser(run_config_path).load_config(resolve_references=True)
         requested_dataset = run_context.get("dataset_uri") or run_context.get("data_folder")
         data_folder = str(resolve_data_path(requested_dataset or config.get("data_folder")))
         output = resolve_config_value_path(config.get("output_folder"))
         task_adapter = get_task_adapter(self.task_type)
+        primary_metric = str(
+            run_context.get("primary_metric") or task_adapter.primary_metric
+        )
+        metric_mode = str(run_context.get("metric_mode") or task_adapter.metric_mode)
+        if metric_mode not in {"min", "max"}:
+            raise ValueError(f"unsupported metric_mode: {metric_mode}")
         self._manage_experiment_id = self.manage_tracker.create_orchestration_experiment(
-            config_path=self.config_path,
+            config_path=run_config_path,
             data_folder=data_folder,
             output_folder=str(output) if output else None,
             description="LangGraph orchestration run",
             task={
                 "type": self.task_type,
                 "dataset": data_folder,
-                "primary_metric": task_adapter.primary_metric,
-                "metric_mode": task_adapter.metric_mode,
+                "primary_metric": primary_metric,
+                "metric_mode": metric_mode,
+                "metric_protocol": METRIC_PROTOCOL_ID,
+                "metric_units": dict(METRIC_UNITS),
             },
-            model={"family": "multi_agent_optimization", "implementation": "langgraph", "config_path": self.config_path},
+            model={"family": "multi_agent_optimization", "implementation": "langgraph", "config_path": run_config_path},
             execution={"runner": "langgraph", "output_folder": str(output) if output else None},
         )
         self._linked_experiments = {"manage": [self._manage_experiment_id]}
@@ -170,9 +186,11 @@ class CoordinatorAgent(AdvisoryAgentBase):
         workflow_context = {
             **run_context,
             "target_goal": run_context.get("target_goal") or "validate and prepare the dataset",
-            "primary_metric": task_adapter.primary_metric,
-            "metric_mode": task_adapter.metric_mode,
-            "config_path": self.config_path,
+            "primary_metric": primary_metric,
+            "metric_mode": metric_mode,
+            "metric_protocol": METRIC_PROTOCOL_ID,
+            "metric_units": dict(METRIC_UNITS),
+            "config_path": run_config_path,
         }
         workflow_budget = {
             "max_runs": self.data_iterations,
@@ -193,10 +211,13 @@ class CoordinatorAgent(AdvisoryAgentBase):
                 experiment_ids=experiment_ids,
             )
 
+        workflow_completion_policy = self.completion_policy
+        if run_context.get("resume_experiment_id"):
+            workflow_completion_policy = CompletionPolicy({"hpo_agent"})
         workflow = OrchestrationWorkflow(
             self.registry,
             dispatcher,
-            self.completion_policy,
+            workflow_completion_policy,
             request_factory,
             advisor=self._coordination_advisor if self.enable_llm_advisor else None,
         )
@@ -375,15 +396,11 @@ class CoordinatorAgent(AdvisoryAgentBase):
                 "studies": summary.get("studies") or [],
                 "data_handoff": summary.get("data_handoff") or {},
             }
-        if agent_type == "data_processing_agent" or "dataset_version" in summary:
-            version = summary.get("dataset_version") or {}
+        if agent_type == "data_processing_agent":
+            return {"data_handoff": summary.get("data_handoff") or {}}
+        if "dataset_version" in summary:
             return {
-                "dataset_version": {
-                    "dataset_id": version.get("dataset_id"),
-                    "version": version.get("version"),
-                    "source_uri": version.get("source_uri"),
-                    "quality_metrics": version.get("quality_metrics") or {},
-                },
+                "dataset_version": summary.get("dataset_version") or {},
                 "data_handoff": summary.get("data_handoff") or {},
             }
         return {

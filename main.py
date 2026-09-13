@@ -42,13 +42,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "grid_search",
             "adaptive_search",
             "tpe",
+            "agent_proposal",
             "successive_halving",
         ],
         default="auto",
     )
     parser.add_argument(
         "--sampler",
-        choices=["auto", "random_search", "grid_search", "adaptive_search", "tpe"],
+        choices=[
+            "auto", "random_search", "grid_search", "adaptive_search", "tpe",
+            "agent_proposal",
+        ],
         default=None,
         help="Candidate sampler; independent from the fidelity pruner.",
     )
@@ -62,6 +66,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--enable-llm-advisor",
         action="store_true",
         help="Allow LLMs to submit structured strategy/data-processing proposals.",
+    )
+    parser.add_argument(
+        "--controller-mode",
+        choices=["fixed", "rule", "llm"],
+        default=None,
+        help=(
+            "HPO policy controller: fixed never mutates the requested search, "
+            "rule uses deterministic feedback rules, and llm uses the advisor."
+        ),
+    )
+    parser.add_argument(
+        "--resume-experiment-id",
+        type=str,
+        default=None,
+        help="Resume the persisted HPO Study for an existing experiment id.",
     )
     parser.add_argument(
         "--max-training-runs",
@@ -84,6 +103,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-completed-per-rung", type=int, default=1)
     parser.add_argument("--reduction-factor", type=int, default=3)
     parser.add_argument("--strategy-review-interval-trials", type=int, default=3)
+    parser.add_argument(
+        "--candidate-batch-size",
+        type=int,
+        default=None,
+        help="Number of new candidates generated before runtime feedback; defaults to the review interval.",
+    )
+    parser.add_argument(
+        "--sampler-config-json",
+        type=_json_object,
+        default=None,
+        help='Sampler configuration object, e.g. \'{"n_startup_trials":3,"multivariate":false}\' for TPE.',
+    )
     parser.add_argument("--max-retries", type=int, default=1)
     parser.add_argument(
         "--budgets-json",
@@ -148,6 +179,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="SpeechBrain evaluation precision.",
     )
+    parser.add_argument(
+        "--verification-config",
+        type=str,
+        default=None,
+        help="Required HPO validation evaluation YAML; never the held-out test YAML.",
+    )
+    parser.add_argument(
+        "--validation-pairs",
+        type=str,
+        default=None,
+        help="Required independent validation-pairs file used for every HPO Trial.",
+    )
+    parser.add_argument(
+        "--training-exclusion-pairs",
+        type=str,
+        default=None,
+        help=(
+            "Optional pairs file whose speakers are excluded from training; "
+            "defaults to --validation-pairs and must cover it."
+        ),
+    )
     parser.add_argument("--primary-metric", type=str, default="eer")
     parser.add_argument("--metric-mode", choices=["min", "max"], default="min")
     parser.add_argument("--verbose", action="store_true")
@@ -169,10 +221,18 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "primary_metric": args.primary_metric,
         "metric_mode": args.metric_mode,
     }
+    if args.controller_mode is not None:
+        context["controller_mode"] = args.controller_mode
     if args.sampler is not None:
         context["sampler"] = args.sampler
     if args.pruner is not None:
         context["pruner"] = args.pruner
+    if args.resume_experiment_id is not None:
+        context["resume_experiment_id"] = args.resume_experiment_id
+    if args.sampler_config_json is not None:
+        if not isinstance(args.sampler_config_json, dict):
+            raise SystemExit("--sampler-config-json must be a JSON object")
+        context["sampler_config"] = args.sampler_config_json
     if args.data_folder is not None:
         context["data_folder"] = args.data_folder
         context["dataset_uri"] = args.data_folder
@@ -189,6 +249,12 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         runtime_options["precision"] = args.precision
     if args.eval_precision is not None:
         runtime_options["eval_precision"] = args.eval_precision
+    if args.verification_config is not None:
+        runtime_options["verification_config"] = args.verification_config
+    if args.validation_pairs is not None:
+        runtime_options["validation_pairs"] = args.validation_pairs
+    if args.training_exclusion_pairs is not None:
+        runtime_options["training_exclusion_pairs"] = args.training_exclusion_pairs
     if runtime_options:
         context["runtime_options"] = runtime_options
 
@@ -217,6 +283,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_budget(args: argparse.Namespace) -> dict[str, Any]:
+    if args.candidate_batch_size is not None and args.candidate_batch_size <= 0:
+        raise SystemExit("--candidate-batch-size must be positive")
     budget: dict[str, Any] = {
         "max_training_runs": args.max_training_runs or args.max_iterations,
         "max_studies": args.max_studies,
@@ -232,6 +300,7 @@ def build_budget(args: argparse.Namespace) -> dict[str, Any]:
         "target_value": args.target_value,
         "initial_trial_count": args.initial_trial_count,
         "promotion_limits": args.promotion_limits,
+        "candidate_batch_size": args.candidate_batch_size,
     }
     budget.update({
         key: value for key, value in optional_values.items() if value is not None

@@ -10,8 +10,20 @@ from .contracts import (
     DataProfile,
     DatasetSpec,
     DatasetVersion,
+    OperationImpact,
+    QualityDecision,
+    QualityPolicy,
 )
-from .registry import PROCESSORS, DataProcessorRegistry, register_processor
+from .handoff import build_data_handoff, resolve_data_handoff
+from .registry import (
+    PROCESSORS,
+    PROFILERS,
+    DataProcessor,
+    DataProcessorRegistry,
+    DataProfiler,
+    QualityGate,
+    register_processor,
+)
 from .service import (
     build_processing_plan,
     execute_plan,
@@ -21,12 +33,8 @@ from .service import (
     profile_from_dict,
     publish_dataset_version,
 )
-from .handoff import build_data_handoff, resolve_data_handoff
+
 _WORKFLOW_EXPORTS = {
-    "DataProcessingDecisionPolicy": (
-        "agent.data_processing.workflow",
-        "DataProcessingDecisionPolicy",
-    ),
     "DataProcessingWorkflow": (
         "agent.data_processing.workflow",
         "DataProcessingWorkflow",
@@ -42,6 +50,7 @@ def __getattr__(name: str):
     value = getattr(import_module(module_name), attribute)
     globals()[name] = value
     return value
+
 
 __all__ = [
     "DatasetSpec",
@@ -63,6 +72,12 @@ __all__ = [
     "plan_from_dict",
     "resolve_data_handoff",
     "build_data_handoff",
-    "DataProcessingDecisionPolicy",
     "DataProcessingWorkflow",
+    "OperationImpact",
+    "QualityPolicy",
+    "QualityDecision",
+    "DataProfiler",
+    "DataProcessor",
+    "QualityGate",
+    "PROFILERS",
 ]

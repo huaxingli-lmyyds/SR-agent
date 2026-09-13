@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime
 import json
+import math
 
 # 导入 utils 模块
 from agent.utils import (
@@ -22,6 +23,11 @@ from agent.core.adapters import resolve_adapter_bundle
 from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
 from agent.hpo import FailurePolicy, HPOService
+from agent.hpo.protocol import (
+    METRIC_PROTOCOL_ID,
+    METRIC_UNITS,
+    resolve_hpo_validation_protocol,
+)
 from agent.runners import collect_training_result
 
 @tool
@@ -32,6 +38,7 @@ def TrainModel(config_path: Optional[str] = None,
                trial_id: Optional[str] = None,
                parameters_json: Optional[str] = None,
                budget_json: Optional[str] = None,
+               training_exclusion_pairs: Optional[str] = None,
                task_type: Optional[str] = None,
                model_family: Optional[str] = None,
                implementation: Optional[str] = None,
@@ -71,14 +78,8 @@ def TrainModel(config_path: Optional[str] = None,
                     experiment_id=experiment_id,
                 ).to_json()
 
-            execution_info = record.get("execution", {})
-            backup_path = execution_info.get("config_backup_path")
-            record_config_path = record.get("config_path")
-            if not config_path:
-                if backup_path and Path(backup_path).exists():
-                    config_path_str = backup_path
-                elif record_config_path and Path(record_config_path).exists():
-                    config_path_str = record_config_path
+            if trial_id or not config_path:
+                config_path_str = str(tracker.get_config_snapshot(experiment_id))
 
         if not Path(config_path_str).exists():
             return OperationResult(
@@ -99,6 +100,19 @@ def TrainModel(config_path: Optional[str] = None,
         adapters = resolve_adapter_bundle(task_type, model_family, implementation, runner_name)
         task_adapter, model_adapter, runner_adapter = adapters.task, adapters.model, adapters.runner
         model_adapter.validate_config(config_data)
+        hpo_service = None
+        study = None
+        if trial_id:
+            hpo_service = HPOService(tracker)
+            study = hpo_service.load_study(str(experiment_id))
+
+        recorded_task = dict((record or {}).get("task") or {})
+        if study is not None:
+            objective = study.objectives[0]
+            primary_metric, metric_mode = objective.metric, objective.mode
+        else:
+            primary_metric = recorded_task.get("primary_metric") or task_adapter.primary_metric
+            metric_mode = recorded_task.get("metric_mode") or task_adapter.metric_mode
 
         # 确定数据文件夹
         if data_folder:
@@ -122,8 +136,10 @@ def TrainModel(config_path: Optional[str] = None,
                 task={
                     "type": task_type,
                     "dataset": df,
-                    "primary_metric": task_adapter.primary_metric,
-                    "metric_mode": task_adapter.metric_mode,
+                    "primary_metric": primary_metric,
+                    "metric_mode": metric_mode,
+                    "metric_protocol": METRIC_PROTOCOL_ID,
+                    "metric_units": dict(METRIC_UNITS),
                 },
                 model={
                     "family": model_family,
@@ -139,8 +155,7 @@ def TrainModel(config_path: Optional[str] = None,
         else:
             exp_dir = get_experiment_dir(experiment_id, "hpo", create=True)
         if trial_id:
-            hpo_service = HPOService(tracker)
-            study = hpo_service.load_study(experiment_id)
+            assert hpo_service is not None and study is not None
             hpo_service.record_trial(study, trial_id, status="running")
 
         output_folder_path = resolve_optional_project_path(output_folder)
@@ -156,6 +171,24 @@ def TrainModel(config_path: Optional[str] = None,
             "data_folder": df,
             "output_folder": str(output_folder_path),
         }
+        protocol_runtime: Dict[str, Any] = {}
+        if trial_id and (record or {}).get("experiment_type") == "hpo":
+            protocol_runtime = resolve_hpo_validation_protocol(
+                {"training_exclusion_pairs": training_exclusion_pairs}
+                if training_exclusion_pairs else {},
+                persisted_execution=(record or {}).get("execution") or {},
+                require_explicit=False,
+            )
+            overrides["verification_file"] = protocol_runtime[
+                "training_exclusion_pairs"
+            ]
+        elif training_exclusion_pairs:
+            exclusion_path = resolve_optional_project_path(training_exclusion_pairs)
+            if exclusion_path is None or not exclusion_path.is_file():
+                raise ValueError(
+                    f"training_exclusion_pairs file not found: {training_exclusion_pairs}"
+                )
+            overrides["verification_file"] = str(exclusion_path)
         trial_parameters = json.loads(parameters_json) if parameters_json else {}
         trial_budget = json.loads(budget_json) if budget_json else {}
         if not isinstance(trial_parameters, dict) or not isinstance(trial_budget, dict):
@@ -167,8 +200,15 @@ def TrainModel(config_path: Optional[str] = None,
         if data_fraction is not None and not 0 < float(data_fraction) <= 1:
             raise ValueError("budget data_fraction must be in (0, 1]")
         max_duration = trial_budget.get("max_duration_seconds")
-        if max_duration is not None and float(max_duration) <= 0:
-            raise ValueError("budget max_duration_seconds must be positive")
+        if max_duration is not None and (
+            isinstance(max_duration, bool)
+            or not isinstance(max_duration, (int, float))
+            or not math.isfinite(float(max_duration))
+            or float(max_duration) <= 0
+        ):
+            raise ValueError(
+                "budget max_duration_seconds must be a finite positive number"
+            )
         overrides.update(trial_parameters)
         if trial_budget.get("epochs") is not None:
             overrides["number_of_epochs"] = trial_budget["epochs"]
@@ -211,8 +251,10 @@ def TrainModel(config_path: Optional[str] = None,
             **((record or {}).get("task") or {}),
             "type": task_type,
             "dataset": df,
-            "primary_metric": task_adapter.primary_metric,
-            "metric_mode": task_adapter.metric_mode,
+            "primary_metric": primary_metric,
+            "metric_mode": metric_mode,
+            "metric_protocol": recorded_task.get("metric_protocol") or METRIC_PROTOCOL_ID,
+            "metric_units": recorded_task.get("metric_units") or dict(METRIC_UNITS),
         }
         operation_result.model = {
             **((record or {}).get("model") or {}),
@@ -226,6 +268,12 @@ def TrainModel(config_path: Optional[str] = None,
             "trial_id": trial_id,
             "budget": trial_budget,
             "runtime_options": dict(overrides.get("_run_opts") or {}),
+            "training_exclusion_pairs_path": overrides.get("verification_file"),
+            "training_exclusion_pairs_sha256": protocol_runtime.get(
+                "training_exclusion_pairs_sha256"
+            ),
+            "metric_protocol": recorded_task.get("metric_protocol")
+            or METRIC_PROTOCOL_ID,
         })
         for artifact in operation_result.artifacts:
             if trial_id:
@@ -266,6 +314,14 @@ def TrainModel(config_path: Optional[str] = None,
                         "duration_seconds": duration,
                         "status": status,
                         "metrics": training_metrics,
+                        "max_duration_seconds": float(max_duration) if max_duration is not None else None,
+                        "terminated_by_budget": bool(collected.get("terminated_by_budget", False)),
+                        "process_exitcode": collected.get("process_exitcode"),
+                        "training_exclusion_pairs_sha256": protocol_runtime.get(
+                            "training_exclusion_pairs_sha256"
+                        ),
+                        "metric_protocol": recorded_task.get("metric_protocol")
+                        or METRIC_PROTOCOL_ID,
                     },
                     "failure_category": failure.category if failure else None,
                     "recoverable": failure.recoverable if failure else None,
@@ -299,11 +355,21 @@ def TrainModel(config_path: Optional[str] = None,
 
 
 @tool
-def EvaluateModel(experiment_id: Optional[str] = None) -> str:
+def EvaluateModel(
+    experiment_id: Optional[str] = None,
+    verification_config: Optional[str] = None,
+    verification_pairs: Optional[str] = None,
+    evaluation_split: str = "test",
+) -> str:
     """Evaluate through the registered runner and return OperationResult JSON."""
     try:
         from agent.tools.evaluation_tools import RunEvaluation
-        return RunEvaluation.invoke({"experiment_id": experiment_id})
+        return RunEvaluation.invoke({
+            "experiment_id": experiment_id,
+            "verification_config": verification_config,
+            "verification_pairs": verification_pairs,
+            "evaluation_split": evaluation_split,
+        })
     except Exception as exc:
         return OperationResult(
             status="failed",

@@ -29,43 +29,76 @@ def test_data_processing_langgraph_publishes_valid_dataset(tmp_path, dataset_dir
     assert output.exists()
 
 
-def test_data_processing_advisor_failure_cannot_stop_workflow(tmp_path, dataset_dir) -> None:
-    def failing_advisor(state):
-        raise RuntimeError("advisor unavailable")
+def test_data_processing_llm_advice_runs_after_profile(
+    tmp_path, dataset_dir
+) -> None:
+    def advisor(state):
+        assert state["profile"]["quality_metrics"]
+        return {
+            "diagnostics": [],
+            "suggested_operations": [
+                {"operation": "validate_dataset", "reason": "LLM check"}
+            ],
+            "notes": [],
+        }
 
-    result = DataProcessingWorkflow(strategy_advisor=failing_advisor).run({
-        "dataset_uri": str(dataset_dir),
-        "dataset_type": "text",
-        "task_type": "test",
-        "target_goal": "validate",
-        "output_path": str(tmp_path / "version.json"),
-    })
-
-    assert result["status"] == "success"
-    assert "advisor unavailable" in result["advice"]["advice_error"]
-
-
-def test_data_processing_advisor_unknown_operation_is_rejected_without_stopping_workflow(tmp_path, dataset_dir) -> None:
-    workflow = DataProcessingWorkflow(
-        strategy_advisor=lambda state: {
-            "suggested_operations": [{"operation": "unregistered_operation"}]
+    result = DataProcessingWorkflow(strategy_advisor=advisor).run(
+        {
+            "dataset_uri": str(dataset_dir),
+            "dataset_type": "text",
+            "task_type": "test",
+            "target_goal": "validate",
+            "output_path": str(tmp_path / "version.json"),
         }
     )
 
-    result = workflow.run({
-        "dataset_uri": str(dataset_dir),
-        "dataset_type": "text",
-        "task_type": "test",
-        "target_goal": "optimize",
-        "output_path": str(tmp_path / "version.json"),
-    })
+    assert result["status"] == "success"
+    assert result["advice"]["suggested_operations"][0]["operation"] == (
+        "validate_dataset"
+    )
+
+
+def test_data_processing_rejects_unknown_llm_operation(
+    tmp_path, dataset_dir
+) -> None:
+    result = DataProcessingWorkflow(
+        strategy_advisor=lambda state: {
+            "suggested_operations": [
+                {"operation": "unregistered_operation"}
+            ]
+        }
+    ).run(
+        {
+            "dataset_uri": str(dataset_dir),
+            "dataset_type": "text",
+            "task_type": "test",
+            "target_goal": "validate",
+            "output_path": str(tmp_path / "version.json"),
+        }
+    )
 
     assert result["status"] == "success"
-    assert all(
-        operation["operation"] != "unregistered_operation"
-        for operation in result["plan"]["operations"]
-    )
-    assert result["plan"]["rejected_operations"][0]["operation"] == "unregistered_operation"
+    rejected = result["plan"]["rejected_operations"]
+    assert rejected[0]["operation"] == "unregistered_operation"
+    assert rejected[0]["source"] == "llm"
+
+
+def test_data_processing_rejects_unknown_explicit_operation(
+    tmp_path, dataset_dir
+) -> None:
+    with pytest.raises(KeyError, match="unregistered_operation"):
+        DataProcessingWorkflow().run(
+            {
+                "dataset_uri": str(dataset_dir),
+                "dataset_type": "text",
+                "task_type": "test",
+                "target_goal": "validate",
+                "output_path": str(tmp_path / "version.json"),
+                "requested_operations": [
+                    {"operation": "unregistered_operation"}
+                ],
+            }
+        )
 
 
 def test_orchestration_langgraph_automatically_includes_registered_agents() -> None:
@@ -105,6 +138,28 @@ def test_orchestration_advisor_cannot_change_decision_policy_order() -> None:
         "hpo_agent",
     ]
     assert state["advice"]["suggested_order"][0] == "hpo_agent"
+
+
+def test_orchestration_resume_dispatches_only_hpo_agent() -> None:
+    registry = AgentRegistry()
+    registry.register(AgentRegistration("hpo_agent", ("run",), FakeAgent))
+    registry.register(AgentRegistration("data_processing_agent", ("run",), FakeAgent))
+    workflow = OrchestrationWorkflow(
+        registry,
+        TaskDispatcher(registry, MessageService("session")),
+        CompletionPolicy(["hpo_agent"]),
+        lambda context, budget: AgentTaskRequest(
+            action="",
+            objective="resume",
+            context=context,
+            budget=budget,
+        ),
+    )
+
+    state = workflow.run({"resume_experiment_id": "hpo_existing"}, {})
+
+    assert [record.agent_type for record in state["records"]] == ["hpo_agent"]
+    assert state["completion"]["complete"]
 
 
 def test_orchestration_passes_data_processing_result_to_hpo_context() -> None:
@@ -155,6 +210,29 @@ def test_default_agent_search_space_does_not_include_budget_controlled_epochs() 
     }
 
     assert "number_of_epochs" not in names
+
+
+def test_hpo_agent_rejects_missing_validation_protocol_before_creating_study(
+    tmp_path, minimal_config, dataset_dir
+) -> None:
+    agent = HPOAgent(
+        config_path=str(minimal_config),
+        experiments_dir=str(tmp_path / "experiments"),
+        verbose=False,
+    )
+    result = agent.execute_task(AgentTaskRequest(
+        action="optimize_hyperparameters",
+        objective="test validation gate",
+        context={
+            "data_folder": str(dataset_dir),
+            "runtime_options": {},
+        },
+        budget={"max_training_runs": 1},
+    ))
+
+    assert result.status == "failed"
+    assert "verification_config" in result.error
+    assert not list((tmp_path / "experiments").glob("*/experiment_record.json"))
 
 
 def test_agent_rejects_epoch_search_when_budget_controls_epochs() -> None:
@@ -218,6 +296,7 @@ def test_hpo_study_learning_summary_records_next_study_guidance() -> None:
     study = SimpleNamespace(
         strategy="successive_halving",
         candidate_strategy="tpe",
+        sampler_config={"n_startup_trials": 4},
         search_space=search_space,
         strategy_reviews=[{
             "trigger": "stage_end:screening",
@@ -247,6 +326,9 @@ def test_hpo_study_learning_summary_records_next_study_guidance() -> None:
     assert summary["last_review"]["accepted_fields"] == ["requested_strategy", "search_space"]
     assert summary["next_study_recommendation"]["strategy"] == "successive_halving"
     assert summary["next_study_recommendation"]["sampler"] == "tpe"
+    assert summary["next_study_recommendation"]["sampler_config"] == {
+        "n_startup_trials": 4
+    }
     assert summary["next_study_recommendation"]["pruner"] == "successive_halving"
     assert summary["next_study_recommendation"]["search_space"] == search_space.to_dict()
 
@@ -290,6 +372,27 @@ def test_hpo_cross_study_memory_exposes_recent_learning_for_next_planning() -> N
     assert memory["local_search_anchor"] == learning_summary["local_search_anchor"]
     assert memory["next_study_recommendation"] == learning_summary["next_study_recommendation"]
     assert memory["recent_learnings"][-1]["learning_summary"] == learning_summary
+
+
+def test_hpo_next_study_proposal_is_inherited_only_by_policy_controllers() -> None:
+    stored = {
+        "action": "switch_strategy",
+        "requested_sampler": "tpe",
+        "sampler_config": {"n_startup_trials": 3},
+        "reason_codes": ["plateau"],
+        "proposal_id": "proposal_deferred",
+        "created_at": "2026-09-01T00:00:00",
+    }
+    campaign = {"study_summaries": [{"next_study_proposal": stored}]}
+
+    inherited = HPOAgent._next_study_proposal(campaign, "llm")
+
+    assert inherited is not None
+    assert inherited.requested_sampler == "tpe"
+    assert inherited.sampler_config == {"n_startup_trials": 3}
+    assert inherited.proposal_id == "proposal_deferred"
+    assert HPOAgent._next_study_proposal(campaign, "rule") is not None
+    assert HPOAgent._next_study_proposal(campaign, "fixed") is None
 
 
 def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
@@ -356,7 +459,8 @@ def test_hpo_runtime_prompt_uses_compact_study_summary() -> None:
     assert compact["recent_reviews"] == [{"trigger": "2"}, {"trigger": "3"}, {"trigger": "4"}]
 
 
-def test_data_processing_advice_prompt_allows_validated_suggestions(monkeypatch) -> None:
+
+def test_data_processing_prompt_uses_compact_profile(monkeypatch) -> None:
     from agent.agents.data_processing_agent import DataProcessingAgent
 
     captured = {}
@@ -364,21 +468,45 @@ def test_data_processing_advice_prompt_allows_validated_suggestions(monkeypatch)
     class FakeLLM:
         def invoke(self, prompt):
             captured["prompt"] = prompt
-            return {"content": '{"diagnostics":[],"suggested_operations":[],"notes":[]}'}
+            return {
+                "content": (
+                    '{"diagnostics":[],"suggested_operations":[],'
+                    '"notes":[]}'
+                )
+            }
 
     agent = DataProcessingAgent(enable_llm_advisor=True)
     agent._llm = FakeLLM()
-    advice = agent._planning_advice({
-        "dataset_uri": "/data",
-        "dataset_type": "audio",
-        "task_type": "speaker_verification",
-        "target_goal": "validate",
-        "profile": {"large": "omitted"},
-    })
+    advice = agent._planning_advice(
+        {
+            "dataset_uri": "/data",
+            "dataset_type": "audio",
+            "task_type": "speaker_verification",
+            "target_goal": "validate",
+            "profile": {
+                "quality_metrics": {"warning_count": 1},
+                "distributions": {"sample_rates": {"16000": 2}},
+                "issues": [
+                    {
+                        "code": "duration_out_of_range",
+                        "severity": "warning",
+                        "message": "duration",
+                        "suggested_operation": "filter_by_duration",
+                        "evidence": {"large": "omitted"},
+                    }
+                ],
+            },
+        }
+    )
     payload = json.loads(captured["prompt"])
 
     assert advice["suggested_operations"] == []
-    assert "suggested_operations are advisory only" in " ".join(payload["rules"])
+    assert payload["context"]["quality_metrics"] == {"warning_count": 1}
+    assert payload["context"]["issues"][0]["code"] == (
+        "duration_out_of_range"
+    )
+    assert "evidence" not in payload["context"]["issues"][0]
+    assert "available_operations" in payload["context"]
     assert "profile" not in payload["context"]
 
 

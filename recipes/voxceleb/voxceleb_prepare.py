@@ -282,8 +282,8 @@ def _get_utt_split_lists(
                 )
                 if pair is None:
                     continue
-                _, enrol_id, _ = pair
-                test_lst.append(enrol_id)
+                _, enrol_id, test_id = pair
+                test_lst.extend((enrol_id, test_id))
         test_lst = set(sorted(test_lst))
 
         test_spks = [snt.split("/")[0] for snt in test_lst]
@@ -292,8 +292,8 @@ def _get_utt_split_lists(
         if split_speaker:
             # avoid test speakers for train and dev splits
             audio_files_dict = {}
-            for f in glob.glob(path, recursive=True):
-                spk_id = f.split("/wav/")[1].split("/")[0]
+            for f in sorted(glob.glob(path, recursive=True)):
+                spk_id = os.path.relpath(f, os.path.join(data_folder, "wav")).replace("\\", "/").split("/")[0]
                 if spk_id not in test_spks:
                     audio_files_dict.setdefault(spk_id, []).append(f)
 
@@ -308,9 +308,9 @@ def _get_utt_split_lists(
         else:
             # avoid test speakers for train and dev splits
             audio_files_list = []
-            for f in glob.glob(path, recursive=True):
+            for f in sorted(glob.glob(path, recursive=True)):
                 try:
-                    spk_id = f.split("/wav/")[1].split("/")[0]
+                    spk_id = os.path.relpath(f, os.path.join(data_folder, "wav")).replace("\\", "/").split("/")[0]
                 except ValueError:
                     logger.info(f"Malformed path: {f}")
                     continue

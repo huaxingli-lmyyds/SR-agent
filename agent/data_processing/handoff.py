@@ -8,22 +8,31 @@ from typing import Any, Dict
 from agent.utils.path_tool import is_remote_path, resolve_data_path
 
 
-def build_data_handoff(version: Dict[str, Any], experiment_id: Any = None) -> Dict[str, Any]:
+def build_data_handoff(
+    version: Dict[str, Any], experiment_id: Any = None
+) -> Dict[str, Any]:
     """Build the stable handoff payload exposed by data-processing agents."""
 
+    decision = version.get("quality_decision") or {}
     return {
         "dataset_id": version.get("dataset_id"),
         "dataset_version": version.get("version"),
-        "source_uri": version.get("source_uri"),
-        "output_uri": version.get("output_uri"),
         "consumer_uri": version.get("consumer_uri"),
         "consumption_status": version.get("consumption_status"),
         "consumption_reason": version.get("consumption_reason"),
-        "data_processing_experiment_id": str(experiment_id) if experiment_id else None,
+        "quality_status": decision.get("status"),
+        "training_allowed": decision.get("training_allowed"),
+        "blockers": decision.get("blockers") or [],
+        "warnings": decision.get("warnings") or [],
+        "data_processing_experiment_id": str(experiment_id)
+        if experiment_id
+        else None,
     }
 
 
-def resolve_data_handoff(context: Dict[str, Any], config_data_folder: Any) -> Dict[str, Any]:
+def resolve_data_handoff(
+    context: Dict[str, Any], config_data_folder: Any
+) -> Dict[str, Any]:
     """Resolve the exact dataset downstream agents must consume."""
 
     previous = context.get("previous_results") or {}
@@ -36,14 +45,29 @@ def resolve_data_handoff(context: Dict[str, Any], config_data_folder: Any) -> Di
     handoff = explicit_handoff or summary.get("data_handoff") or {}
     version = summary.get("dataset_version") or {}
     if data_result is not None and not handoff and not version:
-        raise ValueError("data processing result does not provide a dataset handoff")
+        raise ValueError(
+            "data processing result does not provide a dataset handoff"
+        )
 
     if handoff or version:
         handoff = handoff or build_data_handoff(
             version,
-            ((data_result or {}).get("experiment_ids") or {}).get("data_processing"),
+            ((data_result or {}).get("experiment_ids") or {}).get(
+                "data_processing"
+            ),
         )
-        status = str(handoff.get("consumption_status") or "source_unchanged")
+        if (
+            handoff.get("training_allowed") is False
+            or handoff.get("quality_status") == "block"
+        ):
+            blockers = handoff.get("blockers") or handoff.get(
+                "quality_blockers"
+            )
+            blockers = ", ".join(blockers or []) or "quality gate"
+            raise ValueError(
+                f"data quality gate blocked downstream training: {blockers}"
+            )
+        status = str(handoff.get("consumption_status") or "ready")
         if status not in {"ready", "source_unchanged"}:
             raise ValueError(
                 "data processing output is not ready for downstream consumption: "
@@ -51,17 +75,35 @@ def resolve_data_handoff(context: Dict[str, Any], config_data_folder: Any) -> Di
             )
         consumer_uri = handoff.get("consumer_uri")
         if not consumer_uri:
-            raise ValueError("data processing handoff does not provide consumer_uri")
-        resolved = str(consumer_uri) if is_remote_path(consumer_uri) else str(resolve_data_path(consumer_uri))
+            raise ValueError(
+                "data processing handoff does not provide consumer_uri"
+            )
+        resolved = (
+            str(consumer_uri)
+            if is_remote_path(consumer_uri)
+            else str(resolve_data_path(consumer_uri))
+        )
         if not is_remote_path(resolved) and not Path(resolved).exists():
-            raise ValueError(f"data processing consumer_uri does not exist: {resolved}")
+            raise ValueError(
+                f"data processing consumer_uri does not exist: {resolved}"
+            )
         return {
-            "source": "data_processing_agent" if data_result is not None else "context",
+            "source": "data_processing_agent"
+            if data_result is not None
+            else "context",
             "dataset_id": handoff.get("dataset_id"),
             "consumer_uri": resolved,
             "consumption_status": status,
             "dataset_version": handoff.get("dataset_version"),
-            "data_processing_experiment_id": handoff.get("data_processing_experiment_id"),
+            "data_processing_experiment_id": handoff.get(
+                "data_processing_experiment_id"
+            ),
+            "quality_status": handoff.get("quality_status"),
+            "training_allowed": handoff.get("training_allowed"),
+            "blockers": handoff.get("blockers")
+            or handoff.get("quality_blockers")
+            or [],
+            "warnings": handoff.get("warnings") or [],
         }
 
     return {
@@ -71,6 +113,10 @@ def resolve_data_handoff(context: Dict[str, Any], config_data_folder: Any) -> Di
         "consumption_status": "source_unchanged",
         "dataset_version": None,
         "data_processing_experiment_id": None,
+        "quality_status": None,
+        "training_allowed": None,
+        "blockers": [],
+        "warnings": [],
     }
 
 

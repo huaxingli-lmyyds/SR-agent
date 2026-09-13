@@ -57,8 +57,8 @@ def test_evaluate_checkpoint_passes_explicit_inputs_and_writes_report(
         scores.write_text("a b 1 0.9\n", encoding="utf-8")
         return {
             "status": "success",
-            "eer": 2.5,
-            "min_dcf": 0.003,
+            "eer": 0.025,
+            "min_dcf": 0.3,
             "output_folder": str(output),
             "scores_path": str(scores),
             "error": None,
@@ -70,7 +70,7 @@ def test_evaluate_checkpoint_passes_explicit_inputs_and_writes_report(
     assert captured["overrides"]["verification_file"].endswith("pairs.txt")
     assert captured["overrides"]["batch_size"] == 4
     assert captured["overrides"]["_run_opts"] == {"device": "cuda:0"}
-    assert report["metrics"] == {"eer_percent": 2.5, "min_dcf": 0.003}
+    assert report["metrics"] == {"eer": 0.025, "min_dcf": 0.3}
     saved = json.loads(
         (tmp_path / "evaluation" / "evaluation_result.json").read_text(
             encoding="utf-8"

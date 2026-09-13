@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import multiprocessing
+from multiprocessing.connection import wait as wait_for_process_io
 from pathlib import Path
-from queue import Empty
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,30 +26,84 @@ class SpeechBrainRunnerAdapter:
         timeout = overrides.get("_hpo_max_duration_seconds")
         if timeout is None:
             return run_training(config_path, overrides)
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise ValueError("_hpo_max_duration_seconds must be a finite positive number")
         context = multiprocessing.get_context("spawn")
-        queue = context.Queue()
+        receive_connection, send_connection = context.Pipe(duplex=False)
         process = context.Process(
             target=_run_speechbrain_training_process,
-            args=(queue, config_path, overrides),
+            args=(send_connection, config_path, overrides),
         )
-        process.start()
-        process.join(float(timeout))
-        if process.is_alive():
-            process.terminate()
-            process.join()
-            return {
-                "status": "failed",
-                "valid_error_rate": None,
-                "error": f"TimeoutError: training exceeded {timeout} seconds",
-            }
         try:
-            return queue.get(timeout=1.0)
-        except Empty:
+            process.start()
+            send_connection.close()
+            ready = wait_for_process_io(
+                [receive_connection, process.sentinel], float(timeout)
+            )
+            if receive_connection in ready:
+                try:
+                    result = receive_connection.recv()
+                except EOFError:
+                    result = None
+                if result is not None:
+                    process.join(10.0)
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(5.0)
+                        if process.is_alive() and hasattr(process, "kill"):
+                            process.kill()
+                            process.join(5.0)
+                    return result
+            if process.sentinel in ready:
+                # The process can close immediately after sending, so perform
+                # one final non-blocking receive before declaring a crash.
+                process.join(10.0)
+                if receive_connection.poll():
+                    try:
+                        result = receive_connection.recv()
+                    except EOFError:
+                        result = None
+                    if result is not None:
+                        return result
+                return {
+                    "status": "failed",
+                    "valid_error_rate": None,
+                    "error": f"training process exited with code {process.exitcode}",
+                    "timeout_seconds": float(timeout),
+                    "terminated_by_budget": False,
+                    "process_exitcode": process.exitcode,
+                }
+            if process.is_alive():
+                process.terminate()
+                process.join(10.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(5.0)
+                return {
+                    "status": "failed",
+                    "valid_error_rate": None,
+                    "error": f"TimeoutError: training exceeded {timeout} seconds",
+                    "timeout_seconds": float(timeout),
+                    "terminated_by_budget": True,
+                    "process_exitcode": process.exitcode,
+                }
+            process.join(0.0)
             return {
                 "status": "failed",
                 "valid_error_rate": None,
                 "error": f"training process exited with code {process.exitcode}",
+                "timeout_seconds": float(timeout),
+                "terminated_by_budget": False,
+                "process_exitcode": process.exitcode,
             }
+        finally:
+            receive_connection.close()
+            send_connection.close()
 
     def run_evaluation(
         self,
@@ -105,6 +160,9 @@ class SpeechBrainRunnerAdapter:
                 "output_folder": raw.get("output_folder"),
                 "epoch_data": raw.get("epoch_data") or [],
                 "final_metrics": raw.get("final_metrics") or {},
+                "timeout_seconds": raw.get("timeout_seconds"),
+                "terminated_by_budget": bool(raw.get("terminated_by_budget", False)),
+                "process_exitcode": raw.get("process_exitcode"),
             }},
             error=raw.get("error"),
         )
@@ -127,10 +185,15 @@ class SpeechBrainRunnerAdapter:
         )
 
 
-def _run_speechbrain_training_process(queue: Any, config_path: str, overrides: Dict[str, Any]) -> None:
+def _run_speechbrain_training_process(
+    connection: Any, config_path: str, overrides: Dict[str, Any]
+) -> None:
     from .speechbrain_backend import run_training
 
-    queue.put(run_training(config_path, overrides))
+    try:
+        connection.send(run_training(config_path, overrides))
+    finally:
+        connection.close()
 
 
 def _find_output_folder(experiment_dir: Path, requested: Optional[Path]) -> Optional[Path]:

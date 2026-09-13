@@ -15,6 +15,8 @@ from .contracts import (
 )
 from .policies import (
     EarlyStoppingPolicy,
+    EvidenceGate,
+    EvidenceGateResult,
     FailureDecision,
     FailurePolicy,
     HPOPlanningPolicy,
@@ -24,10 +26,11 @@ from .policies import (
     StrategyDecisionPolicy,
 )
 from .service import HPOService, search_space_from_dict
-from .campaign import CampaignPolicy
+from .campaign import CampaignPolicy, study_confirmation_signature
 from .feedback import HPOFeedbackAnalyzer
 from .strategies import (
     AdaptiveSearchStrategy,
+    AgentProposalStrategy,
     CandidateStrategy,
     CandidateStrategyRegistry,
     GridSearchStrategy,
@@ -67,11 +70,14 @@ __all__ = [
     "RandomSearchStrategy",
     "GridSearchStrategy",
     "AdaptiveSearchStrategy",
+    "AgentProposalStrategy",
     "OptunaTPEStrategy",
     "CandidateStrategy",
     "CandidateStrategyRegistry",
     "SuccessiveHalvingStrategy",
     "EarlyStoppingPolicy",
+    "EvidenceGate",
+    "EvidenceGateResult",
     "StopDecision",
     "FailureDecision",
     "FailurePolicy",
@@ -85,6 +91,7 @@ __all__ = [
     "SchedulerResult",
     "HPOService",
     "CampaignPolicy",
+    "study_confirmation_signature",
     "HPOFeedbackAnalyzer",
     "search_space_from_dict",
 ]

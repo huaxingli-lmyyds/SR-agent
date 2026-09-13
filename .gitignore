@@ -6,6 +6,9 @@
 # -----------------------------------------------------------------------------
 *.md
 !/README.md
+!/SYSTEM_OPTIMIZATION_RESEARCH_PLAN.md
+!/scripts/experiments/FIVE_GROUP_BENCHMARK.md
+!/scripts/experiments/EXPERT_BASELINE.md
 !/demo/README.md
 !/CHANGELOG.md
 !/CONTRIBUTING.md
