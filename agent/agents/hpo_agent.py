@@ -135,6 +135,12 @@ class HPOAgent(LangGraphAgent):
             request.context.get("runtime_options"),
             require_explicit=True,
         )
+        if self.runner == "speechbrain" and runtime_options.get("ddp_devices"):
+            from agent.runners.speechbrain_distributed import (
+                freeze_ddp_runtime_options,
+            )
+
+            runtime_options = freeze_ddp_runtime_options(runtime_options)
         request.context["runtime_options"] = runtime_options
         controller_mode = str(
             request.context.get("controller_mode")
@@ -498,6 +504,9 @@ class HPOAgent(LangGraphAgent):
                     "training_exclusion_pairs_sha256": runtime_options[
                         "training_exclusion_pairs_sha256"
                     ],
+                    "training_runtime_options": self._training_runtime_options(
+                        runtime_options
+                    ),
                     "metric_protocol": METRIC_PROTOCOL_ID,
                 },
                 extra_fields={"version": {
@@ -808,6 +817,27 @@ class HPOAgent(LangGraphAgent):
             persisted_execution=execution,
             require_explicit=False,
         )
+        persisted_training_runtime = dict(
+            execution.get("training_runtime_options") or {}
+        )
+        if runtime_options.get("ddp_devices") is not None:
+            requested_training_runtime = runtime_options
+            if runner == "speechbrain":
+                from agent.runners.speechbrain_distributed import (
+                    freeze_ddp_runtime_options,
+                )
+
+                requested_training_runtime = freeze_ddp_runtime_options(
+                    runtime_options
+                )
+            if self._training_runtime_signature(
+                requested_training_runtime
+            ) != self._training_runtime_signature(persisted_training_runtime):
+                raise ValueError(
+                    "resume DDP options conflict with the persisted Study "
+                    "training runtime"
+                )
+        runtime_options.update(persisted_training_runtime)
         request.context["runtime_options"] = runtime_options
 
         model_adapter = get_model_adapter(model_family)
@@ -1357,14 +1387,29 @@ class HPOAgent(LangGraphAgent):
                 "runner": runner,
                 "experiments_dir": str(self.experiments_dir),
                 "device": runtime_options.get("device"),
+                "ddp_devices": runtime_options.get("ddp_devices"),
+                "distributed_backend": runtime_options.get("distributed_backend"),
+                "batch_size_semantics": runtime_options.get("batch_size_semantics"),
                 "precision": runtime_options.get("precision"),
                 "eval_precision": runtime_options.get("eval_precision"),
             }))
             training_seconds = perf_counter() - training_started
+            training_runtime = dict(
+                (((train_result.get("extensions") or {}).get("speechbrain") or {}).get(
+                    "runtime"
+                ) or {})
+            )
+            ddp_runtime = dict(training_runtime.get("ddp") or {})
+            training_world_size = max(int(ddp_runtime.get("world_size") or 1), 1)
             if train_result.get("status") != "success":
                 return {**train_result, "cost": {
                     "attempt_training_seconds": training_seconds,
+                    "attempt_training_gpu_seconds": (
+                        training_seconds * training_world_size
+                    ),
+                    "training_world_size": training_world_size,
                     "attempt_evaluation_seconds": 0.0,
+                    "attempt_evaluation_gpu_seconds": 0.0,
                 }}
             # Bind evaluation to this attempt, not the first historical artifact.
             current_checkpoint = next(
@@ -1376,7 +1421,15 @@ class HPOAgent(LangGraphAgent):
                 return {
                     "status": "failed",
                     "error": "missing checkpoint artifact from current training attempt",
-                    "cost": {"attempt_training_seconds": training_seconds, "attempt_evaluation_seconds": 0.0},
+                    "cost": {
+                        "attempt_training_seconds": training_seconds,
+                        "attempt_training_gpu_seconds": (
+                            training_seconds * training_world_size
+                        ),
+                        "training_world_size": training_world_size,
+                        "attempt_evaluation_seconds": 0.0,
+                        "attempt_evaluation_gpu_seconds": 0.0,
+                    },
                 }
             evaluation_started = perf_counter()
             evaluation = json.loads(RunEvaluation.invoke({
@@ -1399,6 +1452,7 @@ class HPOAgent(LangGraphAgent):
             metrics: Dict[str, Any] = {}
             for values in (evaluation.get("metrics") or {}).values():
                 metrics.update(values or {})
+            evaluation_seconds = perf_counter() - evaluation_started
             return {
                 "status": evaluation.get("status", "failed"),
                 "error": evaluation.get("error"),
@@ -1407,7 +1461,12 @@ class HPOAgent(LangGraphAgent):
                 "cost": {
                     "attempt": attempt, "evaluated_checkpoint": current_checkpoint,
                     "attempt_training_seconds": training_seconds,
-                    "attempt_evaluation_seconds": perf_counter() - evaluation_started,
+                    "attempt_training_gpu_seconds": (
+                        training_seconds * training_world_size
+                    ),
+                    "training_world_size": training_world_size,
+                    "attempt_evaluation_seconds": evaluation_seconds,
+                    "attempt_evaluation_gpu_seconds": evaluation_seconds,
                 },
             }
         return execute
@@ -1867,7 +1926,31 @@ class HPOAgent(LangGraphAgent):
             "training_exclusion_pairs_sha256": runtime_options.get(
                 "training_exclusion_pairs_sha256"
             ),
+            "training_runtime": self._training_runtime_signature(runtime_options),
         }
+
+    @staticmethod
+    def _training_runtime_options(runtime_options: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: runtime_options.get(key)
+            for key in (
+                "device",
+                "ddp_devices",
+                "distributed_world_size",
+                "distributed_backend",
+                "batch_size_semantics",
+                "ddp_plan",
+                "precision",
+                "eval_precision",
+            )
+            if runtime_options.get(key) is not None
+        }
+
+    @staticmethod
+    def _training_runtime_signature(runtime_options: Dict[str, Any]) -> Dict[str, Any]:
+        from agent.runners.speechbrain_distributed import training_runtime_signature
+
+        return training_runtime_signature(runtime_options)
 
     @staticmethod
     def _reference_search_profile(model_family: str) -> Dict[str, Any]:

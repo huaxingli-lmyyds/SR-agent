@@ -105,6 +105,59 @@ def _resolve_run_opts(torch_module: Any, requested: Optional[Dict[str, Any]] = N
     run_opts["device"] = device
     return run_opts
 
+
+def _distributed_runtime_from_run_opts(
+    requested: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Remove SR-agent metadata before SpeechBrain validates run_opts."""
+    run_opts = dict(requested or {})
+    metadata = {
+        "enabled": bool(run_opts.get("distributed_launch")),
+        "world_size": int(run_opts.pop("_sr_world_size", 1) or 1),
+        "devices": list(run_opts.pop("_sr_devices", []) or []),
+        "batch_size_semantics": str(
+            run_opts.pop("_sr_batch_size_semantics", "per_device")
+        ),
+        "backend": run_opts.get("distributed_backend"),
+        "rank": int(os.environ.get("RANK", "0")),
+        "local_rank": int(os.environ.get("LOCAL_RANK", "0")),
+    }
+    return run_opts, metadata
+
+
+def _apply_distributed_batch_size(
+    hparams: Dict[str, Any], metadata: Dict[str, Any]
+) -> None:
+    if not metadata.get("enabled"):
+        return
+    semantics = metadata.get("batch_size_semantics")
+    world_size = int(metadata.get("world_size") or 1)
+    raw_batch_size = hparams.get("batch_size")
+    if isinstance(raw_batch_size, bool) or not isinstance(raw_batch_size, int):
+        raise ValueError("DDP requires integer batch_size in the training config")
+    if raw_batch_size <= 0:
+        raise ValueError("DDP batch_size must be positive")
+    if semantics == "global":
+        if raw_batch_size % world_size != 0:
+            raise ValueError(
+                f"global batch_size {raw_batch_size} is not divisible by "
+                f"DDP world_size {world_size}"
+            )
+        per_device = raw_batch_size // world_size
+    elif semantics == "per_device":
+        per_device = raw_batch_size
+    else:
+        raise ValueError("DDP batch_size_semantics must be global or per_device")
+    hparams["global_batch_size"] = (
+        raw_batch_size if semantics == "global" else raw_batch_size * world_size
+    )
+    hparams["batch_size_per_device"] = per_device
+    hparams["batch_size"] = per_device
+    dataloader_options = dict(hparams.get("dataloader_options") or {})
+    dataloader_options["batch_size"] = per_device
+    hparams["dataloader_options"] = dataloader_options
+
+
 def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
     if not train_log_path.exists():
         return None
@@ -499,6 +552,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         else:
             normalized_overrides = []
             run_opts = {}
+        run_opts, distributed_runtime = _distributed_runtime_from_run_opts(run_opts)
         run_opts = _resolve_run_opts(torch, run_opts)
         print(f"SR-agent SpeechBrain training run_opts: {run_opts}", flush=True)
 
@@ -508,6 +562,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         hparams, err = _load_hyperpyyaml_config(config_path, normalized_overrides)
         if err:
             return {"status": "failed", "valid_error_rate": None, "error": err}
+        _apply_distributed_batch_size(hparams, distributed_runtime)
 
         data_folder = hparams.get("data_folder")
         if not data_folder or data_folder == "!PLACEHOLDER":
@@ -522,31 +577,65 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 hparams[key] = str(resolved)
 
         splits = ["train", "dev"]
-        cache_result = _prepare_cached_data(
-            "train", hparams, splits, hparams["sentence_len"], hparams.get("random_chunk", False)
-        )
+        required_files = _required_prep_files(splits, hparams["verification_file"])
 
-        if cache_result.get("status") == "success":
-            required_files = _required_prep_files(splits, hparams["verification_file"])
-            _link_from_cache(Path(cache_result["save_folder"]), Path(hparams["save_folder"]), required_files)
+        def prepare_cached_inputs() -> None:
+            cache_result = _prepare_cached_data(
+                "train",
+                hparams,
+                splits,
+                hparams["sentence_len"],
+                hparams.get("random_chunk", False),
+            )
+            if cache_result.get("status") == "success":
+                _link_from_cache(
+                    Path(cache_result["save_folder"]),
+                    Path(hparams["save_folder"]),
+                    required_files,
+                )
+            elif hparams.get("prep_cache_root"):
+                raise RuntimeError(
+                    f"isolated data preparation failed: {cache_result.get('error')}"
+                )
+
+        if distributed_runtime["enabled"]:
+            sb.utils.distributed.run_on_main(prepare_cached_inputs)
+        else:
+            prepare_cached_inputs()
+        if all((Path(hparams["save_folder"]) / name).exists() for name in required_files):
             hparams["skip_prep"] = True
 
         veri_file_path = os.path.join(
             hparams["save_folder"], os.path.basename(hparams["verification_file"])
         )
         if not Path(veri_file_path).exists():
-            recipe.download_file(hparams["verification_file"], veri_file_path)
+            if distributed_runtime["enabled"]:
+                def download_verification_file() -> None:
+                    recipe.download_file(
+                        hparams["verification_file"], veri_file_path
+                    )
+
+                sb.utils.distributed.run_on_main(download_verification_file)
+            else:
+                recipe.download_file(hparams["verification_file"], veri_file_path)
 
         if not hparams.get("skip_prep", False):
-            prepare_module.prepare_voxceleb(
-                data_folder=hparams["data_folder"],
-                save_folder=hparams["save_folder"],
-                verification_pairs_file=veri_file_path,
-                splits=splits,
-                split_ratio=hparams["split_ratio"],
-                seg_dur=hparams["sentence_len"],
-                skip_prep=hparams["skip_prep"],
-            )
+            preparation_kwargs = {
+                "data_folder": hparams["data_folder"],
+                "save_folder": hparams["save_folder"],
+                "verification_pairs_file": veri_file_path,
+                "splits": splits,
+                "split_ratio": hparams["split_ratio"],
+                "seg_dur": hparams["sentence_len"],
+                "skip_prep": hparams["skip_prep"],
+            }
+            if distributed_runtime["enabled"]:
+                sb.utils.distributed.run_on_main(
+                    prepare_module.prepare_voxceleb,
+                    kwargs=preparation_kwargs,
+                )
+            else:
+                prepare_module.prepare_voxceleb(**preparation_kwargs)
 
         if "prepare_noise_data" in hparams:
             sb.utils.distributed.run_on_main(hparams["prepare_noise_data"])
@@ -560,6 +649,8 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             sample_count = max(1, int(len(train_data) * float(data_fraction)))
             train_data = Subset(train_data, range(sample_count))
 
+        # SpeechBrain's helper already restricts filesystem writes to rank 0
+        # and contains its own DDP barrier. Every rank must call it exactly once.
         sb.core.create_experiment_directory(
             experiment_directory=hparams["output_folder"],
             hyperparams_to_save=config_path,
@@ -589,9 +680,22 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         else:
             log_path = Path(hparams["output_folder"]) / "train_log.txt"
 
-        valid_error_rate = _extract_best_valid_error_rate(log_path)
+        valid_error_rate = (
+            _extract_best_valid_error_rate(log_path)
+            if distributed_runtime["rank"] == 0 else None
+        )
 
-        return {"status": "success", "valid_error_rate": valid_error_rate, "error": None, "runtime": {"run_opts": dict(run_opts)}}
+        return {
+            "status": "success",
+            "valid_error_rate": valid_error_rate,
+            "error": None,
+            "runtime": {
+                "run_opts": dict(run_opts),
+                "ddp": distributed_runtime,
+                "global_batch_size": hparams.get("global_batch_size"),
+                "batch_size_per_device": hparams.get("batch_size_per_device"),
+            },
+        }
     except Exception as exc:
         return {
             "status": "failed",

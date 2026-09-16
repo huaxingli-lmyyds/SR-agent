@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -7,6 +8,12 @@ from agent.runners.contracts import collect_training_result, validate_runner_com
 from agent.runners.registry import RunnerRegistry
 from agent.runners.speechbrain import SpeechBrainRunnerAdapter
 import agent.runners.speechbrain as speechbrain_runner_module
+from agent.runners.speechbrain_distributed import (
+    parse_ddp_devices,
+    resolve_ddp_plan,
+    training_runtime_signature,
+)
+from agent.runners.speechbrain_backend import _apply_distributed_batch_size
 
 
 class ExternalRunner:
@@ -261,3 +268,191 @@ def test_speechbrain_runner_reports_early_child_crash_without_waiting_for_deadli
     assert result["status"] == "failed"
     assert result["process_exitcode"] == 9
     assert result["terminated_by_budget"] is False
+
+
+def test_ddp_device_parser_and_explicit_plan_are_deterministic() -> None:
+    class FakeDistributed:
+        @staticmethod
+        def is_nccl_available():
+            return True
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 4
+
+    fake_torch = type(
+        "FakeTorch", (), {"cuda": FakeCuda(), "distributed": FakeDistributed()}
+    )()
+
+    assert parse_ddp_devices("3,1") == [3, 1]
+    plan = resolve_ddp_plan(fake_torch, {
+        "device": "cuda",
+        "ddp_devices": [3, 1],
+        "distributed_world_size": 2,
+        "distributed_backend": "gloo",
+        "batch_size_semantics": "global",
+    })
+
+    assert plan["enabled"] is True
+    assert plan["devices"] == [3, 1]
+    assert plan["world_size"] == 2
+
+
+def test_ddp_auto_falls_back_when_only_one_gpu_is_visible() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 1
+
+    fake_torch = type("FakeTorch", (), {"cuda": FakeCuda()})()
+
+    plan = resolve_ddp_plan(fake_torch, {"ddp_devices": "auto"})
+
+    assert plan["enabled"] is False
+    assert plan["world_size"] == 1
+    assert plan["fallback_reason"] == "fewer_than_two_visible_cuda_devices"
+
+
+@pytest.mark.parametrize("value", ["0", "0,0", "-1,1", "0,x", [0, True]])
+def test_ddp_rejects_invalid_explicit_devices(value) -> None:
+    with pytest.raises(ValueError):
+        parse_ddp_devices(value)
+
+
+def test_training_runtime_signature_separates_ddp_from_single_gpu() -> None:
+    single = training_runtime_signature({"precision": "fp16"})
+    ddp = training_runtime_signature({
+        "precision": "fp16",
+        "ddp_plan": {
+            "enabled": True,
+            "world_size": 2,
+            "backend": "nccl",
+            "batch_size_semantics": "global",
+        },
+    })
+
+    assert single["world_size"] == 1
+    assert ddp["world_size"] == 2
+    assert single != ddp
+
+
+def test_training_runtime_signature_handles_persisted_ddp_fields() -> None:
+    signature = training_runtime_signature({
+        "distributed_world_size": 4,
+        "distributed_backend": "nccl",
+        "batch_size_semantics": "per_device",
+    })
+
+    assert signature == {
+        "distributed": True,
+        "world_size": 4,
+        "backend": "nccl",
+        "batch_size_semantics": "per_device",
+        "precision": "fp32",
+        "eval_precision": "fp32",
+    }
+
+
+def test_ddp_global_batch_is_split_without_changing_effective_batch() -> None:
+    hparams = {
+        "batch_size": 32,
+        "dataloader_options": {"batch_size": 32, "num_workers": 4},
+    }
+
+    _apply_distributed_batch_size(hparams, {
+        "enabled": True,
+        "world_size": 4,
+        "batch_size_semantics": "global",
+    })
+
+    assert hparams["batch_size"] == 8
+    assert hparams["batch_size_per_device"] == 8
+    assert hparams["global_batch_size"] == 32
+    assert hparams["dataloader_options"] == {"batch_size": 8, "num_workers": 4}
+
+
+def test_ddp_global_batch_rejects_non_divisible_value() -> None:
+    with pytest.raises(ValueError, match="not divisible"):
+        _apply_distributed_batch_size(
+            {"batch_size": 30},
+            {
+                "enabled": True,
+                "world_size": 4,
+                "batch_size_semantics": "global",
+            },
+        )
+
+
+def test_speechbrain_runner_routes_optional_ddp_before_single_process_timeout(
+    monkeypatch,
+) -> None:
+    import agent.runners.speechbrain_distributed as distributed_module
+
+    captured = {}
+
+    def fake_run(config_path, overrides):
+        captured.update({"config_path": config_path, "overrides": overrides})
+        return {"status": "success", "valid_error_rate": 0.2}
+
+    monkeypatch.setattr(distributed_module, "run_distributed_training", fake_run)
+    overrides = {
+        "_hpo_max_duration_seconds": 5,
+        "_run_opts": {"ddp_devices": [0, 1]},
+    }
+
+    result = SpeechBrainRunnerAdapter().run_training("train.yaml", overrides)
+
+    assert result["status"] == "success"
+    assert captured == {"config_path": "train.yaml", "overrides": overrides}
+
+
+def test_ddp_auto_single_gpu_fallback_keeps_timeout_guard(monkeypatch) -> None:
+    import agent.runners.speechbrain as runner_module
+    import agent.runners.speechbrain_distributed as distributed_module
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def device_count():
+            return 1
+
+    fake_torch = type("FakeTorch", (), {"cuda": FakeCuda()})()
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    captured = {}
+
+    def guarded(config_path, overrides):
+        captured.update({"config_path": config_path, "overrides": overrides})
+        return {"status": "success", "valid_error_rate": 0.2}
+
+    monkeypatch.setattr(
+        runner_module, "_run_speechbrain_training_with_timeout", guarded
+    )
+    overrides = {
+        "_hpo_max_duration_seconds": 5,
+        "_run_opts": {
+            "ddp_devices": "auto",
+            "distributed_backend": "nccl",
+            "batch_size_semantics": "global",
+        },
+    }
+
+    result = distributed_module.run_distributed_training("train.yaml", overrides)
+
+    assert result["status"] == "success"
+    assert result["runtime"]["ddp"]["fallback_reason"] == (
+        "fewer_than_two_visible_cuda_devices"
+    )
+    assert captured["overrides"]["_hpo_max_duration_seconds"] == 5
+    assert captured["overrides"]["_run_opts"] == {}

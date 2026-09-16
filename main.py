@@ -168,6 +168,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Runtime device for SpeechBrain, e.g. auto, cuda, cuda:0, or cpu.",
     )
     parser.add_argument(
+        "--ddp-devices",
+        type=str,
+        default=None,
+        help=(
+            "Optional one-Trial DDP devices: 'auto' uses all visible GPUs when "
+            "at least two exist; otherwise use comma-separated indices such as 0,1."
+        ),
+    )
+    parser.add_argument(
+        "--distributed-backend",
+        choices=["nccl", "gloo"],
+        default="nccl",
+        help="Backend for optional one-Trial DDP.",
+    )
+    parser.add_argument(
+        "--ddp-batch-size-semantics",
+        choices=["global", "per_device"],
+        default="global",
+        help="Interpret configured/search batch_size globally or per DDP worker.",
+    )
+    parser.add_argument(
         "--precision",
         choices=["fp32", "fp16", "bf16"],
         default=None,
@@ -245,6 +266,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     runtime_options: dict[str, Any] = {}
     if args.device:
         runtime_options["device"] = args.device
+    if args.ddp_devices is not None:
+        runtime_options["ddp_devices"] = args.ddp_devices
+        runtime_options["distributed_backend"] = args.distributed_backend
+        runtime_options["batch_size_semantics"] = args.ddp_batch_size_semantics
     if args.precision is not None:
         runtime_options["precision"] = args.precision
     if args.eval_precision is not None:

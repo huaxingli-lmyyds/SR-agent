@@ -13,6 +13,9 @@ from typing import Any, Callable, Dict, List, Optional
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from agent.core.metrics import is_finite_metric, require_finite_metric
+from agent.runners.speechbrain_distributed import (
+    training_runtime_signature as _training_runtime_signature,
+)
 from agent.utils import ExperimentTracker, get_experiment_artifact_dir  # noqa: F401
 
 from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, StrategyProposal, Trial, TrialBudget
@@ -458,6 +461,9 @@ class HPOService:
             "validation_pairs_sha256": execution.get("validation_pairs_sha256"),
             "training_exclusion_pairs_sha256": execution.get(
                 "training_exclusion_pairs_sha256"
+            ),
+            "training_runtime": _training_runtime_signature(
+                execution.get("training_runtime_options") or {}
             ),
         }
 

@@ -94,7 +94,7 @@ python main.py \
   --sampler-config-json '{"n_startup_trials":3,"multivariate":false}' \
   --candidate-batch-size 3 \
   --strategy-review-interval-trials 3 \
-  --verification-config configs/verification_ecapa_tdnn.yaml \
+  --verification-config configs/verification_ecapa.yaml \
   --validation-pairs datasets/protocols/hpo_validation.txt
 ```
 
@@ -144,15 +144,42 @@ hashes). A merely similar metric or dataset name is not considered comparable.
 training runs in a child process; a run that exceeds the deadline is terminated
 and recorded with `terminated_by_budget`, timeout, exit code, and failure status.
 
+One Trial can optionally use multiple visible GPUs through SpeechBrain DDP. Keep
+the HPO controller as one normal Python process; it launches `torchrun` only for
+the selected Trial, and only rank zero returns the result to the Study:
+
+```bash
+python main.py \
+  --strategy tpe \
+  --ddp-devices 0,1 \
+  --distributed-backend nccl \
+  --ddp-batch-size-semantics global \
+  --verification-config configs/verification_ecapa.yaml \
+  --validation-pairs datasets/protocols/hpo_validation.txt
+```
+
+`--ddp-devices auto` uses all visible CUDA devices when at least two are
+available and otherwise falls back to ordinary single-device training. With
+`global` semantics the searched/configured `batch_size` remains the effective
+global batch and must be divisible by the GPU count; each worker receives
+`batch_size / world_size`. `per_device` preserves the batch on every GPU and
+therefore increases the effective global batch. Do not start `main.py` itself
+with `torchrun`, because that would duplicate the HPO scheduler and Trial state.
+DDP configuration is frozen into the Study confirmation signature and restored
+on resume, so single- and multi-GPU results are not silently treated as the same
+training protocol.
+
 Resume an interrupted Study from its persisted experiment record:
 
 ```bash
 python main.py --resume-experiment-id YYYYMMDD_HHMMSS_0
 ```
 
-For an LLM-controlled Study, also pass `--enable-llm-advisor
---controller-mode llm`. Resume rejects a controller-mode mismatch instead of
-silently changing the experiment policy.
+For an LLM-controlled Study, also pass
+`--enable-llm-advisor --controller-mode llm`. Resume rejects a controller-mode
+mismatch instead of silently changing the experiment policy. An explicitly
+supplied DDP layout is also rejected when its world size, backend, or batch
+semantics conflicts with the persisted Study.
 
 Completed and already-suggested Trials are reused. A Trial left in `running`
 state is reopened with the same Trial ID and output directory, so the scheduler

@@ -156,6 +156,26 @@ def test_cli_passes_runtime_options_to_context() -> None:
     }
 
 
+def test_cli_passes_optional_single_trial_ddp_options() -> None:
+    args = parse_args(
+        "--device",
+        "cuda:1",
+        "--ddp-devices",
+        "1,3",
+        "--distributed-backend",
+        "nccl",
+        "--ddp-batch-size-semantics",
+        "global",
+    )
+
+    runtime = build_context(args)["runtime_options"]
+
+    assert runtime["device"] == "cuda:1"
+    assert runtime["ddp_devices"] == "1,3"
+    assert runtime["distributed_backend"] == "nccl"
+    assert runtime["batch_size_semantics"] == "global"
+
+
 def test_cli_builds_independent_sampler_pruner_controls() -> None:
     args = parse_args(
         "--strategy", "auto",

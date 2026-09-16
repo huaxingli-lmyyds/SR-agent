@@ -45,6 +45,9 @@ def TrainModel(config_path: Optional[str] = None,
                runner: Optional[str] = None,
                experiments_dir: Optional[str] = None,
                device: Optional[str] = None,
+               ddp_devices: Optional[Any] = None,
+               distributed_backend: Optional[str] = None,
+               batch_size_semantics: Optional[str] = None,
                precision: Optional[str] = None,
                eval_precision: Optional[str] = None) -> str:
     """
@@ -219,6 +222,10 @@ def TrainModel(config_path: Optional[str] = None,
         run_opts: Dict[str, Any] = {}
         if device:
             run_opts["device"] = device
+        if ddp_devices:
+            run_opts["ddp_devices"] = ddp_devices
+            run_opts["distributed_backend"] = distributed_backend or "nccl"
+            run_opts["batch_size_semantics"] = batch_size_semantics or "global"
         if precision:
             run_opts["precision"] = precision
         if eval_precision:

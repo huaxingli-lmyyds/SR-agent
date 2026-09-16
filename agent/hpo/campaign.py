@@ -15,7 +15,7 @@ def study_confirmation_signature(study: HPOStudy) -> Dict[str, Any]:
     context = study.history_context or {}
     objective = study.objectives[0]
     final_budget = budget_key(study.budgets[-1].to_dict())
-    return {
+    signature = {
         "objective": objective.to_dict(),
         "final_budget": {
             "epochs": final_budget[0],
@@ -38,6 +38,11 @@ def study_confirmation_signature(study: HPOStudy) -> Dict[str, Any]:
             "training_exclusion_pairs_sha256"
         ),
     }
+    # Preserve resumability of records created before runtime semantics became
+    # part of the confirmation protocol. New Studies always populate this.
+    if "training_runtime" in context:
+        signature["training_runtime"] = context["training_runtime"]
+    return signature
 
 
 class CampaignPolicy:

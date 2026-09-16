@@ -724,7 +724,15 @@ def run_variant(plan, item, output):
             else {},
             "runtime_options": {
                 k: config.get(k)
-                for k in ("device", "precision", "eval_precision")
+                for k in (
+                    "device",
+                    "ddp_devices",
+                    "distributed_backend",
+                    "batch_size_semantics",
+                    "precision",
+                    "eval_precision",
+                )
+                if config.get(k) is not None
             },
         },
         budget={
@@ -1250,6 +1258,19 @@ def preflight(plan):
             raise ValueError(
                 "CUDA requested but unavailable; select a working training environment"
             )
+        if cfg.get("ddp_devices"):
+            from agent.runners.speechbrain_distributed import resolve_ddp_plan
+
+            resolve_ddp_plan(torch, {
+                key: cfg.get(key)
+                for key in (
+                    "device",
+                    "ddp_devices",
+                    "distributed_backend",
+                    "batch_size_semantics",
+                )
+                if cfg.get(key) is not None
+            })
 
 
 def validate_speechbrain_inputs(plan):

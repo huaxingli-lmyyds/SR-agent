@@ -82,6 +82,9 @@ def build_plan(args):
         "seeds",
         "data_prep_seed",
         "device",
+        "ddp_devices",
+        "distributed_backend",
+        "batch_size_semantics",
         "precision",
         "eval_precision",
     }
@@ -204,14 +207,27 @@ def preflight(plan):
         from agent.runners.speechbrain_backend import _resolve_run_opts
 
         require_speechbrain()
-        _resolve_run_opts(torch, run_options(plan))
+        run_opts = run_options(plan, distributed_training=True)
+        if run_opts.get("ddp_devices"):
+            from agent.runners.speechbrain_distributed import resolve_ddp_plan
+
+            resolve_ddp_plan(torch, run_opts)
+        else:
+            _resolve_run_opts(torch, run_opts)
     return bundle.runner
 
 
-def run_options(plan):
+def run_options(plan, *, distributed_training=False):
+    keys = ["device", "precision", "eval_precision"]
+    if distributed_training:
+        keys.extend([
+            "ddp_devices",
+            "distributed_backend",
+            "batch_size_semantics",
+        ])
     return {
         k: plan["config"][k]
-        for k in ("device", "precision", "eval_precision")
+        for k in keys
         if plan["config"].get(k) is not None
     }
 
@@ -239,7 +255,10 @@ def training_stage(plan, runner, run_dir, metadata):
     from agent.runners import collect_training_result
 
     output = run_dir / "training"
-    overrides = {"output_folder": str(output), "_run_opts": run_options(plan)}
+    overrides = {
+        "output_folder": str(output),
+        "_run_opts": run_options(plan, distributed_training=True),
+    }
     raw = runner.run_training(metadata["paths"]["train"], overrides)
     if raw.get("status") != "success":
         raise RuntimeError(raw.get("error") or "expert training failed")
