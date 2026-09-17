@@ -544,7 +544,13 @@ def verify_frozen(plan, output):
 
 
 def prepare_assets(plan, output):
-    """Prepare common immutable augmentation inputs, never write into the dataset."""
+    """Prepare common immutable augmentation inputs.
+
+    Existing ``<data_folder>/noise`` and ``<data_folder>/rir`` audio is reused
+    read-only. Only generated annotations and the manifest are written below
+    the experiment output. Missing local assets retain the URL-download
+    fallback declared by the training YAML.
+    """
     from agent.utils import ConfigParser
 
     manifest = output / "assets.json"
@@ -553,6 +559,15 @@ def prepare_assets(plan, output):
         for path, digest in assets["sha256"].items():
             if file_hash(path) != digest:
                 raise ValueError(f"augmentation annotation changed: {path}")
+        for kind, source in assets.get("sources", {}).items():
+            current = augmentation_inventory_hash(
+                Path(source["path"]), source["extension"]
+            )
+            if current != source["inventory_sha256"]:
+                raise ValueError(
+                    f"{kind} augmentation audio inventory changed: "
+                    f"{source['path']}"
+                )
         return assets["overrides"]
     if any((output / "runs").glob("*/run_inputs.json")):
         raise ValueError(
@@ -563,6 +578,7 @@ def prepare_assets(plan, output):
         convert_to_dict=False
     )
     overrides = {}
+    sources = {}
     for kind in ("noise", "rir"):
         key = f"prepare_{kind}_data"
         if key not in raw:
@@ -583,24 +599,65 @@ def prepare_assets(plan, output):
             raise ValueError(f"unsupported augmentation preparer: {key}")
         from agent.utils.config_parser import parse_yaml_tags
         from recipes.voxceleb.augmentation_prepare import (
+            prepare_dataset_from_folder,
             prepare_dataset_from_URL,
         )
 
         destination = output / "assets" / kind
         annotation = destination / f"{kind}.csv"
-        prepare_dataset_from_URL(
-            URL=str(parse_yaml_tags(spec["URL"], raw)),
-            dest_folder=str(destination),
-            csv_file=str(annotation),
-            ext=str(spec.get("ext", "wav")),
-            max_length=parse_yaml_tags(spec.get("max_length"), raw),
+        extension = str(spec.get("ext", "wav")).lstrip(".")
+        max_length = parse_yaml_tags(spec.get("max_length"), raw)
+        local_source = (
+            Path(plan["data_folder"]) / kind
+            if plan.get("data_folder")
+            else None
         )
-        overrides[f"data_folder_{kind}"] = str(destination)
+        if local_source is not None and any(
+            local_source.rglob(f"*.{extension}")
+        ):
+            local_source = local_source.resolve()
+            print(
+                f"Using local {kind} augmentation audio: {local_source}",
+                flush=True,
+            )
+            prepare_dataset_from_folder(
+                source_folder=str(local_source),
+                csv_file=str(annotation),
+                ext=extension,
+                max_length=max_length,
+            )
+            asset_folder = local_source
+            mode = "local"
+        else:
+            print(
+                f"No local {kind} audio found; preparing URL asset in "
+                f"{destination}",
+                flush=True,
+            )
+            prepare_dataset_from_URL(
+                URL=str(parse_yaml_tags(spec["URL"], raw)),
+                dest_folder=str(destination),
+                csv_file=str(annotation),
+                ext=extension,
+                max_length=max_length,
+            )
+            asset_folder = destination.resolve()
+            mode = "download"
+        overrides[f"data_folder_{kind}"] = str(asset_folder)
         overrides[f"{kind}_annotation"] = str(annotation)
+        sources[kind] = {
+            "mode": mode,
+            "path": str(asset_folder),
+            "extension": extension,
+            "inventory_sha256": augmentation_inventory_hash(
+                asset_folder, extension
+            ),
+        }
     write_json(
         manifest,
         {
             "overrides": overrides,
+            "sources": sources,
             "sha256": {
                 v: file_hash(v)
                 for k, v in overrides.items()
@@ -610,6 +667,22 @@ def prepare_assets(plan, output):
         },
     )
     return overrides
+
+
+def augmentation_inventory_hash(folder, extension):
+    """Hash augmentation paths and sizes without rereading all audio bytes."""
+    folder = Path(folder)
+    files = sorted(folder.rglob(f"*.{str(extension).lstrip('.')}"))
+    if not files:
+        raise ValueError(f"augmentation audio folder is empty: {folder}")
+    digest = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(folder).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(path.stat().st_size).encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def prepare_run(plan, item, run_dir):

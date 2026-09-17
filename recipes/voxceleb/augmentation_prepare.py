@@ -47,6 +47,31 @@ def prepare_dataset_from_URL(
     _write_augmentation_csv(destination, Path(csv_file), ext, max_length)
 
 
+def prepare_dataset_from_folder(
+    source_folder: str,
+    csv_file: str,
+    ext: str = "wav",
+    max_length: float | None = None,
+) -> None:
+    """Write a SpeechBrain augmentation CSV for existing local audio.
+
+    Unlike :func:`prepare_dataset_from_URL`, this function never creates or
+    extracts files below ``source_folder``. The source is treated as a
+    read-only dataset owned outside the experiment output directory.
+    """
+    source = Path(source_folder)
+    if not source.is_dir():
+        raise FileNotFoundError(
+            f"Local augmentation folder does not exist: {source}"
+        )
+    if not _has_audio_files(source, ext):
+        raise RuntimeError(
+            f"No '*.{ext.lstrip('.')}' files found under local augmentation "
+            f"folder: {source}"
+        )
+    _write_augmentation_csv(source, Path(csv_file), ext, max_length)
+
+
 def _has_audio_files(folder: Path, ext: str) -> bool:
     return any(folder.rglob(f"*.{ext.lstrip('.')}"))
 
@@ -78,6 +103,7 @@ def _write_augmentation_csv(
     sf = _soundfile_module()
     files = sorted(audio_root.rglob(f"*.{ext.lstrip('.')}"))
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    valid_files = 0
     with csv_path.open("w", newline="", encoding="utf-8") as fout:
         writer = csv.writer(fout)
         writer.writerow(["ID", "duration", "wav", "wav_format", "wav_opts"])
@@ -96,11 +122,13 @@ def _write_augmentation_csv(
                 ext.lstrip("."),
                 "",
             ])
+            valid_files += 1
 
-    if len(files) == 0:
+    if valid_files == 0:
         raise RuntimeError(
-            f"No '*.{ext}' files found under augmentation folder: {audio_root}"
+            f"No readable '*.{ext}' files found under augmentation folder: "
+            f"{audio_root}"
         )
 
 
-__all__ = ["prepare_dataset_from_URL"]
+__all__ = ["prepare_dataset_from_URL", "prepare_dataset_from_folder"]

@@ -72,7 +72,7 @@ python scripts/experiments/run_hpo_benchmark.py --config configs/experiments/fiv
 
 `data_prep_seed` 默认为 0，专门固定 train/dev 划分，各组和不同训练种子使用同一划分。准备缓存位于各自 `runs/.../prep_cache`，验证和最终测试使用不同子目录。准备前后保存/恢复 Python 随机状态，避免冷缓存额外消耗训练随机序列。
 
-噪声/RIR 在各组计时开始前准备到本批实验的 `assets` 目录；完成后各组只读相同音频和 CSV，不再重复下载或改写原数据目录。`assets.json` 记录注释哈希及独立 `setup_seconds`，此开销不混入某一个方法的成绩。首次运行需要下载增强资源；当前支持项目内置的增强准备函数，未知自定义回调会报错。输入音频需提前解压，实验不会调用 `voxceleb_source` 向数据目录写入文件。
+噪声/RIR 在各组计时开始前统一准备。若 `<data-folder>/noise` 和 `<data-folder>/rir` 已包含 `.wav`，入口直接只读复用本地音频，只在本批实验的 `assets` 目录生成 CSV；对应本地目录缺失时才使用训练 YAML 的 URL 下载。各组共享同一音频和 CSV，不重复准备或改写原数据目录。`assets.json` 记录来源模式、路径、音频清单签名、注释哈希及独立 `setup_seconds`，此开销不混入某一个方法的成绩。启动后不得增删本地增强音频，否则恢复会拒绝继续。当前仅支持项目内置的增强准备函数，未知自定义回调会报错。输入音频需提前解压，实验不会调用 `voxceleb_source` 向数据目录写入文件。
 
 正式训练前检查验证/测试音频是否存在，以及训练/验证的特征和模型显式参数是否冲突。当前要求 `score_norm=none`；需要分数归一化时应先设计独立、冻结的 cohort 协议，不能隐式从测试说话人构造 cohort。
 

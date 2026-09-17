@@ -218,6 +218,9 @@ def test_augmentation_is_prepared_once_outside_dataset(tmp_path, monkeypatch):
 
     def prepare(**kwargs):
         calls.append(kwargs)
+        audio = benchmark.Path(kwargs["dest_folder"]) / "immutable.wav"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"immutable-audio")
         path = benchmark.Path(kwargs["csv_file"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -247,6 +250,61 @@ def test_augmentation_is_prepared_once_outside_dataset(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="annotation changed"):
         benchmark.prepare_assets(plan, tmp_path)
+
+
+def test_local_augmentation_audio_is_reused_read_only(tmp_path, monkeypatch):
+    from recipes.voxceleb import augmentation_prepare
+
+    dataset = tmp_path / "dataset"
+    for kind in ("noise", "rir"):
+        folder = dataset / kind / "nested"
+        folder.mkdir(parents=True)
+        (folder / f"{kind}.wav").write_bytes(b"immutable-audio")
+
+    local_calls = []
+
+    def prepare_local(**kwargs):
+        local_calls.append(kwargs)
+        annotation = benchmark.Path(kwargs["csv_file"])
+        annotation.parent.mkdir(parents=True, exist_ok=True)
+        annotation.write_text(
+            "ID,duration,wav\na,1,local.wav\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(
+        augmentation_prepare, "prepare_dataset_from_folder", prepare_local
+    )
+    monkeypatch.setattr(
+        augmentation_prepare,
+        "prepare_dataset_from_URL",
+        lambda **_kwargs: pytest.fail("local assets must not download"),
+    )
+    plan = {
+        "data_folder": str(dataset),
+        "frozen_inputs": {
+            "train_config": str(
+                benchmark.ROOT / "configs/train_ecapa_tdnn.yaml"
+            )
+        },
+    }
+    overrides = benchmark.prepare_assets(plan, tmp_path / "experiment")
+    assert len(local_calls) == 2
+    assert overrides["data_folder_noise"] == str((dataset / "noise").resolve())
+    assert overrides["data_folder_rir"] == str((dataset / "rir").resolve())
+    assert all(
+        benchmark.Path(call["csv_file"]).is_relative_to(
+            tmp_path / "experiment" / "assets"
+        )
+        for call in local_calls
+    )
+    manifest = benchmark.read_json(tmp_path / "experiment" / "assets.json")
+    assert manifest["sources"]["noise"]["mode"] == "local"
+    assert manifest["sources"]["rir"]["mode"] == "local"
+    assert benchmark.prepare_assets(plan, tmp_path / "experiment") == overrides
+
+    (dataset / "noise" / "nested" / "added.wav").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="noise augmentation audio inventory"):
+        benchmark.prepare_assets(plan, tmp_path / "experiment")
 
 
 def test_real_configs_are_compatible_but_missing_audio_fails_early(tmp_path):
