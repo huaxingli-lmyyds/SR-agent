@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import random
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,6 +64,53 @@ def test_preparation_seed_does_not_consume_training_random_state():
             assert [random.random() for _ in range(4)] == first
             raise RuntimeError("interrupted prep")
     assert random.getstate() == before
+
+
+def test_random_segment_csv_reads_metadata_without_decoding(tmp_path):
+    import csv
+
+    source = Path("recipes/voxceleb/voxceleb_prepare.py")
+    module = ast.parse(source.read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "prepare_csv"
+    )
+
+    class MetadataOnlyAudioIO:
+        @staticmethod
+        def info(_path):
+            return SimpleNamespace(sample_rate=16000, num_frames=32000)
+
+        @staticmethod
+        def load(_path):
+            raise AssertionError("random-segment preparation decoded audio")
+
+    namespace = {
+        "csv": csv,
+        "logger": logging.getLogger(__name__),
+        "tqdm": lambda values, **_kwargs: values,
+        "audio_io": MetadataOnlyAudioIO(),
+        "SAMPLERATE": 16000,
+    }
+    exec(
+        compile(
+            ast.Module(body=[function], type_ignores=[]), str(source), "exec"
+        ),
+        namespace,
+    )
+    destination = tmp_path / "train.csv"
+    namespace["prepare_csv"](
+        3.0,
+        ["/dataset/wav/id10001/video/00001.wav"],
+        destination,
+        random_segment=True,
+    )
+    rows = list(csv.DictReader(destination.open(encoding="utf-8")))
+    assert len(rows) == 1
+    assert rows[0]["duration"] == "2.0"
+    assert rows[0]["start"] == "0"
+    assert rows[0]["stop"] == "32000"
 
 
 def test_preparation_cache_is_scoped_and_fingerprinted(tmp_path, monkeypatch):

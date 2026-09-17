@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from agent.runners.soundfile_audio import load_audio
+from agent.runners.soundfile_audio import get_audio_info, load_audio
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
 
 patch_torchaudio_compatibility()
@@ -40,6 +40,10 @@ class _SoundFileAudioIO:
             padding = torch.zeros(pad_shape, dtype=tensor.dtype, device=tensor.device)
             tensor = torch.cat([tensor, padding], dim=-1)
         return tensor, sample_rate
+
+    def info(self, path: str):
+        """Return header metadata without loading waveform samples."""
+        return get_audio_info(path)
 
 
 def _torch_module():

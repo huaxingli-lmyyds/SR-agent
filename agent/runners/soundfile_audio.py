@@ -2,8 +2,35 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from os import PathLike
 from typing import Any
+
+
+@dataclass(frozen=True)
+class AudioInfo:
+    """Minimal audio metadata needed by VoxCeleb data preparation."""
+
+    sample_rate: int
+    num_frames: int
+    num_channels: int
+
+
+def get_audio_info(uri: str | PathLike[str]) -> AudioInfo:
+    """Read an audio header without decoding waveform samples."""
+    try:
+        import soundfile as sf
+    except ImportError as exc:
+        raise ImportError(
+            "soundfile is required for SR-agent audio metadata reads. "
+            "Install project dependencies with: pip install -e .[speech]"
+        ) from exc
+    metadata = sf.info(str(uri))
+    return AudioInfo(
+        sample_rate=int(metadata.samplerate),
+        num_frames=int(metadata.frames),
+        num_channels=int(metadata.channels),
+    )
 
 
 def load_audio(
@@ -52,4 +79,4 @@ def _audio_dependencies():
     return np, sf, torch
 
 
-__all__ = ["load_audio"]
+__all__ = ["AudioInfo", "get_audio_info", "load_audio"]

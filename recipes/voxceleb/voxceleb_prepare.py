@@ -379,14 +379,19 @@ def prepare_csv(seg_dur, wav_lst, csv_file, random_segment=False, amp_th=0):
             continue
         audio_id = my_sep.join([spk_id, sess_id, utt_id.split(".")[0]])
 
-        # Reading the signal (to retrieve duration in seconds)
-        signal, fs = audio_io.load(wav_file)
-        signal = signal.squeeze(0)
-
         if random_segment:
-            audio_duration = signal.shape[0] / SAMPLERATE
+            # Random-chunk training only needs the utterance bounds here. Do
+            # not decode the complete waveform for every file during CSV
+            # preparation; the training pipeline reads the selected samples.
+            info = audio_io.info(wav_file)
+            if info.sample_rate != SAMPLERATE:
+                raise ValueError(
+                    f"Unexpected sample rate for {wav_file}: "
+                    f"{info.sample_rate} (expected {SAMPLERATE})"
+                )
+            audio_duration = info.num_frames / info.sample_rate
             start_sample = 0
-            stop_sample = signal.shape[0]
+            stop_sample = info.num_frames
 
             # Composition of the csv_line
             csv_line = [
@@ -399,6 +404,10 @@ def prepare_csv(seg_dur, wav_lst, csv_file, random_segment=False, amp_th=0):
             ]
             entry.append(csv_line)
         else:
+            # Fixed-chunk preparation performs an energy check per chunk and
+            # therefore still requires the waveform samples.
+            signal, fs = audio_io.load(wav_file)
+            signal = signal.squeeze(0)
             audio_duration = signal.shape[0] / SAMPLERATE
 
             uniq_chunks_list = _get_chunks(seg_dur, audio_id, audio_duration)
