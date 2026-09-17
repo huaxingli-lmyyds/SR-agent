@@ -38,6 +38,12 @@ SpeechBrain 的 checkpoint 沿用现有训练配方的选择规则：分类验�
 
 在项目根目录执行。正式运行需要项目训练依赖及兼容的 PyTorch/CUDA、SpeechBrain；本入口本身不需要 LLM API、Optuna 或 LangGraph。`--dry-run` 只需要基础配置解析依赖，不加载训练/搜索模块，不创建输出目录。
 
+如果尚无独立的验证 pairs，先使用
+[`scripts/tools/generate_hpo_validation.py`](../tools/GENERATE_HPO_VALIDATION.md)
+从 VoxCeleb1 dev 说话人中确定性生成一次。不要把 `veri_test2.txt`
+同时作为验证和测试协议，也不要把覆盖 VoxCeleb1 训练说话人的 VoxCeleb1-H
+作为验证协议。
+
 先查看实际参数：
 
 ```powershell
