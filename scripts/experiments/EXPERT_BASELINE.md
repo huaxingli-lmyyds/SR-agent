@@ -83,6 +83,8 @@ python scripts/experiments/run_expert_baseline.py --resume --output-dir E:/exper
 - 不允许恢复时换参数、种子、输出根目录、源代码或已记录依赖版本；配置、checkpoint 和评估归属均校验。
 - 每个 seed 使用独立训练目录和准备缓存；训练排除验证、测试 pairs 两侧所有说话人。`data_prep_seed=0` 固定 train/dev 划分，不受训练种子影响。
 - 若 `<data-folder>/noise` 和 `<data-folder>/rir` 已包含 `.wav`，入口直接只读复用本地增强音频，只在实验的 `assets/` 中生成 CSV；对应目录缺失时才使用 YAML 的 URL 下载。启动后不得增删或替换这些本地音频，否则恢复时资产清单校验会拒绝继续。
+- SpeechBrain 运行会根据数据目录与统一训练排除清单冻结实际训练说话人数，并用它覆盖训练 YAML 的 `out_n_neurons`；生成 `train.csv` 后会再次核对说话人数，避免 VoxCeleb1-only 训练误用 VoxCeleb1+2 的 7205 类分类头。
+- verification 配置为 `score_norm: none` 时，评估只准备 `enrol.csv/test.csv`，不会重建或加载 `train.csv/dev.csv`；启用 Z/T/S-Norm 时才准备 cohort 所需的 `train.csv`，`dev.csv` 始终不参与 verification。
 - 数据路径、排除清单、缓存/日志/checkpoint 目录、准备开关属于隔离协议，会覆盖 YAML 中对应字段；`voxceleb_source` 禁用，输入音频须提前解压。增强资源准备到实验目录，训练时只读，不写入原数据目录。
 - 与五组入口共享真实 SpeechBrain 执行锁，避免两个入口同时抢设备。无法阻止其他程序占用 GPU，正式测时仍需自行隔离硬件负载。
 - 当前沿用 cosine verification、`score_norm=none` 协议，不自动构造额外 cohort 或做 PLDA 训练。输入数据版本需自行冻结，脚本不逐文件哈希整个音频库。

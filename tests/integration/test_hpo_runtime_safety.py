@@ -35,6 +35,7 @@ def study_factory(tmp_path, minimal_config, dataset_dir):
         {
             "verification_config": str(minimal_config),
             "validation_pairs": str(pairs),
+            "training_exclusion_pairs": str(pairs),
         },
         require_explicit=True,
     )

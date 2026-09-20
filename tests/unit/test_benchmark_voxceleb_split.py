@@ -113,6 +113,40 @@ def test_random_segment_csv_reads_metadata_without_decoding(tmp_path):
     assert rows[0]["stop"] == "32000"
 
 
+def test_training_speaker_count_is_bound_from_exclusion_protocol(tmp_path):
+    from agent.runners.speechbrain_backend import (
+        _bind_training_speaker_count,
+        _training_annotation_speaker_count,
+    )
+
+    data = tmp_path / "dataset"
+    for speaker in ("id1", "id2", "id3"):
+        (data / "wav" / speaker).mkdir(parents=True)
+    exclusions = tmp_path / "exclusions.txt"
+    exclusions.write_text(
+        "1 id3/session/a.wav id3/session/b.wav\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "train.yaml"
+    config.write_text("out_n_neurons: 7205\n", encoding="utf-8")
+    overrides = {
+        "data_folder": str(data),
+        "verification_file": str(exclusions),
+    }
+
+    assert _bind_training_speaker_count(str(config), overrides) == 2
+    assert overrides["out_n_neurons"] == 2
+
+    annotation = tmp_path / "train.csv"
+    annotation.write_text(
+        "ID,duration,wav,start,stop,spk_id\n"
+        "a,1,a.wav,0,1,id1\n"
+        "b,1,b.wav,0,1,id2\n",
+        encoding="utf-8",
+    )
+    assert _training_annotation_speaker_count(annotation) == 2
+
+
 def test_preparation_cache_is_scoped_and_fingerprinted(tmp_path, monkeypatch):
     from agent.runners import speechbrain_backend as backend
 

@@ -74,7 +74,11 @@ python scripts/experiments/run_hpo_benchmark.py --config configs/experiments/fiv
 
 噪声/RIR 在各组计时开始前统一准备。若 `<data-folder>/noise` 和 `<data-folder>/rir` 已包含 `.wav`，入口直接只读复用本地音频，只在本批实验的 `assets` 目录生成 CSV；对应本地目录缺失时才使用训练 YAML 的 URL 下载。各组共享同一音频和 CSV，不重复准备或改写原数据目录。`assets.json` 记录来源模式、路径、音频清单签名、注释哈希及独立 `setup_seconds`，此开销不混入某一个方法的成绩。启动后不得增删本地增强音频，否则恢复会拒绝继续。当前仅支持项目内置的增强准备函数，未知自定义回调会报错。输入音频需提前解压，实验不会调用 `voxceleb_source` 向数据目录写入文件。
 
+SpeechBrain 训练快照会根据数据目录与统一训练排除清单冻结实际训练说话人数，并覆盖 `out_n_neurons`。生成 `train.csv` 后还会核对其中的实际说话人数；因此 VoxCeleb1-only 实验不会沿用基础 YAML 中面向 VoxCeleb1+2 的 7205 类分类头。
+
 正式训练前检查验证/测试音频是否存在，以及训练/验证的特征和模型显式参数是否冲突。当前要求 `score_norm=none`；需要分数归一化时应先设计独立、冻结的 cohort 协议，不能隐式从测试说话人构造 cohort。
+
+在当前 `score_norm=none` 协议下，每次 verification 只准备 `enrol.csv/test.csv`，不会生成或加载 `train.csv/dev.csv`。未来启用 Z/T/S-Norm 时才允许准备冻结 cohort 对应的 `train.csv`，`dev.csv` 不参与 verification。
 
 只跑传统基线，不需要 LLM API 配置：
 

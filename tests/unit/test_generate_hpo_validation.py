@@ -67,13 +67,20 @@ def test_generates_balanced_deterministic_speaker_disjoint_protocol(tmp_path):
         else:
             assert left.split("/")[0] != right.split("/")[0]
     assert manifest["integrity"]["validation_test_speaker_overlap"] == 0
+    exclusions = (first / "training_exclusions.txt").read_text().splitlines()
+    assert exclusions == pairs + test.read_text().splitlines()
+    assert exclusions == (
+        second / "training_exclusions.txt"
+    ).read_text().splitlines()
     saved = json.loads(
         (first / "hpo_validation_manifest.json").read_text()
     )
     assert saved["counts"]["validation_pairs"] == 12
+    assert saved["counts"]["training_exclusion_pairs"] == 14
     assert saved["usage"]["training_exclusion_pairs"].endswith(
-        "hpo_validation.txt"
+        "training_exclusions.txt"
     )
+    assert saved["integrity"]["training_exclusions_sha256"]
 
 
 def test_rejects_missing_test_audio_before_writing(tmp_path):

@@ -188,14 +188,15 @@ def skip(splits, save_folder, conf):
     skip = True
 
     split_files = {
-        "train": TRAIN_CSV,
-        "dev": DEV_CSV,
-        "test": TEST_CSV,
-        "enrol": ENROL_CSV,
+        "train": (TRAIN_CSV,),
+        "dev": (DEV_CSV,),
+        "test": (TEST_CSV, ENROL_CSV),
+        "enrol": (ENROL_CSV,),
     }
     for split in splits:
-        if not os.path.isfile(os.path.join(save_folder, split_files[split])):
-            skip = False
+        for filename in split_files[split]:
+            if not os.path.isfile(os.path.join(save_folder, filename)):
+                skip = False
     #  Checking saved options
     save_opt = os.path.join(save_folder, OPT_FILE)
     if skip is True:

@@ -29,6 +29,7 @@ def _validation_protocol(tmp_path, config_path):
         {
             "verification_config": str(validation_config),
             "validation_pairs": str(pairs),
+            "training_exclusion_pairs": str(pairs),
         },
         require_explicit=True,
     )

@@ -6,6 +6,7 @@ import csv
 import shutil
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
 
@@ -103,32 +104,39 @@ def _write_augmentation_csv(
     sf = _soundfile_module()
     files = sorted(audio_root.rglob(f"*.{ext.lstrip('.')}"))
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = csv_path.with_name(f".{csv_path.name}.{uuid4().hex}.tmp")
     valid_files = 0
-    with csv_path.open("w", newline="", encoding="utf-8") as fout:
-        writer = csv.writer(fout)
-        writer.writerow(["ID", "duration", "wav", "wav_format", "wav_opts"])
-        for index, filename in enumerate(files):
-            try:
-                info = sf.info(str(filename))
-            except RuntimeError:
-                continue
-            duration = float(info.frames) / float(info.samplerate)
-            if max_length is not None and duration > float(max_length):
-                duration = float(max_length)
-            writer.writerow([
-                f"{filename.stem}-{index}",
-                duration,
-                str(filename),
-                ext.lstrip("."),
-                "",
-            ])
-            valid_files += 1
+    try:
+        with temporary.open("w", newline="", encoding="utf-8") as fout:
+            writer = csv.writer(fout)
+            writer.writerow(
+                ["ID", "duration", "wav", "wav_format", "wav_opts"]
+            )
+            for index, filename in enumerate(files):
+                try:
+                    info = sf.info(str(filename))
+                except RuntimeError:
+                    continue
+                duration = float(info.frames) / float(info.samplerate)
+                if max_length is not None and duration > float(max_length):
+                    duration = float(max_length)
+                writer.writerow([
+                    f"{filename.stem}-{index}",
+                    duration,
+                    str(filename),
+                    ext.lstrip("."),
+                    "",
+                ])
+                valid_files += 1
 
-    if valid_files == 0:
-        raise RuntimeError(
-            f"No readable '*.{ext}' files found under augmentation folder: "
-            f"{audio_root}"
-        )
+        if valid_files == 0:
+            raise RuntimeError(
+                f"No readable '*.{ext}' files found under augmentation "
+                f"folder: {audio_root}"
+            )
+        temporary.replace(csv_path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 __all__ = ["prepare_dataset_from_URL", "prepare_dataset_from_folder"]

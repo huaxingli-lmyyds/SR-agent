@@ -89,9 +89,10 @@ def compute_embedding_loop(data_loader):
 
 
 
-def score_norm_mode():
+def score_norm_mode(configuration=None):
     """Return the enabled score-normalization mode, or None for fast scoring."""
-    value = params.get("score_norm")
+    configuration = params if configuration is None else configuration
+    value = configuration.get("score_norm")
     if value is None or value is False:
         return None
     value = str(value).strip().lower()
@@ -188,15 +189,19 @@ def dataio_prep(params):
     "Creates the dataloaders and their data processing pipelines."
 
     data_folder = params["data_folder"]
+    norm_mode = score_norm_mode(params)
 
-    # Train data (used for normalization)
-    train_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
-        csv_path=params["train_data"],
-        replacements={"data_root": data_folder},
-    )
-    train_data = train_data.filtered_sorted(
-        sort_key="duration", select_n=params["n_train_snts"]
-    )
+    # Cohort data is needed only by Z/T/S-Norm. Fast, unnormalized scoring
+    # must not require or load a training annotation.
+    train_data = None
+    if norm_mode:
+        train_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
+            csv_path=params["train_data"],
+            replacements={"data_root": data_folder},
+        )
+        train_data = train_data.filtered_sorted(
+            sort_key="duration", select_n=params["n_train_snts"]
+        )
 
     # Enrol data
     enrol_data = sb.dataio.dataset.DynamicItemDataset.from_csv(
@@ -212,7 +217,9 @@ def dataio_prep(params):
     )
     test_data = test_data.filtered_sorted(sort_key="duration")
 
-    datasets = [train_data, enrol_data, test_data]
+    datasets = [enrol_data, test_data]
+    if train_data is not None:
+        datasets.insert(0, train_data)
 
     # Define audio pipeline
     @sb.utils.data_pipeline.takes("wav", "start", "stop")
@@ -231,9 +238,11 @@ def dataio_prep(params):
     sb.dataio.dataset.set_output_keys(datasets, ["id", "sig"])
 
     # Create dataloaders
-    train_dataloader = sb.dataio.dataloader.make_dataloader(
-        train_data, **with_padded_batch(params["train_dataloader_opts"])
-    )
+    train_dataloader = None
+    if train_data is not None:
+        train_dataloader = sb.dataio.dataloader.make_dataloader(
+            train_data, **with_padded_batch(params["train_dataloader_opts"])
+        )
     enrol_dataloader = sb.dataio.dataloader.make_dataloader(
         enrol_data, **with_padded_batch(params["enrol_dataloader_opts"])
     )
@@ -275,7 +284,7 @@ if __name__ == "__main__":
         data_folder=params["data_folder"],
         save_folder=params["save_folder"],
         verification_pairs_file=veri_file_path,
-        splits=["train", "dev", "test"],
+        splits=["train", "test"] if score_norm_mode(params) else ["test"],
         split_ratio=params["split_ratio"],
         seg_dur=3.0,
         skip_prep=params["skip_prep"],

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, List, Tuple, Union
 from pathlib import Path
 from contextlib import contextmanager
+import csv
 import hashlib
 import json
 import re
@@ -85,7 +86,89 @@ def _runtime_options_from_overrides(
     return overrides, {}
 
 
-def _resolve_run_opts(torch_module: Any, requested: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _bind_training_speaker_count(
+    config_path: str,
+    overrides: Union[List[str], Dict[str, Any]],
+) -> Optional[int]:
+    """Bind the classifier width to speakers allowed by the protocol."""
+    if not isinstance(overrides, dict):
+        return None
+    source = Path(config_path).read_text(encoding="utf-8")
+    if re.search(r"(?m)^out_n_neurons\s*:", source) is None:
+        return None
+    data_folder = overrides.get("data_folder")
+    exclusion_pairs = overrides.get("verification_file")
+    if (
+        not data_folder
+        or not exclusion_pairs
+        or is_remote_path(str(exclusion_pairs))
+    ):
+        return None
+    from recipes.voxceleb.speaker_inventory import (
+        eligible_training_speaker_ids,
+    )
+
+    speaker_count = len(
+        eligible_training_speaker_ids(data_folder, exclusion_pairs)
+    )
+    overrides["out_n_neurons"] = speaker_count
+    return speaker_count
+
+
+def _training_annotation_speaker_count(annotation: str | Path) -> int:
+    path = Path(annotation)
+    speakers: set[str] = set()
+    with path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames or "spk_id" not in reader.fieldnames:
+            raise ValueError(f"training annotation has no spk_id column: {path}")
+        for row in reader:
+            speaker = str(row.get("spk_id") or "").strip()
+            if speaker:
+                speakers.add(speaker)
+    if not speakers:
+        raise ValueError(f"training annotation contains no speakers: {path}")
+    return len(speakers)
+
+
+def _augmentation_annotation_ready(annotation: Any) -> bool:
+    """Accept only a nonempty SpeechBrain augmentation annotation."""
+    if not annotation:
+        return False
+    path = Path(str(annotation))
+    if not path.is_file():
+        return False
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            reader = csv.DictReader(stream)
+            required = {"ID", "duration", "wav", "wav_format", "wav_opts"}
+            return required.issubset(reader.fieldnames or []) and next(
+                reader, None
+            ) is not None
+    except (OSError, csv.Error, UnicodeError):
+        return False
+
+
+def _prepare_augmentation_inputs(sb: Any, hparams: Dict[str, Any]) -> None:
+    """Prepare augmentation annotations once and reuse valid frozen CSVs."""
+    for kind in ("noise", "rir"):
+        prepare = hparams.get(f"prepare_{kind}_data")
+        if prepare is None:
+            continue
+        annotation = hparams.get(f"{kind}_annotation")
+        if _augmentation_annotation_ready(annotation):
+            continue
+        sb.utils.distributed.run_on_main(prepare)
+        if annotation and not _augmentation_annotation_ready(annotation):
+            raise RuntimeError(
+                f"{kind} augmentation preparation did not create a valid "
+                f"annotation: {annotation}"
+            )
+
+
+def _resolve_run_opts(
+    torch_module: Any, requested: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     run_opts = dict(requested or {})
     device = str(run_opts.get("device") or "auto").strip().lower()
     if device in {"", "auto"}:
@@ -241,6 +324,11 @@ def _required_prep_files(splits: List[str], verification_file: str) -> List[str]
         files.extend(["test.csv", "enrol.csv"])
     files.append(os.path.basename(verification_file))
     return files
+
+
+def _evaluation_splits(normalization_mode: Optional[str]) -> List[str]:
+    """Prepare cohort data only when score normalization requires it."""
+    return ["train", "test"] if normalization_mode else ["test"]
 
 
 def _link_from_cache(cache_dir: Path, save_dir: Path, files: List[str]) -> None:
@@ -408,7 +496,8 @@ def run_evaluation(
             if resolved is not None:
                 params[key] = str(resolved)
 
-        splits = ["train", "dev", "test"]
+        normalization_mode = verification_module.score_norm_mode(params)
+        splits = _evaluation_splits(normalization_mode)
         cache_result = _prepare_cached_data("eval", params, splits, 3.0)
 
         if cache_result.get("status") == "success":
@@ -457,7 +546,11 @@ def run_evaluation(
         verification_module.test_dict = verification_module.compute_embedding_loop(
             test_dataloader
         )
-        if verification_module.score_norm_mode():
+        if normalization_mode:
+            if train_dataloader is None:
+                raise RuntimeError(
+                    f"{normalization_mode} requires a cohort train dataloader"
+                )
             verification_module.train_dict = verification_module.compute_embedding_loop(
                 train_dataloader
             )
@@ -559,6 +652,15 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         torch.backends.cudnn.benchmark = True
         sb.utils.distributed.ddp_init_group(run_opts)
 
+        inferred_speaker_count = _bind_training_speaker_count(
+            config_path, normalized_overrides
+        )
+        if inferred_speaker_count is not None:
+            print(
+                "SR-agent inferred training speaker count: "
+                f"{inferred_speaker_count} (binding out_n_neurons)",
+                flush=True,
+            )
         hparams, err = _load_hyperpyyaml_config(config_path, normalized_overrides)
         if err:
             return {"status": "failed", "valid_error_rate": None, "error": err}
@@ -637,10 +739,21 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             else:
                 prepare_module.prepare_voxceleb(**preparation_kwargs)
 
-        if "prepare_noise_data" in hparams:
-            sb.utils.distributed.run_on_main(hparams["prepare_noise_data"])
-        if "prepare_rir_data" in hparams:
-            sb.utils.distributed.run_on_main(hparams["prepare_rir_data"])
+        configured_speaker_count = hparams.get("out_n_neurons")
+        if configured_speaker_count is not None:
+            actual_speaker_count = _training_annotation_speaker_count(
+                hparams["train_annotation"]
+            )
+            if int(configured_speaker_count) != actual_speaker_count:
+                raise ValueError(
+                    "out_n_neurons does not match the prepared training "
+                    f"speaker count: configured={configured_speaker_count}, "
+                    f"train.csv={actual_speaker_count}"
+                )
+        else:
+            actual_speaker_count = inferred_speaker_count
+
+        _prepare_augmentation_inputs(sb, hparams)
 
         train_data, valid_data, _ = recipe.dataio_prep(hparams)
         if data_fraction is not None and float(data_fraction) < 1.0:
@@ -694,6 +807,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 "ddp": distributed_runtime,
                 "global_batch_size": hparams.get("global_batch_size"),
                 "batch_size_per_device": hparams.get("batch_size_per_device"),
+                "training_speaker_count": actual_speaker_count,
             },
         }
     except Exception as exc:

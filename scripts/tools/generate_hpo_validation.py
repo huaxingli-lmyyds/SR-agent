@@ -18,8 +18,8 @@ import sys
 from typing import Iterable
 
 
-SCHEMA_VERSION = 1
-GENERATOR_VERSION = "speaker_disjoint_v1"
+SCHEMA_VERSION = 2
+GENERATOR_VERSION = "speaker_disjoint_v2"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -90,12 +90,12 @@ def _session(path: str) -> str:
     return parts[1]
 
 
-def read_test_pairs(path: Path) -> tuple[set[str], set[str], int]:
-    """Return test speakers, utterance paths, and the pair count."""
+def read_test_pairs(path: Path) -> tuple[set[str], set[str], list[str]]:
+    """Return test speakers, utterance paths, and normalized pair rows."""
     speakers: set[str] = set()
     utterances: set[str] = set()
     labels: set[str] = set()
-    pair_count = 0
+    rows: list[str] = []
     for number, raw in enumerate(
         path.read_text(encoding="utf-8-sig").splitlines(), 1
     ):
@@ -104,7 +104,8 @@ def read_test_pairs(path: Path) -> tuple[set[str], set[str], int]:
         parts = raw.split()
         if len(parts) != 3 or parts[0] not in {"0", "1"}:
             raise ValueError(f"invalid verification pair at {path}:{number}")
-        for value in parts[1:]:
+        for index in (1, 2):
+            value = parts[index]
             value = value.replace("\\", "/")
             components = value.split("/")
             if (
@@ -117,13 +118,14 @@ def read_test_pairs(path: Path) -> tuple[set[str], set[str], int]:
                 raise ValueError(
                     f"unsafe/non-VoxCeleb path at {path}:{number}: {value}"
                 )
+            parts[index] = value
             speakers.add(components[0])
             utterances.add(value)
         labels.add(parts[0])
-        pair_count += 1
+        rows.append(" ".join(parts))
     if labels != {"0", "1"}:
         raise ValueError(f"test pairs must contain labels 0 and 1: {path}")
-    return speakers, utterances, pair_count
+    return speakers, utterances, rows
 
 
 def inventory_audio(wav_root: Path) -> dict[str, list[str]]:
@@ -316,6 +318,7 @@ def generate_protocol(
         raise ValueError(f"test pair file not found: {test_pairs}")
     targets = {
         "pairs": output_dir / "hpo_validation.txt",
+        "training_exclusions": output_dir / "training_exclusions.txt",
         "speakers": output_dir / "validation_speakers.txt",
         "utterances": output_dir / "validation_utterances.txt",
         "manifest": output_dir / "hpo_validation_manifest.json",
@@ -327,7 +330,7 @@ def generate_protocol(
             + ", ".join(existing)
         )
 
-    test_speakers, test_utterances, test_pair_count = read_test_pairs(test_pairs)
+    test_speakers, test_utterances, test_pair_lines = read_test_pairs(test_pairs)
     inventory = inventory_audio(wav_root)
     missing_test_audio = sorted(
         utterance
@@ -387,6 +390,14 @@ def generate_protocol(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_text(targets["pairs"], "\n".join(pair_lines) + "\n")
+    # Training must exclude both HPO-validation and final-test speakers.  The
+    # final-test rows are copied only into this exclusion protocol; HPO never
+    # evaluates or selects candidates with them.
+    training_exclusion_lines = pair_lines + test_pair_lines
+    _write_text(
+        targets["training_exclusions"],
+        "\n".join(training_exclusion_lines) + "\n",
+    )
     _write_text(
         targets["speakers"], "\n".join(selected_speakers) + "\n"
     )
@@ -419,7 +430,8 @@ def generate_protocol(
             "positive_pairs": positive_pairs,
             "negative_pairs": negative_pairs,
             "test_speakers": len(test_speakers),
-            "test_pairs": test_pair_count,
+            "test_pairs": len(test_pair_lines),
+            "training_exclusion_pairs": len(training_exclusion_lines),
         },
         "integrity": {
             "validation_test_speaker_overlap": 0,
@@ -430,6 +442,9 @@ def generate_protocol(
                 for utterance in inventory[speaker]
             ),
             "hpo_validation_sha256": _file_sha256(targets["pairs"]),
+            "training_exclusions_sha256": _file_sha256(
+                targets["training_exclusions"]
+            ),
             "validation_speakers_sha256": _file_sha256(targets["speakers"]),
             "validation_utterances_sha256": _file_sha256(
                 targets["utterances"]
@@ -437,7 +452,7 @@ def generate_protocol(
         },
         "usage": {
             "validation_pairs": str(targets["pairs"]),
-            "training_exclusion_pairs": str(targets["pairs"]),
+            "training_exclusion_pairs": str(targets["training_exclusions"]),
             "final_test_pairs": str(test_pairs),
         },
     }

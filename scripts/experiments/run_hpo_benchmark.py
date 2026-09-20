@@ -31,7 +31,7 @@ VARIANTS = (
     "system",
 )
 DEFAULT_CONFIG = ROOT / "configs/experiments/five_group_ecapa.json"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def now():
@@ -512,6 +512,20 @@ def freeze_inputs(plan, output):
     plan["frozen_inputs"] = frozen
     plan["training_exclusions"] = str(exclusion)
     plan["training_exclusions_sha256"] = file_hash(exclusion)
+    if plan["config"].get("runner", "speechbrain") == "speechbrain":
+        from recipes.voxceleb.speaker_inventory import (
+            eligible_training_speaker_ids,
+        )
+
+        speaker_ids = eligible_training_speaker_ids(
+            plan["data_folder"], exclusion
+        )
+        plan["training_speaker_inventory"] = {
+            "count": len(speaker_ids),
+            "sha256": hashlib.sha256(
+                ("\n".join(speaker_ids) + "\n").encode("utf-8")
+            ).hexdigest(),
+        }
 
 
 def verify_frozen(plan, output):
@@ -541,6 +555,26 @@ def verify_frozen(plan, output):
         != plan["training_exclusions_sha256"]
     ):
         raise ValueError("frozen training exclusions were changed")
+    inventory = plan.get("training_speaker_inventory")
+    if inventory is not None:
+        from recipes.voxceleb.speaker_inventory import (
+            eligible_training_speaker_ids,
+        )
+
+        speaker_ids = eligible_training_speaker_ids(
+            plan["data_folder"], plan["training_exclusions"]
+        )
+        current = hashlib.sha256(
+            ("\n".join(speaker_ids) + "\n").encode("utf-8")
+        ).hexdigest()
+        if (
+            len(speaker_ids) != inventory["count"]
+            or current != inventory["sha256"]
+        ):
+            raise ValueError(
+                "eligible training speaker inventory changed; restore the "
+                "original dataset or use a new output directory"
+            )
 
 
 def prepare_assets(plan, output):
@@ -721,6 +755,15 @@ def prepare_run(plan, item, run_dir):
             "verification_file": plan["training_exclusions"],
             "number_of_epochs": config["full_epochs"],
             "output_folder": str(run_dir / "unused_training_output"),
+            **(
+                {
+                    "out_n_neurons": plan["training_speaker_inventory"][
+                        "count"
+                    ]
+                }
+                if plan.get("training_speaker_inventory") is not None
+                else {}
+            ),
         },
         isolate=True,
     )

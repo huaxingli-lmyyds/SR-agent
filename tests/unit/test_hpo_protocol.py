@@ -21,7 +21,10 @@ def _inputs(tmp_path):
 
 @pytest.mark.parametrize(
     "runtime,missing",
-    [({}, "verification_config"), ({"verification_config": "x"}, "validation_pairs")],
+    [
+        ({}, "verification_config"),
+        ({"verification_config": "x"}, "validation_pairs"),
+    ],
 )
 def test_hpo_protocol_requires_explicit_validation_inputs(tmp_path, runtime, missing):
     if runtime:
@@ -38,6 +41,7 @@ def test_hpo_protocol_rejects_test_pairs_and_incomplete_training_exclusion(tmp_p
             {
                 "verification_config": str(config),
                 "validation_pairs": str(pairs),
+                "training_exclusion_pairs": str(pairs),
                 "test_pairs": str(pairs),
             },
             require_explicit=True,
@@ -59,12 +63,25 @@ def test_hpo_protocol_rejects_test_pairs_and_incomplete_training_exclusion(tmp_p
         )
 
 
+def test_hpo_protocol_requires_explicit_training_exclusion(tmp_path):
+    config, pairs = _inputs(tmp_path)
+    with pytest.raises(ValueError, match="training_exclusion_pairs"):
+        resolve_hpo_validation_protocol(
+            {
+                "verification_config": str(config),
+                "validation_pairs": str(pairs),
+            },
+            require_explicit=True,
+        )
+
+
 def test_hpo_protocol_persists_hashes_and_rejects_legacy_or_changed_resume(tmp_path):
     config, pairs = _inputs(tmp_path)
     resolved = resolve_hpo_validation_protocol(
         {
             "verification_config": str(config),
             "validation_pairs": str(pairs),
+            "training_exclusion_pairs": str(pairs),
         },
         require_explicit=True,
     )

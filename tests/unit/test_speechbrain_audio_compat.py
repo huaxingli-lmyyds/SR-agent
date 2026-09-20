@@ -164,6 +164,39 @@ def test_project_augmentation_prepare_writes_speechbrain_csv(tmp_path) -> None:
     assert len(rows) == 2
     assert "sample.wav" in rows[1]
 
+
+def test_training_reuses_valid_augmentation_annotations(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from agent.runners.speechbrain_backend import _prepare_augmentation_inputs
+
+    calls = []
+    annotations = {}
+    for kind in ("noise", "rir"):
+        path = tmp_path / f"{kind}.csv"
+        path.write_text(
+            "ID,duration,wav,wav_format,wav_opts\n"
+            f"{kind}-0,1.0,{kind}.wav,wav,\n",
+            encoding="utf-8",
+        )
+        annotations[kind] = str(path)
+
+    distributed = SimpleNamespace(
+        run_on_main=lambda function: calls.append(function)
+    )
+    sb = SimpleNamespace(utils=SimpleNamespace(distributed=distributed))
+    _prepare_augmentation_inputs(
+        sb,
+        {
+            "noise_annotation": annotations["noise"],
+            "rir_annotation": annotations["rir"],
+            "prepare_noise_data": lambda: None,
+            "prepare_rir_data": lambda: None,
+        },
+    )
+
+    assert calls == []
+
 def test_voxceleb_recipe_entrypoints_use_package_imports() -> None:
     project_root = Path(__file__).parents[2]
     for relative in (
@@ -215,6 +248,27 @@ def test_hpo_evaluation_uses_explicit_score_norm_mode() -> None:
 
     assert "def score_norm_mode" in recipe_source
     assert "if score_norm_mode():" in recipe_source
-    assert "if verification_module.score_norm_mode():" in runner_source
+    assert "score_norm_mode(params)" in recipe_source
+    assert "train_data = None" in recipe_source
+    assert "if norm_mode:" in recipe_source
+    assert (
+        "normalization_mode = verification_module.score_norm_mode(params)"
+        in runner_source
+    )
+    assert "splits = _evaluation_splits(normalization_mode)" in runner_source
+    assert 'splits = ["train", "dev", "test"]' not in runner_source
     assert 'if "score_norm" in params:' not in recipe_source
     assert 'if "score_norm" in params:' not in runner_source
+
+
+def test_evaluation_preparation_splits_follow_score_normalization() -> None:
+    from agent.runners.speechbrain_backend import (
+        _evaluation_splits,
+        _required_prep_files,
+    )
+
+    assert _evaluation_splits(None) == ["test"]
+    assert _evaluation_splits("s-norm") == ["train", "test"]
+    fast_files = _required_prep_files(["test"], "validation.txt")
+    assert "enrol.csv" in fast_files and "test.csv" in fast_files
+    assert "train.csv" not in fast_files and "dev.csv" not in fast_files

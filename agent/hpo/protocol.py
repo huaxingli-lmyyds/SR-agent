@@ -121,11 +121,19 @@ def resolve_hpo_validation_protocol(
             f"invalid HPO verification_config: {verification_config}: {exc}"
         ) from exc
     validation_pairs = _resolve_required_file(validation_value, "validation_pairs")
+    # Never silently equate validation pairs with the complete training
+    # exclusion protocol.  A held-out final-test protocol may contain other
+    # speakers that must be excluded from training without being exposed to
+    # HPO evaluation.  New Studies provide this file explicitly; resumed
+    # Studies recover the already frozen path from their execution record.
+    training_exclusion_value = runtime.get("training_exclusion_pairs")
+    if not require_explicit:
+        training_exclusion_value = (
+            training_exclusion_value
+            or persisted.get("training_exclusion_pairs_path")
+        )
     training_exclusion_pairs = _resolve_required_file(
-        runtime.get("training_exclusion_pairs")
-        or persisted.get("training_exclusion_pairs_path")
-        or validation_pairs,
-        "training_exclusion_pairs",
+        training_exclusion_value, "training_exclusion_pairs"
     )
     _assert_exclusion_covers_validation(validation_pairs, training_exclusion_pairs)
 

@@ -56,7 +56,9 @@ right_frames: 0
 deltas: False
 
 # Number of speakers
-out_n_neurons: 7205 #1211 for vox1  # 5994 for vox2, 7205 for vox1+vox2
+# Fallback for direct YAML use. SR-agent experiment/HPO runs override this
+# from the eligible speakers after applying the frozen exclusion protocol.
+out_n_neurons: 7205 # 1211 vox1, 5994 vox2, 7205 vox1+vox2
 
 num_workers: 4
 dataloader_options:
