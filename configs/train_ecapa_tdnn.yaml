@@ -31,17 +31,17 @@ rir_annotation: !ref <data_folder_rir>/rir.csv
 # Therefore you cannot use any files in VoxCeleb1 for training if you are using these lists for testing.
 verification_file: https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt
 
-split_ratio: [90, 10]
+split_ratio: [95, 5]
 skip_prep: False
 ckpt_interval_minutes: 15 # save checkpoint every N min
 
 # Training parameters
 number_of_epochs: 10
-batch_size: 32
+batch_size: 24
 lr: 0.001
 base_lr: 0.00000001
 max_lr: !ref <lr>
-step_size: 65000
+step_size: 12000
 sample_rate: 16000
 sentence_len: 3.0 # seconds
 margin: 0.2
@@ -58,7 +58,7 @@ deltas: False
 # Number of speakers
 # Fallback for direct YAML use. SR-agent experiment/HPO runs override this
 # from the eligible speakers after applying the frozen exclusion protocol.
-out_n_neurons: 7205 # 1211 vox1, 5994 vox2, 7205 vox1+vox2
+out_n_neurons: 1211 # Vox1 fallback; SR-agent overrides from the frozen exclusion protocol.
 
 num_workers: 4
 dataloader_options:
