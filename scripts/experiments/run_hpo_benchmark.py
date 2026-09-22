@@ -1377,7 +1377,7 @@ def preflight(plan):
         if cfg.get("ddp_devices"):
             from agent.runners.speechbrain_distributed import resolve_ddp_plan
 
-            resolve_ddp_plan(torch, {
+            ddp_plan = resolve_ddp_plan(torch, {
                 key: cfg.get(key)
                 for key in (
                     "device",
@@ -1387,6 +1387,53 @@ def preflight(plan):
                 )
                 if cfg.get(key) is not None
             })
+            validate_ddp_batch_contract(
+                cfg,
+                ConfigParser(plan["frozen_inputs"]["train_config"]).load_config(),
+                ddp_plan,
+            )
+
+
+def validate_ddp_batch_contract(config, train_config, ddp_plan):
+    """Fail before GPU work when a global batch cannot be split across ranks."""
+    if not ddp_plan.get("enabled"):
+        return
+    world_size = int(ddp_plan["world_size"])
+    semantics = ddp_plan["batch_size_semantics"]
+    batch_size = train_config.get("batch_size")
+    if type(batch_size) is not int or batch_size <= 0:
+        raise ValueError("DDP training YAML batch_size must be a positive integer")
+    if semantics == "global" and batch_size % world_size:
+        raise ValueError(
+            f"global training batch_size {batch_size} is not divisible by "
+            f"DDP world_size {world_size}"
+        )
+
+    batch_parameter = next(
+        (
+            item
+            for item in config["search_space"]["parameters"]
+            if item["name"] == "batch_size"
+        ),
+        None,
+    )
+    if batch_parameter is None or semantics != "global":
+        return
+    if batch_parameter["parameter_type"] != "categorical":
+        raise ValueError(
+            "global-DDP batch_size search must be categorical so every value "
+            "can be checked for rank divisibility"
+        )
+    invalid = [
+        value
+        for value in batch_parameter["choices"]
+        if type(value) is not int or value <= 0 or value % world_size
+    ]
+    if invalid:
+        raise ValueError(
+            "global-DDP batch_size choices must be positive integers divisible "
+            f"by world_size {world_size}; invalid: {invalid}"
+        )
 
 
 def validate_speechbrain_inputs(plan):
@@ -1409,8 +1456,14 @@ def validate_speechbrain_inputs(plan):
         for v in (raw_train, raw_eval)
     ):
         raise ValueError("benchmark requires explicit embedding_model mappings")
-    if str(raw_train["embedding_model"].tag) != str(
-        raw_eval["embedding_model"].tag
+    def tag_value(value):
+        tag = getattr(value, "tag", None)
+        return getattr(tag, "value", None) or (
+            str(tag) if tag is not None else None
+        )
+
+    if tag_value(raw_train["embedding_model"]) != tag_value(
+        raw_eval["embedding_model"]
     ):
         raise ValueError("train/evaluation embedding model classes differ")
     for key in (

@@ -20,55 +20,34 @@
   },
   "rules": [
     "Return raw JSON only.",
-    "Do not use markdown, code fences, comments, or explanatory text.",
-    "Use exactly the schema keys shown in schema and emit every key exactly once.",
-    "Use null, {}, or [] for fields that do not apply; never emit NaN or Infinity.",
-    "Allowed action values: keep_strategy, refine_search_space, expand_search_space, switch_strategy, adjust_budget.",
-    "Treat requested_sampler as the current batch candidate generator and requested_pruner as the fidelity scheduler; requested_strategy is legacy compatibility and should normally be null.",
-    "Allowed samplers are listed in context.available_samplers. The agent_proposal sampler is parallel to random_search, grid_search, adaptive_search, and tpe; it is not mixed with them in one batch.",
-    "Only emit candidate_proposals when requested_sampler is agent_proposal. When another sampler is selected, candidate_proposals must be [].",
-    "agent_proposal requires at least one concrete candidate. Each candidate must contain parameters, hypothesis_id or null, role, rationale, expected_signal, and confidence.",
-    "Candidate parameters must use only current search-space names, include every active parameter, omit inactive conditional parameters, and satisfy ranges, choices, constraints, and model validation.",
-    "Use sampler_config only for the selected sampler. TPE supports n_startup_trials as a positive integer and multivariate as a boolean; use {} for other built-in samplers.",
-    "The agent's primary role is to select, configure, and switch search methods using accumulated evidence; agent_proposal is reserved for evidence-backed probes ordinary samplers cannot express directly.",
-    "Inside search_space.parameters use parameter_type, not type. A non-null search_space is a complete replacement containing every retained parameter plus constraints.",
-    "Only propose budgets, max_training_runs, initial_trial_count, promotion_limits, reduction_factor, or requested_pruner during phase=study_planning.",
-    "During phase=runtime_review, mutable active-plan fields are requested_sampler, sampler_config, and the complete search_space; hypotheses may be appended and candidate_proposals may be appended only with agent_proposal.",
-    "At runtime_review leave budgets, max_training_runs, initial_trial_count, promotion_limits, reduction_factor, and requested_pruner null.",
-    "Each hypothesis must contain id, claim, evidence_trial_ids, and expected_signal.",
-    "Treat the default three-rung successive-halving allocation as a conservative 9+3+1 baseline, not a requirement to consume the whole hard limit.",
-    "Use context.resource_profile, context.search_budget_analysis, cross_study_memory, feedback.search_phase_summaries, and recent resource summaries as evidence.",
-    "Treat context.primary_metric and context.metric_mode (or context.study.objective) as the only optimization objective. Never substitute a task default metric.",
-    "Metric units are fixed by context.metric_protocol/context.metric_units: EER is a ratio in [0,1] and minDCF is multiplied by 100. Never compare observations from another metric protocol.",
-    "Treat context.resource_profile.declared_limits.gpu_hours, gpu_hours_remaining, max_wall_time_seconds, and similar explicit user limits as hard ceilings.",
-    "GPU-hours mean GPU count multiplied by elapsed GPU time. Include training and evaluation when both use the GPU.",
-    "Estimate GPU-hours only from observed duration evidence; do not invent memory, throughput, or duration measurements.",
-    "The proposed allocation must fit hard_max_training_runs, campaign_remaining_training_runs, and declared resource ceilings.",
-    "Reduce resource-sensitive choices or planned work when OOM, resource failures, or excessive duration justify it.",
-    "Do not invent parameter names unless action=expand_search_space.",
-    "Treat reference_profile.baseline_parameters as the trusted recipe anchor and prefer local refinements around reference_profile.stable_search_space.",
-    "Change at most two sensitive parameters in one proposal unless failures require a resource fix.",
-    "For log-scale parameters, adjust boundaries by small multiplicative factors rather than orders of magnitude.",
-    "Use keep_strategy when evidence is weak; do not switch only because switching is allowed.",
-    "Runtime performance-driven sampler, sampler_config, or search-space changes require at least 6 completed same-fidelity Trials and confidence >= 0.65; deterministic validation will reject weaker changes.",
-    "A bounded agent_proposal probe may be proposed earlier, but provide at most 3 candidates and confidence >= 0.65 for every candidate.",
-    "When the current Study has no remaining candidate-generation capacity, advice is stored as next_study_proposal and must not be described as affecting current promotions.",
-    "The Campaign final confirmation budget and metric/data protocol are frozen. You may change screening rungs at planning time, but must preserve the final confirmation budget exactly.",
-    "When phase=study_planning and cross_study_memory has prior studies, the controller has already deterministically applied any valid deferred_proposal to the base plan shown in context; propose only evidence-backed incremental changes and do not recreate the old proposal.",
-    "Use cross_study_memory.local_search_anchor to propose a local search_space around proven parameters for the next Study.",
-    "For successive_halving, provide at least two increasing budget rungs, non-increasing trial counts, promotion_limits length at most budgets length minus one, and total planned runs no greater than max_training_runs.",
-    "For requested_pruner=none, provide exactly one budget rung and promotion_limits=[].",
-    "Copy only observed facts into evidence and use short snake_case reason_codes.",
-    "This is advisory; deterministic validation may reject invalid fields.",
-    "Examples demonstrate format only. Never copy their values without current evidence.",
-    "Return only the schema-shaped decision object."
+    "Emit every schema key exactly once and no other keys; use null, {}, or [] when unused. Never emit NaN or Infinity.",
+    "Allowed actions: keep_strategy, refine_search_space, expand_search_space, switch_strategy, adjust_budget. requested_strategy is legacy and must be null.",
+    "Use context.primary_metric, context.metric_mode, and context.metric_protocol as the only objective. EER is a ratio in [0,1]; minDCF is multiplied by 100.",
+    "requested_sampler must be null or a member of context.available_samplers. requested_pruner must be null or a member of context.available_pruners.",
+    "sampler_config is allowed only with the selected sampler. TPE accepts only n_startup_trials (positive integer) and multivariate (boolean); otherwise use {}.",
+    "A non-null search_space is a complete replacement. Use parameter_type, preserve every retained parameter and constraints, and keep all values inside the current allowed domain unless action is expand_search_space.",
+    "At phase=runtime_review only requested_sampler, sampler_config, search_space, hypotheses, and candidate_proposals may change. All budget, allocation, and pruner fields must be null.",
+    "At phase=study_planning, budget or pruner changes must fit hard_max_training_runs, campaign_remaining_training_runs, resource_profile.declared_limits, and the frozen final confirmation budget.",
+    "For successive_halving use at least two increasing rungs, non-increasing trial counts, promotion_limits no longer than budgets minus one, and planned runs no greater than max_training_runs. The conservative baseline is 9+3+1.",
+    "For requested_pruner=none use exactly one budget rung and promotion_limits=[].",
+    "candidate_proposals must be [] unless requested_sampler=agent_proposal. agent_proposal is a parallel sampler, never mixed with TPE, random, grid, or adaptive search in one batch.",
+    "Each agent candidate must contain parameters, hypothesis_id, role, rationale, expected_signal, and confidence. parameters must include every active search parameter, omit inactive conditional parameters, pass model constraints, and not duplicate an observed or pending candidate.",
+    "Use at most three agent candidates. Each candidate and the proposal require confidence >=0.65. Use agent_proposal only for an evidence-backed probe that ordinary samplers cannot express.",
+    "Each hypothesis must contain id, claim, evidence_trial_ids, and expected_signal. Evidence trial IDs must exist in the supplied context.",
+    "Performance-driven sampler or search-space changes require at least six completed same-fidelity Trials and confidence >=0.65. Otherwise return keep_strategy, except for a bounded agent_proposal probe or a deterministic resource-failure response.",
+    "Use only observed facts in evidence. Do not invent durations, memory use, throughput, metrics, parameter names, or Trial IDs.",
+    "GPU-hours mean GPU count multiplied by elapsed GPU time. resource_profile.declared_limits.gpu_hours, gpu_hours_remaining, and wall-time limits are hard ceilings.",
+    "When there is no future candidate capacity, describe the change as next-Study advice; do not claim it affects current promotions.",
+    "Use cross_study_memory.local_search_anchor only when its confirmation signature and metric protocol are compatible. Do not recreate an already inherited deferred proposal.",
+    "Prefer one justified change. Change at most two sensitive parameters unless resolving an observed resource failure.",
+    "For keep_strategy, leave every mutable field null or empty and give a short snake_case reason code.",
+    "The deterministic EvidenceGate is authoritative; produce a proposal it can execute without repair."
   ],
   "decision_priority": [
-    "Satisfy explicit GPU-hours, wall-time, run-count, and memory ceilings.",
-    "Avoid parameter values associated with OOM or repeated execution failures.",
-    "Preserve validated cross-study improvements and successful resource-sensitive values.",
-    "Choose and configure the search method for useful information per unit cost.",
-    "Return keep_strategy when evidence is insufficient for a safe change."
+    "Satisfy explicit GPU-hours, wall-time, run-count, memory, protocol, and final-budget constraints.",
+    "Avoid values linked to OOM, invalid metrics, or repeated execution failure.",
+    "Maximize information gained per training run using comparable evidence.",
+    "Keep the current strategy when evidence is insufficient."
   ],
   "examples": [
     {
@@ -76,35 +55,39 @@
       "output": {
         "action": "keep_strategy", "requested_strategy": null, "requested_sampler": null, "sampler_config": {}, "requested_pruner": null,
         "search_space": null, "budgets": null, "max_training_runs": null, "initial_trial_count": null, "promotion_limits": null, "reduction_factor": null,
-        "hypotheses": [], "candidate_proposals": [], "reason_codes": ["insufficient_evidence"], "evidence": {"completed_trials": 1}, "expected_effect": {}, "confidence": 0.62
+        "hypotheses": [], "candidate_proposals": [], "reason_codes": ["insufficient_comparable_evidence"],
+        "evidence": {"completed_same_fidelity_trials": 2}, "expected_effect": {}, "confidence": 0.58
       }
     },
     {
-      "name": "switch_to_single_fidelity_tpe",
+      "name": "runtime_switch_to_tpe",
       "output": {
-        "action": "switch_strategy", "requested_strategy": null, "requested_sampler": "tpe", "sampler_config": {"n_startup_trials": 3, "multivariate": false}, "requested_pruner": "none",
-        "search_space": null, "budgets": [{"stage": "full", "epochs": 20, "data_fraction": 1.0, "max_duration_seconds": 7200}], "max_training_runs": 6, "initial_trial_count": 6, "promotion_limits": [], "reduction_factor": 3,
-        "hypotheses": [], "candidate_proposals": [], "reason_codes": ["tpe_history_available"], "evidence": {"completed_history_count": 12}, "expected_effect": {"planned_training_runs": 6}, "confidence": 0.81
+        "action": "switch_strategy", "requested_strategy": null, "requested_sampler": "tpe", "sampler_config": {"n_startup_trials": 3, "multivariate": false}, "requested_pruner": null,
+        "search_space": null, "budgets": null, "max_training_runs": null, "initial_trial_count": null, "promotion_limits": null, "reduction_factor": null,
+        "hypotheses": [], "candidate_proposals": [], "reason_codes": ["comparable_history_supports_tpe"],
+        "evidence": {"completed_same_fidelity_trials": 8}, "expected_effect": {"information_gain": "local_model_based_search"}, "confidence": 0.76
       }
     },
     {
-      "name": "plan_resource_constrained_successive_halving",
+      "name": "planning_successive_halving",
       "output": {
-        "action": "adjust_budget", "requested_strategy": null, "requested_sampler": "random_search", "sampler_config": {}, "requested_pruner": "successive_halving",
+        "action": "adjust_budget", "requested_strategy": null, "requested_sampler": "tpe", "sampler_config": {"n_startup_trials": 3, "multivariate": false}, "requested_pruner": "successive_halving",
         "search_space": null,
-        "budgets": [{"stage": "screen", "epochs": 3, "data_fraction": 0.25, "max_duration_seconds": 900}, {"stage": "mid", "epochs": 8, "data_fraction": 0.6, "max_duration_seconds": 2400}, {"stage": "full", "epochs": 20, "data_fraction": 1.0, "max_duration_seconds": 7200}],
+        "budgets": [{"stage": "screen", "epochs": 3, "data_fraction": 1.0}, {"stage": "promote", "epochs": 8, "data_fraction": 1.0}, {"stage": "full", "epochs": 24, "data_fraction": 1.0}],
         "max_training_runs": 13, "initial_trial_count": 9, "promotion_limits": [3, 1], "reduction_factor": 3,
-        "hypotheses": [], "candidate_proposals": [], "reason_codes": ["resource_constrained_screening"], "evidence": {"gpu_hours_remaining": 8.0}, "expected_effect": {"planned_training_runs": 13}, "confidence": 0.86
+        "hypotheses": [], "candidate_proposals": [], "reason_codes": ["cost_aware_screening"],
+        "evidence": {"hard_max_training_runs": 13}, "expected_effect": {"planned_training_runs": 13}, "confidence": 0.82
       }
     },
     {
-      "name": "use_agent_proposal_for_targeted_probe",
+      "name": "bounded_agent_probe",
       "output": {
         "action": "switch_strategy", "requested_strategy": null, "requested_sampler": "agent_proposal", "sampler_config": {}, "requested_pruner": null,
         "search_space": null, "budgets": null, "max_training_runs": null, "initial_trial_count": null, "promotion_limits": null, "reduction_factor": null,
-        "hypotheses": [{"id": "h_local_probe", "claim": "A local midpoint may improve the objective.", "evidence_trial_ids": ["trial_example"], "expected_signal": {"primary_metric": "lower"}}],
-        "candidate_proposals": [{"parameters": {"lr": 0.0008, "batch_size": 16}, "hypothesis_id": "h_local_probe", "role": "targeted_probe", "rationale": "Probe between two observed regions.", "expected_signal": {"primary_metric": "lower"}, "confidence": 0.74}],
-        "reason_codes": ["targeted_evidence_probe"], "evidence": {"source": "completed_trials"}, "expected_effect": {"information_gain": "local"}, "confidence": 0.74
+        "hypotheses": [{"id": "h_local_lr", "claim": "The observed local interval may improve the objective.", "evidence_trial_ids": ["trial_observed"], "expected_signal": {"primary_metric": "lower"}}],
+        "candidate_proposals": [{"parameters": {"lr": 0.0012, "margin": 0.2}, "hypothesis_id": "h_local_lr", "role": "targeted_probe", "rationale": "Test the midpoint of the observed improving interval.", "expected_signal": {"primary_metric": "lower"}, "confidence": 0.72}],
+        "reason_codes": ["bounded_local_probe"], "evidence": {"source": "same_fidelity_trials"},
+        "expected_effect": {"information_gain": "local"}, "confidence": 0.72
       }
     }
   ]

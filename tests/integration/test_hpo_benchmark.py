@@ -119,18 +119,32 @@ def setup_benchmark(tmp_path, monkeypatch):
     class Model:
         def invoke(self, prompt):
             calls.append(prompt)
+            payload = json.loads(prompt)
+            proposal = json.loads(json.dumps(payload["schema"]))
+            proposal.update(
+                {
+                    "action": "switch_strategy",
+                    "requested_sampler": "random_search"
+                    if len(calls) == 1
+                    else "tpe",
+                    "budgets": [{"stage": "bad", "epochs": 999}],
+                    "max_training_runs": 999,
+                    "candidate_proposals": [
+                        {
+                            "parameters": {"lr": 0.001},
+                            "hypothesis_id": None,
+                            "role": "invalid_for_benchmark",
+                            "rationale": "Exercise benchmark restrictions.",
+                            "expected_signal": {"primary_metric": "lower"},
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "reason_codes": ["test_restrictions"],
+                    "confidence": 0.8,
+                }
+            )
             return SimpleNamespace(
-                content=json.dumps(
-                    {
-                        "action": "switch_strategy",
-                        "requested_sampler": "random_search"
-                        if len(calls) == 1
-                        else "tpe",
-                        "budgets": [{"stage": "bad", "epochs": 999}],
-                        "max_training_runs": 999,
-                        "candidate_proposals": [{"parameters": {"lr": 0.001}}],
-                    }
-                ),
+                content=json.dumps(proposal),
                 usage_metadata={"input_tokens": 10, "output_tokens": 5},
             )
 
@@ -165,6 +179,12 @@ def test_five_groups_use_real_scheduler_and_separate_test(setup_benchmark):
     assert len(rows) == 5 and all(r["status"] == "success" for r in rows)
     assert len(env.runner.training) == 1 + 4 + 4 + 8 + 8
     assert env.calls
+    advisor_payloads = [json.loads(prompt) for prompt in env.calls]
+    assert all(
+        payload["context"]["execution_constraints"]["agent_proposal_allowed"]
+        is False
+        for payload in advisor_payloads
+    )
     assert all(
         r["advisor_requests"] == 0 for r in rows if r["variant"] != "system"
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from time import perf_counter
 from typing import Any
@@ -155,13 +156,25 @@ class BenchmarkHPOAgent(HPOAgent):
 
     def _invoke_strategy_model(self, prompt: str, **objective: Any) -> Any:
         started = perf_counter()
-        event = {"prompt": prompt, "allowed_samplers": sorted(ALLOWED_SAMPLERS)}
+        payload = json.loads(prompt)
+        context = dict(payload.get("context") or {})
+        context["execution_constraints"] = {
+            "allowed_samplers": sorted(ALLOWED_SAMPLERS),
+            "agent_proposal_allowed": False,
+            "locked_fields": list(LOCKED_FIELDS),
+            "search_space_must_stay_within_original_envelope": True,
+        }
+        payload["context"] = context
+        restricted_prompt = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )
+        event = {
+            "prompt": restricted_prompt,
+            "allowed_samplers": sorted(ALLOWED_SAMPLERS),
+        }
         try:
             response = super()._invoke_strategy_model(
-                prompt
-                + "\nBenchmark restrictions: only random_search, tpe, adaptive_search; "
-                "no agent candidates; budgets, allocation and pruner are fixed. "
-                "Search-space edits must stay within the original bounds.",
+                restricted_prompt,
                 **objective,
             )
             event.update(

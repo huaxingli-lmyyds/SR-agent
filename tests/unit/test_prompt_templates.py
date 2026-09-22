@@ -52,11 +52,12 @@ def test_hpo_prompt_examples_are_schema_exact_and_parseable() -> None:
     template = load_prompt_template("hpo_strategy_proposal")
     schema_keys = set(template["schema"])
 
+    assert schema_keys == set(StrategyProposal.LLM_FIELDS)
     assert len(template["examples"]) >= 4
     for example in template["examples"]:
         output = example["output"]
         assert set(output) == schema_keys
-        proposal = StrategyProposal.from_dict(output)
+        proposal = StrategyProposal.from_dict(output, strict_llm=True)
         assert proposal.action == output["action"]
         assert proposal.requested_strategy is None
         if output["search_space"] is not None:
@@ -68,7 +69,7 @@ def test_hpo_prompt_examples_are_schema_exact_and_parseable() -> None:
     halving = next(
         item["output"]
         for item in template["examples"]
-        if item["name"] == "plan_resource_constrained_successive_halving"
+        if item["name"] == "planning_successive_halving"
     )
     assert halving["initial_trial_count"] + sum(halving["promotion_limits"]) <= halving["max_training_runs"]
     assert len(halving["promotion_limits"]) <= len(halving["budgets"]) - 1
@@ -76,11 +77,31 @@ def test_hpo_prompt_examples_are_schema_exact_and_parseable() -> None:
     single = next(
         item["output"]
         for item in template["examples"]
-        if item["name"] == "switch_to_single_fidelity_tpe"
+        if item["name"] == "runtime_switch_to_tpe"
     )
-    assert single["requested_pruner"] == "none"
-    assert len(single["budgets"]) == 1
-    assert single["promotion_limits"] == []
+    assert single["requested_pruner"] is None
+    assert single["budgets"] is None
+    assert single["promotion_limits"] is None
+
+
+def test_hpo_prompt_strict_parser_rejects_missing_extra_and_wrong_types() -> None:
+    template = load_prompt_template("hpo_strategy_proposal")
+    valid = dict(template["examples"][0]["output"])
+
+    StrategyProposal.from_dict(valid, strict_llm=True)
+    with pytest.raises(ValueError, match="missing fields"):
+        StrategyProposal.from_dict(
+            {key: value for key, value in valid.items() if key != "confidence"},
+            strict_llm=True,
+        )
+    with pytest.raises(ValueError, match="unknown fields"):
+        StrategyProposal.from_dict(
+            {**valid, "explanation": "not allowed"}, strict_llm=True
+        )
+    with pytest.raises(ValueError, match="reason_codes"):
+        StrategyProposal.from_dict(
+            {**valid, "reason_codes": "not-a-list"}, strict_llm=True
+        )
 
 
 def test_hpo_prompt_declares_gpu_hours_as_a_hard_ceiling() -> None:

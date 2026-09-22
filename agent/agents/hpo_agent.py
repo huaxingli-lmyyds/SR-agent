@@ -1552,7 +1552,7 @@ class HPOAgent(LangGraphAgent):
                     confirmation_signature=confirmation_signature,
                 )
             ))
-            return StrategyProposal.from_dict(value)
+            return StrategyProposal.from_dict(value, strict_llm=True)
         except Exception as exc:
             return StrategyProposal(
                 action="invalid_proposal",
@@ -1616,14 +1616,17 @@ class HPOAgent(LangGraphAgent):
                 "historical_memory": memory_context,
             })
             try:
-                return StrategyProposal.from_dict(json.loads(
-                    self._extract_message_content(self._invoke_strategy_model(
-                        prompt,
-                        objective_metric=study.objectives[0].metric,
-                        objective_mode=study.objectives[0].mode,
-                        confirmation_signature=study_confirmation_signature(study),
-                    ))
-                ))
+                return StrategyProposal.from_dict(
+                    json.loads(self._extract_message_content(
+                        self._invoke_strategy_model(
+                            prompt,
+                            objective_metric=study.objectives[0].metric,
+                            objective_mode=study.objectives[0].mode,
+                            confirmation_signature=study_confirmation_signature(study),
+                        )
+                    )),
+                    strict_llm=True,
+                )
             except Exception as exc:
                 return StrategyProposal(
                     action="invalid_proposal",
@@ -1696,11 +1699,24 @@ class HPOAgent(LangGraphAgent):
         snapshot: Dict[str, Any] = {
             "requested_runtime": {
                 key: runtime.get(key)
-                for key in ("device", "precision", "eval_precision")
+                for key in (
+                    "device",
+                    "ddp_devices",
+                    "distributed_world_size",
+                    "distributed_backend",
+                    "batch_size_semantics",
+                    "precision",
+                    "eval_precision",
+                )
                 if runtime.get(key) is not None
             },
             "cpu_count": os.cpu_count(),
         }
+        requested_devices = runtime.get("ddp_devices")
+        if isinstance(requested_devices, (list, tuple)):
+            snapshot["requested_runtime"]["training_gpu_count"] = len(
+                requested_devices
+            )
         if isinstance(declared_profile, dict) and declared_profile:
             snapshot["declared_limits"] = dict(declared_profile)
         try:

@@ -1,7 +1,7 @@
 {
   "model_family": "ecapa_tdnn",
-  "train_config": "configs/train_ecapa_tdnn.yaml",
-  "validation_config": "configs/verification_ecapa.yaml",
+  "train_config": "configs/train_ecapa_tdnn_vox1_3gpu.yaml",
+  "validation_config": "configs/verification_ecapa_vox1.yaml",
   "runner": "speechbrain",
   "implementation": "speechbrain",
   "model_name": "GLM-4.7",
@@ -43,7 +43,7 @@
       {
         "name": "lr",
         "parameter_type": "float",
-        "low": 0.0003,
+        "low": 0.0005,
         "high": 0.003,
         "scale": "log"
       },

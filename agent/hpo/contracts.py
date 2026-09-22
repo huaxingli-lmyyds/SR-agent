@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from math import isfinite
+from typing import Any, ClassVar, Dict, List, Optional
 from uuid import uuid4
 
 
@@ -67,6 +68,26 @@ class TrialBudget:
 class StrategyProposal:
     """Structured LLM proposal. It is advisory until approved by the service layer."""
 
+    LLM_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "action",
+        "requested_strategy",
+        "requested_sampler",
+        "sampler_config",
+        "requested_pruner",
+        "search_space",
+        "budgets",
+        "max_training_runs",
+        "initial_trial_count",
+        "promotion_limits",
+        "reduction_factor",
+        "hypotheses",
+        "candidate_proposals",
+        "reason_codes",
+        "evidence",
+        "expected_effect",
+        "confidence",
+    })
+
     action: str
     requested_strategy: Optional[str] = None
     requested_sampler: Optional[str] = None
@@ -93,9 +114,12 @@ class StrategyProposal:
         value: Dict[str, Any],
         *,
         preserve_audit_fields: bool = False,
+        strict_llm: bool = False,
     ) -> "StrategyProposal":
         if not isinstance(value, dict):
             raise ValueError("strategy proposal must be a JSON object")
+        if strict_llm:
+            cls._validate_llm_payload(value)
         proposal = cls(
             action=str(value.get("action") or ""),
             requested_strategy=value.get("requested_strategy"),
@@ -128,6 +152,69 @@ class StrategyProposal:
         if preserve_audit_fields and value.get("created_at"):
             proposal.created_at = str(value["created_at"])
         return proposal
+
+    @classmethod
+    def _validate_llm_payload(cls, value: Dict[str, Any]) -> None:
+        """Reject malformed model output before it reaches policy validation."""
+        fields = set(value)
+        missing = sorted(cls.LLM_FIELDS - fields)
+        unknown = sorted(fields - cls.LLM_FIELDS)
+        if missing or unknown:
+            details = []
+            if missing:
+                details.append("missing fields: " + ", ".join(missing))
+            if unknown:
+                details.append("unknown fields: " + ", ".join(unknown))
+            raise ValueError("invalid proposal structure (" + "; ".join(details) + ")")
+        if not isinstance(value["action"], str) or not value["action"].strip():
+            raise ValueError("proposal action must be a nonempty string")
+        if value["requested_strategy"] is not None:
+            raise ValueError("requested_strategy is legacy and must be null")
+        for name in ("requested_sampler", "requested_pruner"):
+            if value[name] is not None and not isinstance(value[name], str):
+                raise ValueError(f"{name} must be a string or null")
+        for name in ("sampler_config", "evidence", "expected_effect"):
+            if not isinstance(value[name], dict):
+                raise ValueError(f"{name} must be an object")
+        if value["search_space"] is not None and not isinstance(
+            value["search_space"], dict
+        ):
+            raise ValueError("search_space must be an object or null")
+        if value["budgets"] is not None and (
+            not isinstance(value["budgets"], list)
+            or any(not isinstance(item, dict) for item in value["budgets"])
+        ):
+            raise ValueError("budgets must be a list of objects or null")
+        for name in (
+            "max_training_runs",
+            "initial_trial_count",
+            "reduction_factor",
+        ):
+            if value[name] is not None and type(value[name]) is not int:
+                raise ValueError(f"{name} must be an integer or null")
+        if value["promotion_limits"] is not None and (
+            not isinstance(value["promotion_limits"], list)
+            or any(type(item) is not int for item in value["promotion_limits"])
+        ):
+            raise ValueError("promotion_limits must be a list of integers or null")
+        for name in ("hypotheses", "candidate_proposals"):
+            if not isinstance(value[name], list) or any(
+                not isinstance(item, dict) for item in value[name]
+            ):
+                raise ValueError(f"{name} must be a list of objects")
+        if not isinstance(value["reason_codes"], list) or any(
+            not isinstance(item, str) or not item
+            for item in value["reason_codes"]
+        ):
+            raise ValueError("reason_codes must be a list of nonempty strings")
+        confidence = value["confidence"]
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not isfinite(float(confidence))
+            or not 0 <= float(confidence) <= 1
+        ):
+            raise ValueError("confidence must be a finite number in [0, 1]")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

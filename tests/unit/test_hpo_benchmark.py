@@ -54,6 +54,60 @@ def test_invalid_numeric_budget_and_domain(value):
         benchmark.validate_config(cfg)
 
 
+@pytest.mark.parametrize(
+    ("config_name", "world_size", "batch_size", "step_size"),
+    [
+        ("five_group_ecapa_vox1_3gpu.json", 3, 72, 4000),
+        ("five_group_ecapa_vox1_8gpu.json", 8, 128, 2250),
+    ],
+)
+def test_ddp_profiles_have_valid_global_batch_contracts(
+    config_name, world_size, batch_size, step_size
+):
+    from agent.utils import ConfigParser
+
+    path = benchmark.ROOT / "configs/experiments" / config_name
+    cfg = benchmark.read_json(path)
+    benchmark.validate_config(cfg)
+    train = ConfigParser(
+        benchmark.project_path(cfg["train_config"])
+    ).load_config()
+    evaluation = ConfigParser(
+        benchmark.project_path(cfg["validation_config"])
+    ).load_config()
+    plan = {
+        "enabled": True,
+        "world_size": world_size,
+        "batch_size_semantics": "global",
+    }
+    benchmark.validate_ddp_batch_contract(cfg, train, plan)
+    assert train["batch_size"] == batch_size
+    assert train["step_size"] == step_size
+    assert train["batch_size"] % plan["world_size"] == 0
+    assert evaluation["batch_size"] == 8
+
+
+def test_global_ddp_rejects_unshardable_batch_search_values():
+    cfg = benchmark.read_json(
+        benchmark.ROOT / "configs/experiments/five_group_ecapa_vox1_8gpu.json"
+    )
+    cfg["search_space"]["parameters"].append({
+        "name": "batch_size",
+        "parameter_type": "categorical",
+        "choices": [128, 130],
+    })
+    with pytest.raises(ValueError, match=r"invalid: \[130\]"):
+        benchmark.validate_ddp_batch_contract(
+            cfg,
+            {"batch_size": 128},
+            {
+                "enabled": True,
+                "world_size": 8,
+                "batch_size_semantics": "global",
+            },
+        )
+
+
 def test_dry_run_is_dependency_light_and_does_not_write(tmp_path):
     destination = tmp_path / "not-created"
     result = subprocess.run(

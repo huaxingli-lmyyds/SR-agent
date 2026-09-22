@@ -590,6 +590,14 @@ def test_hpo_resource_snapshot_and_budget_analysis_are_structured() -> None:
         "device": "cuda:0",
         "precision": "fp16",
     }
+    distributed = HPOAgent._resource_snapshot({
+        "device": "cuda:0",
+        "ddp_devices": list(range(8)),
+        "batch_size_semantics": "global",
+        "distributed_backend": "nccl",
+    })
+    assert distributed["requested_runtime"]["training_gpu_count"] == 8
+    assert distributed["requested_runtime"]["batch_size_semantics"] == "global"
     assert resources["declared_limits"] == {"max_wall_time_seconds": 7200}
     assert "cuda" in resources
     assert analysis["planned_training_runs"] == 13
