@@ -36,9 +36,7 @@ class SpeechBrainRunnerAdapter:
         data_path: Optional[str],
         overrides: Dict[str, Any],
     ) -> Dict[str, Any]:
-        from .speechbrain_backend import run_evaluation
-
-        return run_evaluation(
+        return _run_speechbrain_evaluation_isolated(
             config_path=config_path,
             model_path=model_path,
             data_folder=data_path,
@@ -215,6 +213,120 @@ def _run_speechbrain_training_process(
 
     try:
         connection.send(run_training(config_path, overrides))
+    finally:
+        connection.close()
+
+
+def _run_speechbrain_evaluation_isolated(
+    config_path: str,
+    model_path: Optional[str],
+    data_folder: Optional[str],
+    overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Evaluate in a one-shot process so CUDA and log handlers cannot leak.
+
+    SpeechBrain configures process-wide logging in
+    ``create_experiment_directory``.  Evaluation also retains CUDA tensors in
+    recipe module globals while embeddings are scored.  Keeping evaluation in
+    the long-lived benchmark process therefore contaminates later Trial logs
+    and can reserve almost all memory on the first visible GPU.  A spawned
+    process gives both resources an unambiguous lifetime.
+    """
+    context = multiprocessing.get_context("spawn")
+    receive_connection, send_connection = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_run_speechbrain_evaluation_process,
+        args=(
+            send_connection,
+            config_path,
+            model_path,
+            data_folder,
+            overrides,
+        ),
+    )
+    try:
+        process.start()
+        send_connection.close()
+        ready = wait_for_process_io(
+            [receive_connection, process.sentinel], None
+        )
+        result = None
+        if receive_connection in ready:
+            try:
+                result = receive_connection.recv()
+            except EOFError:
+                result = None
+        elif process.sentinel in ready:
+            process.join(10.0)
+            if receive_connection.poll():
+                try:
+                    result = receive_connection.recv()
+                except EOFError:
+                    result = None
+
+        process.join(30.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(10.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(5.0)
+
+        if result is None:
+            return {
+                "status": "failed",
+                "error": (
+                    "evaluation process exited without returning a result "
+                    f"(exit code {process.exitcode})"
+                ),
+                "eer": None,
+                "min_dcf": None,
+                "output_folder": None,
+                "scores_path": None,
+                "process_exitcode": process.exitcode,
+            }
+        result.setdefault("process_exitcode", process.exitcode)
+        return result
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(5.0)
+        receive_connection.close()
+        send_connection.close()
+
+
+def _run_speechbrain_evaluation_process(
+    connection: Any,
+    config_path: str,
+    model_path: Optional[str],
+    data_folder: Optional[str],
+    overrides: Dict[str, Any],
+) -> None:
+    from .speechbrain_backend import run_evaluation
+
+    try:
+        connection.send(
+            run_evaluation(
+                config_path=config_path,
+                model_path=model_path,
+                data_folder=data_folder,
+                overrides=overrides,
+            )
+        )
+    except BaseException as exc:
+        connection.send(
+            {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "eer": None,
+                "min_dcf": None,
+                "output_folder": None,
+                "scores_path": None,
+            }
+        )
     finally:
         connection.close()
 

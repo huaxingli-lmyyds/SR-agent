@@ -13,7 +13,10 @@ from agent.runners.speechbrain_distributed import (
     resolve_ddp_plan,
     training_runtime_signature,
 )
-from agent.runners.speechbrain_backend import _apply_distributed_batch_size
+from agent.runners.speechbrain_backend import (
+    _apply_distributed_batch_size,
+    _release_evaluation_runtime,
+)
 
 
 class ExternalRunner:
@@ -268,6 +271,126 @@ def test_speechbrain_runner_reports_early_child_crash_without_waiting_for_deadli
     assert result["status"] == "failed"
     assert result["process_exitcode"] == 9
     assert result["terminated_by_budget"] is False
+
+
+def test_speechbrain_runner_isolates_evaluation_in_one_shot_process(
+    monkeypatch,
+) -> None:
+    expected = {"status": "success", "eer": 0.1, "min_dcf": 20.0}
+
+    class FakeReceiveConnection:
+        def recv(self):
+            return dict(expected)
+
+        def close(self):
+            pass
+
+    class FakeSendConnection:
+        def close(self):
+            pass
+
+    class FakeProcess:
+        exitcode = 0
+        sentinel = object()
+
+        def __init__(self):
+            self.joins = []
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            self.joins.append(timeout)
+
+        def is_alive(self):
+            return False
+
+    receive_connection = FakeReceiveConnection()
+    process = FakeProcess()
+
+    class FakeContext:
+        def Pipe(self, duplex):
+            assert duplex is False
+            return receive_connection, FakeSendConnection()
+
+        def Process(self, **kwargs):
+            assert kwargs["target"] is (
+                speechbrain_runner_module._run_speechbrain_evaluation_process
+            )
+            assert kwargs["args"][1:] == (
+                "verification.yaml",
+                "checkpoint",
+                "dataset",
+                {"output_folder": "evaluation"},
+            )
+            return process
+
+    monkeypatch.setattr(
+        speechbrain_runner_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        speechbrain_runner_module,
+        "wait_for_process_io",
+        lambda objects, timeout: [receive_connection],
+    )
+
+    result = SpeechBrainRunnerAdapter().run_evaluation(
+        "verification.yaml",
+        "checkpoint",
+        "dataset",
+        {"output_folder": "evaluation"},
+    )
+
+    assert result == {**expected, "process_exitcode": 0}
+    assert process.joins == [30.0]
+
+
+def test_evaluation_cleanup_drops_recipe_cuda_references() -> None:
+    calls = []
+
+    class FakeCuda:
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def synchronize():
+            calls.append("synchronize")
+
+        @staticmethod
+        def empty_cache():
+            calls.append("empty_cache")
+
+        @staticmethod
+        def ipc_collect():
+            calls.append("ipc_collect")
+
+    verification = type(
+        "VerificationModule",
+        (),
+        {
+            "enrol_dict": {"a": object()},
+            "test_dict": {"b": object()},
+            "train_dict": {"c": object()},
+            "params": {"old": object()},
+            "run_opts": {"device": "cuda:0"},
+        },
+    )()
+    params = {"embedding_model": object(), "pretrainer": object()}
+
+    _release_evaluation_runtime(
+        type("Torch", (), {"cuda": FakeCuda()})(), verification, params
+    )
+
+    assert params == {}
+    assert verification.enrol_dict == {}
+    assert verification.test_dict == {}
+    assert verification.train_dict == {}
+    assert verification.params == {}
+    assert verification.run_opts == {}
+    assert calls == ["synchronize", "empty_cache", "ipc_collect"]
 
 
 def test_ddp_device_parser_and_explicit_plan_are_deterministic() -> None:

@@ -6,6 +6,7 @@ from typing import Optional, Dict, Any, List, Tuple, Union
 from pathlib import Path
 from contextlib import contextmanager
 import csv
+import gc
 import hashlib
 import json
 import re
@@ -419,10 +420,15 @@ def run_evaluation(
     overrides: Optional[Union[List[str], Dict[str, Any]]] = None,
     run_opts: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    torch_module = None
+    verification_module = None
+    params = None
     try:
         require_speechbrain()
         import torch
         import speechbrain as sb
+
+        torch_module = torch
 
         if _VERIFICATION_MODULE is None:
             return {
@@ -595,6 +601,46 @@ def run_evaluation(
             "output_folder": None,
             "scores_path": None,
         }
+    finally:
+        _release_evaluation_runtime(torch_module, verification_module, params)
+
+
+def _release_evaluation_runtime(
+    torch_module: Any,
+    verification_module: Any,
+    params: Optional[Dict[str, Any]],
+) -> None:
+    """Drop recipe-global CUDA references before releasing allocator caches."""
+    if verification_module is not None:
+        for name in ("enrol_dict", "test_dict", "train_dict"):
+            value = getattr(verification_module, name, None)
+            if isinstance(value, dict):
+                value.clear()
+            setattr(verification_module, name, {})
+        # The recipe treats these as mutable module globals.  Do not leave the
+        # HyperPyYAML object graph (model, pretrainer, feature modules) reachable
+        # after a direct backend call.
+        verification_module.params = {}
+        verification_module.run_opts = {}
+    if isinstance(params, dict):
+        params.clear()
+    gc.collect()
+    cuda = getattr(torch_module, "cuda", None) if torch_module is not None else None
+    if cuda is None:
+        return
+    try:
+        if cuda.is_available():
+            try:
+                cuda.synchronize()
+            except (RuntimeError, TypeError):
+                pass
+            cuda.empty_cache()
+            ipc_collect = getattr(cuda, "ipc_collect", None)
+            if callable(ipc_collect):
+                ipc_collect()
+    except (RuntimeError, TypeError):
+        # Cleanup must never replace the real evaluation result/error.
+        pass
 
 
 def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) -> Dict[str, Any]:
