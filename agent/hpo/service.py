@@ -1963,6 +1963,8 @@ class HPOService:
                     "trial_ids": list(study.trial_ids),
                     "max_training_runs": study.max_training_runs,
                     "completion": dict(study.scheduler_state.get("completion") or {}),
+                    "failure_guard": dict(study.scheduler_state.get("failure_guard") or {}),
+                    "resource_budget": dict(study.scheduler_state.get("resource_budget") or {}),
                     "next_study_proposal": study.next_study_proposal,
                     "updated_at": study.updated_at,
                     "study_artifact": str(path),

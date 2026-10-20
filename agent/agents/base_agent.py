@@ -58,7 +58,7 @@ class AdvisoryAgentBase:
                 temperature=self.temperature,
                 base_url=api_base,
                 timeout=300,
-                max_retries=2,
+                max_retries=0 if getattr(self, "_resource_budget", None) else 2,
             )
         return self._llm
 
@@ -81,7 +81,7 @@ class AdvisoryAgentBase:
     ) -> Any:
         """Run a bounded read-only tool loop, then require a final model answer."""
         if not tools or not hasattr(self.llm, "bind_tools"):
-            return self.llm.invoke(prompt)
+            return self._invoke_advisory_model(self.llm, prompt)
         try:
             from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -89,7 +89,7 @@ class AdvisoryAgentBase:
             messages: List[Any] = [HumanMessage(content=prompt)]
             by_name = {getattr(item, "name", ""): item for item in tools}
             for _ in range(max(int(max_tool_rounds), 0)):
-                response = bound.invoke(messages)
+                response = self._invoke_advisory_model(bound, messages)
                 tool_calls = list(getattr(response, "tool_calls", None) or [])
                 if not tool_calls:
                     return response
@@ -112,10 +112,33 @@ class AdvisoryAgentBase:
                     "object required by the original schema. Do not call another tool."
                 )
             ))
-            return self.llm.invoke(messages)
-        except Exception:
+            return self._invoke_advisory_model(self.llm, messages)
+        except Exception as exc:
+            from agent.hpo.resources import ResourceBudgetExhausted
+            if isinstance(exc, ResourceBudgetExhausted):
+                raise
             # Provider/tool-calling incompatibility must not disable the advisor.
-            return self.llm.invoke(prompt)
+            return self._invoke_advisory_model(self.llm, prompt)
+
+    def _invoke_advisory_model(self, model: Any, prompt: Any) -> Any:
+        resources = getattr(self, "_resource_budget", None)
+        if resources:
+            remaining = resources.check()["wall_seconds_remaining"]
+            if remaining is not None:
+                # OpenAI accepts a per-request timeout. Disable SDK retries on
+                # already-created clients too, otherwise each retry gets a new timeout.
+                base = getattr(model, "bound", model)
+                client = getattr(base, "root_client", None)
+                if client is not None and hasattr(client, "with_options"):
+                    client = client.with_options(max_retries=0)
+                    copied = base.model_copy(update={"root_client": client, "client": client.chat.completions})
+                    model = copied.bind(**getattr(model, "kwargs", {}))
+                if hasattr(model, "bind"):
+                    model = model.bind(timeout=min(300.0, remaining))
+        response = model.invoke(prompt)
+        if resources:
+            resources.check()
+        return response
 
 
 class LangGraphAgent(AdvisoryAgentBase):

@@ -14,6 +14,10 @@ from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.core.metrics import is_finite_metric
 from agent.hpo.effects import summarize_decision_effect
 from agent.hpo.history import budget_key, observation_signature
+from agent.hpo.policies import SystemFailureBlocked
+from agent.hpo.resources import (
+    CampaignResourceBudget, ResourceBudgetExhausted, positive_limit, stage_gpu_count,
+)
 from agent.hpo.protocol import (
     METRIC_PROTOCOL_ID,
     METRIC_UNITS,
@@ -97,6 +101,103 @@ class HPOAgent(LangGraphAgent):
         )
 
     def run_workflow(self, request: AgentTaskRequest) -> AgentTaskResult:
+        self._resource_budget = None
+        self._resource_campaign = None
+        self._resource_experiment_ids = []
+        try:
+            return self._run_workflow(request)
+        except SystemFailureBlocked as exc:
+            campaign = self._resource_campaign
+            if campaign:
+                campaign.status, campaign.stop_reason = "failed", str(exc)
+            tracker = ExperimentTracker(self.experiments_dir)
+            for experiment_id in self._resource_experiment_ids:
+                tracker.update_hpo_experiment(experiment_id, extensions={"optimization": {
+                    "campaign": campaign.to_dict() if campaign else {},
+                    "campaign_failure_guard": exc.guard,
+                }})
+            return AgentTaskResult(
+                status="failed", error=str(exc), request_id=request.request_id,
+                summary={"campaign": campaign.to_dict() if campaign else {}, "failure_guard": exc.guard},
+                experiment_ids={"campaign": list(self._resource_experiment_ids),
+                                **({"hpo": self._resource_experiment_ids[-1]} if self._resource_experiment_ids else {})},
+            )
+        except ResourceBudgetExhausted as exc:
+            campaign = self._resource_campaign
+            if campaign:
+                campaign.status, campaign.stop_reason = "cancelled", str(exc)
+                campaign.resource_budget = self._resource_budget.snapshot()
+            tracker = ExperimentTracker(self.experiments_dir)
+            for experiment_id in self._resource_experiment_ids:
+                record = tracker.get_experiment(experiment_id) or {}
+                if record.get("status") != "success":
+                    tracker.update_hpo_experiment(experiment_id, status="failed", error=str(exc))
+                    service = HPOService(tracker)
+                    try:
+                        study = service.load_study(experiment_id)
+                    except FileNotFoundError:
+                        continue
+                    if study.status not in {"completed", "cancelled"}:
+                        service.update_scheduler_state(study, resource_budget=self._resource_budget.snapshot())
+                        service.finish_study(study, "cancelled", str(exc))
+            return AgentTaskResult(
+                status="failed", error=str(exc), request_id=request.request_id,
+                experiment_ids={
+                    "campaign": list(self._resource_experiment_ids),
+                    **({"hpo": self._resource_experiment_ids[-1]} if self._resource_experiment_ids else {}),
+                },
+                summary={"campaign": campaign.to_dict() if campaign else {},
+                         "resource_budget": self._resource_budget.snapshot() if self._resource_budget else {}},
+            )
+        finally:
+            resources = self._resource_budget
+            if resources:
+                try:
+                    snapshot = resources.snapshot()
+                    if self._resource_campaign:
+                        self._resource_campaign.resource_budget = snapshot
+                    tracker = ExperimentTracker(self.experiments_dir)
+                    for experiment_id in self._resource_experiment_ids:
+                        tracker.update_hpo_experiment(
+                            experiment_id, extensions={"optimization": {
+                                "resource_budget": snapshot,
+                                "campaign": self._resource_campaign.to_dict(),
+                            }},
+                        )
+                finally:
+                    resources.close()
+
+    def _bind_resource_budget(self, request, campaign, *, resume=False):
+        self._resource_campaign = campaign
+        profile = request.context.get("resource_profile") or {}
+        limits = {}
+        for key, aliases in {
+            "max_gpu_hours": ("max_gpu_hours", "gpu_hours", "gpu_hours_remaining"),
+            "max_wall_seconds": ("max_wall_seconds", "wall_seconds", "wall_seconds_remaining"),
+        }.items():
+            values = [positive_limit(request.budget.get(key), key)]
+            values += [positive_limit(profile.get(alias), alias) for alias in aliases]
+            limits[key] = min((value for value in values if value is not None), default=None)
+        persisted = campaign.resource_budget
+        if not persisted and not any(value is not None for value in limits.values()):
+            return
+        if resume and not persisted:
+            raise ValueError("cannot add resource limits when resuming a legacy Campaign with unaccounted costs")
+        path = Path(self.experiments_dir) / "campaign_resources" / f"{campaign.campaign_id}.json"
+        if path.parent.resolve() != (Path(self.experiments_dir) / "campaign_resources").resolve():
+            raise ValueError("invalid persisted Campaign resource identifier")
+        self._resource_budget = CampaignResourceBudget(path, limits=limits, resume=resume)
+        self._resource_campaign = campaign
+        campaign.resource_budget = self._resource_budget.snapshot()
+        self._resource_budget.check()
+
+    def _check_resource_budget(self):
+        resources = getattr(self, "_resource_budget", None)
+        if resources:
+            return resources.check()
+        return None
+
+    def _run_workflow(self, request: AgentTaskRequest) -> AgentTaskResult:
         started_at = datetime.now()
         tracker = ExperimentTracker(self.experiments_dir)
         resume_experiment_id = request.context.get("resume_experiment_id")
@@ -193,6 +294,7 @@ class HPOAgent(LangGraphAgent):
             min_improvement=float(request.budget.get("campaign_min_improvement", 0.0)),
             max_total_training_runs=int(request.budget.get("max_total_training_runs") or per_study_limit * max_studies),
         )
+        self._bind_resource_budget(request, campaign)
         confirmation_budget = budgets[-1]
         history_comparison_signature = self._confirmation_signature_from_inputs(
             objective=objectives[0],
@@ -216,6 +318,7 @@ class HPOAgent(LangGraphAgent):
         )
         campaign_history: List[Dict[str, Any]] = []
         for study_index in range(max_studies):
+            self._check_resource_budget()
             pre_inheritance_sampler = sampler
             remaining = campaign_policy.remaining_runs(campaign)
             run_limit = min(per_study_limit, remaining) if remaining is not None else per_study_limit
@@ -518,6 +621,8 @@ class HPOAgent(LangGraphAgent):
                     "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
                 }},
             )
+            self._resource_experiment_ids.append(experiment_id)
+            self._check_resource_budget()
             study = service.create_study(
                 experiment_id,
                 search_space,
@@ -634,6 +739,7 @@ class HPOAgent(LangGraphAgent):
             }})
             scheduled = HPOScheduler(
                 service, self._trial_executor(experiment_id, data_folder, runtime_options),
+                resource_budget=self._resource_budget,
                 retry_policy=RetryPolicy(int(request.budget.get("max_retries", 1))),
                 strategy_reviewer=self._runtime_strategy_reviewer(request, campaign),
                 review_interval_trials=int(request.budget.get("strategy_review_interval_trials", 3)),
@@ -641,6 +747,11 @@ class HPOAgent(LangGraphAgent):
             if scheduled.study.status != "completed":
                 error = "; ".join(scheduled.errors) or "HPO workflow failed"
                 tracker.update_hpo_experiment(experiment_id, status="failed", error=error)
+                if scheduled.study.scheduler_state.get("resource_budget", {}).get("stop_reason"):
+                    raise ResourceBudgetExhausted(error)
+                guard = scheduled.study.scheduler_state.get("failure_guard") or {}
+                if guard.get("status") == "open":
+                    raise SystemFailureBlocked(error, guard)
                 raise RuntimeError(error)
             planning_outcome = summarize_decision_effect(
                 scheduled.trials,
@@ -712,6 +823,7 @@ class HPOAgent(LangGraphAgent):
             )
             if not campaign_policy.should_continue(campaign):
                 break
+            self._check_resource_budget()
             sampler = (
                 scheduled.study.candidate_strategy
                 or scheduled.study.sampler_strategy
@@ -746,6 +858,8 @@ class HPOAgent(LangGraphAgent):
             importance=0.9,
         ))
         campaign_record = campaign.to_dict()
+        if self._resource_budget:
+            campaign_record["resource_budget"] = self._resource_budget.snapshot()
         pending_next_study = (
             (campaign_record.get("study_summaries") or [{}])[-1].get(
                 "next_study_proposal"
@@ -888,6 +1002,23 @@ class HPOAgent(LangGraphAgent):
             optimization.get("campaign"),
             study.objectives[0],
         )
+        self._resource_experiment_ids.append(experiment_id)
+        self._bind_resource_budget(request, campaign, resume=True)
+        campaign_guard = dict(optimization.get("campaign_failure_guard") or {})
+        source_experiment = campaign_guard.get("experiment_id")
+        if campaign_guard.get("status") == "open" and source_experiment and source_experiment != experiment_id:
+            # Resuming an older successful Study must not bypass the failing
+            # Study that stopped the same Campaign. Consult its live guard so a
+            # repaired/reset source does not remain blocked by stale snapshots.
+            source_study = service.load_study(str(source_experiment))
+            source_guard = source_study.scheduler_state.get("failure_guard") or {}
+            if source_guard.get("status") == "open":
+                raise SystemFailureBlocked(
+                    f"system_failure: Campaign blocked by {source_experiment}; repair and resume that Study first",
+                    source_guard,
+                )
+        if request.context.get("reset_failure_guard") is True:
+            campaign.status, campaign.stop_reason = "running", None
         resumed_signature = study_confirmation_signature(study)
         if not campaign.confirmation_signature:
             campaign.confirmation_signature = resumed_signature
@@ -917,15 +1048,24 @@ class HPOAgent(LangGraphAgent):
                     "runner": runner,
                 },
             ),
+            resource_budget=self._resource_budget,
             retry_policy=RetryPolicy(int(request.budget.get("max_retries", 1))),
             strategy_reviewer=self._runtime_strategy_reviewer(request, campaign),
             review_interval_trials=int(
                 request.budget.get("strategy_review_interval_trials", 3)
             ),
-        ).run(study, resume=True)
+        ).run(
+            study, resume=True,
+            reset_failure_guard=request.context.get("reset_failure_guard") is True,
+        )
         if scheduled.study.status != "completed":
             error = "; ".join(scheduled.errors) or "resumed HPO workflow failed"
             tracker.update_hpo_experiment(experiment_id, status="failed", error=error)
+            if scheduled.study.scheduler_state.get("resource_budget", {}).get("stop_reason"):
+                raise ResourceBudgetExhausted(error)
+            guard = scheduled.study.scheduler_state.get("failure_guard") or {}
+            if guard.get("status") == "open":
+                raise SystemFailureBlocked(error, guard)
             raise RuntimeError(error)
 
         best_trial = service.load_trial(
@@ -1082,6 +1222,7 @@ class HPOAgent(LangGraphAgent):
             patience=max(int(data.get("patience") or 1), 1),
             min_improvement=float(data.get("min_improvement") or 0.0),
             max_total_training_runs=data.get("max_total_training_runs"),
+            resource_budget=dict(data.get("resource_budget") or {}),
             confirmation_signature=dict(data.get("confirmation_signature") or {}),
             campaign_id=str(
                 data.get("campaign_id")
@@ -1371,8 +1512,29 @@ class HPOAgent(LangGraphAgent):
             model_family = str(parameters.pop("model_family", default_model_family))
             implementation = str(parameters.pop("implementation", default_implementation))
             runner = str(parameters.pop("runner", default_runner))
+            resources = getattr(self, "_resource_budget", None)
+            training_gpu_count = stage_gpu_count(runtime_options, runner)
+            evaluation_gpu_count = stage_gpu_count(runtime_options, runner, evaluation=True)
+
+            def invoke_stage(tool, payload, stage, gpu_count):
+                if resources:
+                    deadline = resources.start_stage(
+                        experiment_id=experiment_id, trial_id=trial.trial_id,
+                        attempt=attempt, stage=stage, gpu_count=gpu_count,
+                        max_seconds=trial.budget.max_duration_seconds if stage == "training" else None,
+                    )
+                    if deadline is not None:
+                        payload["runtime_deadline_epoch"] = deadline
+                try:
+                    return json.loads(tool.invoke(payload))
+                except Exception as exc:
+                    return {"status": "failed", "stage": stage, "error": f"{type(exc).__name__}: {exc}"}
+                finally:
+                    if resources:
+                        resources.finish_stage()
+
             training_started = perf_counter()
-            train_result = json.loads(TrainModel.invoke({
+            train_result = invoke_stage(TrainModel, {
                 "experiment_id": experiment_id,
                 "trial_id": trial.trial_id,
                 "data_folder": data_folder,
@@ -1392,7 +1554,7 @@ class HPOAgent(LangGraphAgent):
                 "batch_size_semantics": runtime_options.get("batch_size_semantics"),
                 "precision": runtime_options.get("precision"),
                 "eval_precision": runtime_options.get("eval_precision"),
-            }))
+            }, "training", training_gpu_count)
             training_seconds = perf_counter() - training_started
             training_runtime = dict(
                 (((train_result.get("extensions") or {}).get("speechbrain") or {}).get(
@@ -1400,12 +1562,12 @@ class HPOAgent(LangGraphAgent):
                 ) or {})
             )
             ddp_runtime = dict(training_runtime.get("ddp") or {})
-            training_world_size = max(int(ddp_runtime.get("world_size") or 1), 1)
+            training_world_size = max(int(ddp_runtime.get("world_size") or training_gpu_count or 1), 1)
             if train_result.get("status") != "success":
                 return {**train_result, "cost": {
                     "attempt_training_seconds": training_seconds,
                     "attempt_training_gpu_seconds": (
-                        training_seconds * training_world_size
+                        training_seconds * training_gpu_count
                     ),
                     "training_world_size": training_world_size,
                     "attempt_evaluation_seconds": 0.0,
@@ -1420,11 +1582,12 @@ class HPOAgent(LangGraphAgent):
             if current_checkpoint is None:
                 return {
                     "status": "failed",
+                    "stage": "training",
                     "error": "missing checkpoint artifact from current training attempt",
                     "cost": {
                         "attempt_training_seconds": training_seconds,
                         "attempt_training_gpu_seconds": (
-                            training_seconds * training_world_size
+                            training_seconds * training_gpu_count
                         ),
                         "training_world_size": training_world_size,
                         "attempt_evaluation_seconds": 0.0,
@@ -1432,7 +1595,7 @@ class HPOAgent(LangGraphAgent):
                     },
                 }
             evaluation_started = perf_counter()
-            evaluation = json.loads(RunEvaluation.invoke({
+            evaluation = invoke_stage(RunEvaluation, {
                 "model_path": current_checkpoint,
                 "verification_config": runtime_options.get("verification_config"),
                 "verification_pairs": runtime_options.get("validation_pairs"),
@@ -1448,13 +1611,14 @@ class HPOAgent(LangGraphAgent):
                 "device": runtime_options.get("device"),
                 "precision": runtime_options.get("precision"),
                 "eval_precision": runtime_options.get("eval_precision"),
-            }))
+            }, "evaluation", evaluation_gpu_count)
             metrics: Dict[str, Any] = {}
             for values in (evaluation.get("metrics") or {}).values():
                 metrics.update(values or {})
             evaluation_seconds = perf_counter() - evaluation_started
             return {
                 "status": evaluation.get("status", "failed"),
+                "stage": "evaluation",
                 "error": evaluation.get("error"),
                 "metrics": metrics,
                 "artifacts": evaluation.get("artifacts") or [],
@@ -1462,11 +1626,11 @@ class HPOAgent(LangGraphAgent):
                     "attempt": attempt, "evaluated_checkpoint": current_checkpoint,
                     "attempt_training_seconds": training_seconds,
                     "attempt_training_gpu_seconds": (
-                        training_seconds * training_world_size
+                        training_seconds * training_gpu_count
                     ),
                     "training_world_size": training_world_size,
                     "attempt_evaluation_seconds": evaluation_seconds,
-                    "attempt_evaluation_gpu_seconds": evaluation_seconds,
+                    "attempt_evaluation_gpu_seconds": evaluation_seconds * evaluation_gpu_count,
                 },
             }
         return execute
@@ -1553,6 +1717,8 @@ class HPOAgent(LangGraphAgent):
                 )
             ))
             return StrategyProposal.from_dict(value, strict_llm=True)
+        except ResourceBudgetExhausted:
+            raise
         except Exception as exc:
             return StrategyProposal(
                 action="invalid_proposal",
@@ -1627,6 +1793,8 @@ class HPOAgent(LangGraphAgent):
                     )),
                     strict_llm=True,
                 )
+            except ResourceBudgetExhausted:
+                raise
             except Exception as exc:
                 return StrategyProposal(
                     action="invalid_proposal",
@@ -1643,6 +1811,16 @@ class HPOAgent(LangGraphAgent):
         objective_mode: str = "min",
         confirmation_signature: Optional[Dict[str, Any]] = None,
     ) -> Any:
+        self._check_resource_budget()
+        resources = getattr(self, "_resource_budget", None)
+        if resources:
+            payload = json.loads(prompt)
+            context = payload.setdefault("context", {})
+            snapshot = resources.snapshot()
+            context["resource_budget"] = snapshot
+            if isinstance(context.get("campaign"), dict):
+                context["campaign"]["resource_budget"] = snapshot
+            prompt = json.dumps(payload, ensure_ascii=False)
         from agent.tools.hpo_analysis_tools import build_hpo_analysis_tools
 
         adapter = get_model_adapter(self.model_family)
@@ -1866,6 +2044,7 @@ class HPOAgent(LangGraphAgent):
             "target_value": campaign.get("target_value"),
             "max_studies": campaign.get("max_studies"),
             "max_total_training_runs": campaign.get("max_total_training_runs"),
+            "resource_budget": campaign.get("resource_budget") or {},
             "confirmation_signature": campaign.get("confirmation_signature") or {},
             "best_value": campaign.get("best_value"),
             "study_count": len(summaries),

@@ -49,7 +49,8 @@ def TrainModel(config_path: Optional[str] = None,
                distributed_backend: Optional[str] = None,
                batch_size_semantics: Optional[str] = None,
                precision: Optional[str] = None,
-               eval_precision: Optional[str] = None) -> str:
+               eval_precision: Optional[str] = None,
+               runtime_deadline_epoch: Optional[float] = None) -> str:
     """
     通过注册的模型、任务和 Runner 适配器执行训练。
     训练完成后会自动保存实验记录，包括配置、指标和产物。
@@ -232,6 +233,16 @@ def TrainModel(config_path: Optional[str] = None,
             run_opts["eval_precision"] = eval_precision
         if run_opts:
             overrides["_run_opts"] = run_opts
+        if runtime_deadline_epoch is not None:
+            from time import time
+            from agent.hpo.resources import positive_limit, ResourceBudgetExhausted
+            positive_limit(runtime_deadline_epoch, "runtime_deadline_epoch")
+            remaining = runtime_deadline_epoch - time()
+            if remaining <= 0:
+                raise ResourceBudgetExhausted("resource budget expired during training preparation")
+            overrides["_hpo_max_duration_seconds"] = min(
+                remaining, float(max_duration) if max_duration is not None else remaining,
+            )
         train_result = runner_adapter.run_training(config_path_str, overrides)
 
         end_time = datetime.now()
@@ -340,7 +351,7 @@ def TrainModel(config_path: Optional[str] = None,
     except Exception as e:
         if trial_id and locals().get("study") is not None and locals().get("tracker") is not None:
             try:
-                failure = FailurePolicy().classify(str(e))
+                failure = FailurePolicy().classify(f"{type(e).__name__}: {e}")
                 HPOService(tracker).record_trial(
                     study,
                     trial_id,
@@ -349,14 +360,14 @@ def TrainModel(config_path: Optional[str] = None,
                         "failure_category": failure.category,
                         "recoverable": failure.recoverable,
                     },
-                    stop_reason=str(e),
+                    stop_reason=f"{type(e).__name__}: {e}",
                 )
             except Exception:
                 pass
         return OperationResult(
             status="failed",
             stage="training",
-            error=str(e),
+            error=f"{type(e).__name__}: {e}",
             experiment_id=experiment_id,
         ).to_json()
 

@@ -7,6 +7,16 @@ def parse_args(*args):
     return build_arg_parser().parse_args(list(args))
 
 
+def test_cli_resource_limits():
+    budget = build_budget(parse_args("--max-gpu-hours", "48", "--max-wall-seconds", "86400"))
+    assert budget["max_gpu_hours"] == 48
+    assert budget["max_wall_seconds"] == 86400
+    for flag in ("--max-gpu-hours", "--max-wall-seconds"):
+        for value in ("0", "-1", "nan", "inf"):
+            with pytest.raises(SystemExit, match="finite positive"):
+                build_budget(parse_args(flag, value))
+
+
 def test_cli_accepts_tpe_and_llm_advisor_flag() -> None:
     args = parse_args("--strategy", "tpe", "--enable-llm-advisor")
 
@@ -18,6 +28,15 @@ def test_cli_exposes_resume_experiment_id() -> None:
     args = parse_args("--resume-experiment-id", "hpo_abc123")
 
     assert build_context(args)["resume_experiment_id"] == "hpo_abc123"
+
+
+def test_cli_requires_explicit_resume_to_reset_failure_guard() -> None:
+    with pytest.raises(SystemExit, match="requires --resume-experiment-id"):
+        build_context(parse_args("--reset-failure-guard"))
+    context = build_context(parse_args(
+        "--resume-experiment-id", "hpo_abc123", "--reset-failure-guard",
+    ))
+    assert context["reset_failure_guard"] is True
 
 
 def test_cli_builds_single_budget_from_budget_flags() -> None:

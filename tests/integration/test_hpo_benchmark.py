@@ -231,6 +231,89 @@ def test_five_groups_use_real_scheduler_and_separate_test(setup_benchmark):
     assert (env.output / "heldout_results.json").exists()
 
 
+def test_system_failure_blocks_other_groups_and_survives_resume(setup_benchmark, monkeypatch):
+    env = setup_benchmark
+    evaluations = []
+
+    def broken_evaluation(*args, **kwargs):
+        evaluations.append(kwargs.get("model_path"))
+        raise AttributeError("Can't get local object 'dataio_prep.<locals>.audio_pipeline'")
+
+    monkeypatch.setattr(env.runner, "run_evaluation", broken_evaluation)
+    assert benchmark.main(env.args) == 1
+    assert len(env.runner.training) == 1
+    assert len(evaluations) == 1
+    rows = benchmark.read_json(env.output / "results.json")
+    assert len(rows) == 1
+    assert rows[0]["failure_guard"]["status"] == "open"
+    assert rows[0]["failure_guard"]["failure_stage"] == "evaluation"
+    assert "AttributeError" in rows[0]["failure_guard"]["error_summary"]
+    assert Path(evaluations[0]).is_file()
+
+    assert benchmark.main(["--resume", "--output-dir", str(env.output)]) == 1
+    assert len(env.runner.training) == 1
+    assert len(evaluations) == 1
+
+
+def test_candidate_resource_failure_does_not_stop_other_groups(setup_benchmark, monkeypatch):
+    env = setup_benchmark
+    original = env.runner.run_evaluation
+    calls = []
+
+    def evaluation(*args, **kwargs):
+        calls.append(kwargs.get("model_path"))
+        if len(calls) == 1:
+            return {"status": "failed", "error": "CUDA out of memory"}
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(env.runner, "run_evaluation", evaluation)
+    assert benchmark.main(env.args + ["--only", "random_search,tpe"]) == 0
+    assert len(env.runner.training) == 8
+    rows = benchmark.read_json(env.output / "results.json")
+    assert len(rows) == 2
+    assert all(row["status"] == "success" for row in rows)
+    assert all(row["failure_guard"]["status"] == "closed" for row in rows)
+
+
+def test_system_failure_survives_late_summary_error(setup_benchmark, monkeypatch):
+    env = setup_benchmark
+    original = benchmark.run_variant
+
+    def broken_evaluation(*args, **kwargs):
+        raise AttributeError("broken shared evaluation pipeline")
+
+    def interrupted_summary(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError("summary finalization failed")
+
+    monkeypatch.setattr(env.runner, "run_evaluation", broken_evaluation)
+    monkeypatch.setattr(benchmark, "run_variant", interrupted_summary)
+    assert benchmark.main(env.args) == 1
+    assert len(env.runner.training) == 1
+    rows = benchmark.read_json(env.output / "results.json")
+    assert rows[0]["failure_guard"]["status"] == "open"
+    agent_result = benchmark.read_json(Path(rows[0]["run_dir"]) / "agent_result.json")
+    assert agent_result["summary"]["campaign"]["status"] == "failed"
+    assert agent_result["summary"]["failure_guard"]["status"] == "open"
+    assert agent_result["experiment_ids"]["hpo"]
+    assert benchmark.main(["--resume", "--output-dir", str(env.output)]) == 1
+    assert len(env.runner.training) == 1
+
+
+def test_shared_error_outside_scheduler_stops_benchmark(setup_benchmark, monkeypatch):
+    env = setup_benchmark
+
+    def broken_setup(*args, **kwargs):
+        raise ModuleNotFoundError("shared backend dependency unavailable")
+
+    monkeypatch.setattr(benchmark, "run_variant", broken_setup)
+    assert benchmark.main(env.args) == 1
+    assert env.runner.training == []
+    rows = benchmark.read_json(env.output / "results.json")
+    assert len(rows) == 1
+    assert rows[0]["failure_guard"]["reason_code"] == "benchmark_system_error"
+
+
 def test_resume_reuses_same_trial_and_frozen_config(setup_benchmark):
     env = setup_benchmark
     env.runner.interrupt_on = 2
@@ -331,6 +414,56 @@ def test_resume_rejects_foreign_root_code_and_protocol(
     with pytest.raises(ValueError, match=expected):
         benchmark.main(["--resume", "--output-dir", str(output)])
     assert len(env.runner.training) == before
+
+
+@pytest.mark.parametrize("resource", ["gpu", "wall"])
+def test_benchmark_resource_limits_reach_real_training_and_evaluation(
+    setup_benchmark, monkeypatch, resource,
+):
+    from time import time
+    import agent.agents.hpo_agent as module
+    from agent.hpo.resources import CampaignResourceBudget
+
+    env = setup_benchmark
+    cfg = benchmark.read_json(env.config)
+    cfg.update(device="cuda:0", ddp_devices=[0, 1, 2])
+    cfg.update({"max_gpu_hours": 4 / 3600} if resource == "gpu" else {"max_wall_seconds": 2})
+    benchmark.write_json(env.config, cfg)
+    now = [time() + 100]
+    monkeypatch.setattr(module, "CampaignResourceBudget", lambda *a, **k: CampaignResourceBudget(*a, clock=lambda: now[0], **k))
+    original_training = env.runner.run_training
+    original_evaluation = env.runner.run_evaluation
+
+    def train(*args, **kwargs):
+        assert args[1]["_hpo_max_duration_seconds"] > 0
+        result = original_training(*args, **kwargs)
+        now[0] += 1
+        return result
+
+    def evaluate(*args, **kwargs):
+        assert kwargs["overrides"]["_hpo_max_duration_seconds"] > 0
+        result = original_evaluation(*args, **kwargs)
+        now[0] += 1
+        return result
+
+    monkeypatch.setattr(env.runner, "run_training", train)
+    monkeypatch.setattr(env.runner, "run_evaluation", evaluate)
+    assert benchmark.main(env.args + ["--only", "random_search"]) == 1
+    assert len(env.runner.training) == len(env.runner.evaluations) == 1
+    result = benchmark.read_json(env.output / "results.json")[0]
+    assert result["study_status"] == "cancelled"
+    assert result["confirmation_satisfied"] is False
+    assert result["resource_budget"]["gpu_seconds"] == 4  # three GPUs training, one GPU verification
+    assert result["resource_budget"]["stop_reason"]
+    agent_result = benchmark.read_json(Path(result["run_dir"]) / "agent_result.json")
+    assert agent_result["experiment_ids"]["hpo"] == result["experiment_id"]
+    assert not (Path(result["run_dir"]) / "locked_winner.json").exists()
+    ledgers = list((Path(result["run_dir"]) / "hpo" / "campaign_resources").glob("*.json"))
+    assert len(ledgers) == 1
+    assert len(benchmark.read_json(ledgers[0])["stages"]) == 2
+    # Ordinary benchmark resume must not start further work for an exhausted run.
+    assert benchmark.main(["--resume", "--output-dir", str(env.output)]) == 1
+    assert len(env.runner.training) == 1
 
 
 def test_different_output_roots_share_real_runner_exclusion(

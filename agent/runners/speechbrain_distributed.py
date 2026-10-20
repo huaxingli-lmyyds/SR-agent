@@ -274,10 +274,7 @@ def run_distributed_training(
             raise
     result = _read_result(result_path)
     if process.returncode != 0:
-        error = (
-            result.get("error")
-            if result else f"torchrun exited with code {process.returncode}"
-        )
+        error = _distributed_failure_message(result_path, log_path, result, process.returncode)
         result = {
             **result,
             "status": "failed",
@@ -296,6 +293,27 @@ def run_distributed_training(
     })
     result["process_exitcode"] = process.returncode
     return result
+
+
+def _distributed_failure_message(result_path: Path, log_path: Path, result: dict, exitcode: int) -> str:
+    """Prefer a failing rank's root cause to a generic launcher exit code."""
+    from agent.hpo.policies import FailurePolicy
+    failures = [_read_result(path) for path in sorted(result_path.parent.glob(f"{result_path.stem}.rank*.json"))]
+    failures = [item for item in [*failures, result] if item.get("error")]
+    if failures:
+        shared = next((item for item in failures if FailurePolicy().classify(item["error"]).scope == "study"), None)
+        oom = next((item for item in failures if "out of memory" in str(item["error"]).lower()), None)
+        return str((shared or oom or failures[0])["error"])
+    # Early import/bootstrap/native failures may not produce JSON. Read a bounded
+    # log tail, never the entire potentially multi-GB training log.
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 65536))
+            tail = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        tail = ""
+    return f"torchrun exited with code {exitcode}" + (f"\n{tail}" if tail else "")
 
 
 def _selected_visible_devices(devices: list[int]) -> str:

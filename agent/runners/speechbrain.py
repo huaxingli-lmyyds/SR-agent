@@ -209,10 +209,15 @@ def _run_speechbrain_training_with_timeout(
 def _run_speechbrain_training_process(
     connection: Any, config_path: str, overrides: Dict[str, Any]
 ) -> None:
-    from .speechbrain_backend import run_training
-
     try:
+        from .speechbrain_backend import run_training
         connection.send(run_training(config_path, overrides))
+    except Exception as exc:
+        import traceback
+        connection.send({
+            "status": "failed", "valid_error_rate": None,
+            "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        })
     finally:
         connection.close()
 
@@ -232,6 +237,11 @@ def _run_speechbrain_evaluation_isolated(
     and can reserve almost all memory on the first visible GPU.  A spawned
     process gives both resources an unambiguous lifetime.
     """
+    overrides = dict(overrides)
+    timeout = overrides.pop("_hpo_max_duration_seconds", None)
+    if timeout is not None:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("_hpo_max_duration_seconds must be a finite positive number")
     context = multiprocessing.get_context("spawn")
     receive_connection, send_connection = context.Pipe(duplex=False)
     process = context.Process(
@@ -248,8 +258,17 @@ def _run_speechbrain_evaluation_isolated(
         process.start()
         send_connection.close()
         ready = wait_for_process_io(
-            [receive_connection, process.sentinel], None
+            [receive_connection, process.sentinel], timeout
         )
+        if not ready:
+            return {
+                "status": "failed",
+                "error": f"TimeoutError: evaluation exceeded {timeout} seconds",
+                "terminated_by_budget": True,
+                "timeout_seconds": timeout,
+                "eer": None, "min_dcf": None,
+                "output_folder": None, "scores_path": None,
+            }
         result = None
         if receive_connection in ready:
             try:
@@ -305,9 +324,8 @@ def _run_speechbrain_evaluation_process(
     data_folder: Optional[str],
     overrides: Dict[str, Any],
 ) -> None:
-    from .speechbrain_backend import run_evaluation
-
     try:
+        from .speechbrain_backend import run_evaluation
         connection.send(
             run_evaluation(
                 config_path=config_path,
@@ -317,10 +335,11 @@ def _run_speechbrain_evaluation_process(
             )
         )
     except BaseException as exc:
+        import traceback
         connection.send(
             {
                 "status": "failed",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
                 "eer": None,
                 "min_dcf": None,
                 "output_folder": None,

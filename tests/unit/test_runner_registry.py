@@ -393,6 +393,55 @@ def test_evaluation_cleanup_drops_recipe_cuda_references() -> None:
     assert calls == ["synchronize", "empty_cache", "ipc_collect"]
 
 
+def test_evaluation_budget_timeout_terminates_worker_and_strips_override(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+
+    class Connection:
+        def close(self):
+            pass
+
+    class Process:
+        sentinel = object()
+        alive = True
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            calls.append("terminated")
+            self.alive = False
+
+        def join(self, timeout):
+            calls.append(("join", timeout))
+
+    process = Process()
+
+    def create_process(**kwargs):
+        assert kwargs["args"][-1] == {"output_folder": "evaluation"}
+        return process
+
+    monkeypatch.setattr(speechbrain_runner_module.multiprocessing, "get_context", lambda _: SimpleNamespace(
+        Pipe=lambda **_: (Connection(), Connection()), Process=create_process,
+    ))
+
+    def wait(objects, timeout):
+        assert timeout == 2.5
+        return []
+
+    monkeypatch.setattr(speechbrain_runner_module, "wait_for_process_io", wait)
+    result = SpeechBrainRunnerAdapter().run_evaluation(
+        "unused.yaml", "checkpoint", "data", {"output_folder": "evaluation", "_hpo_max_duration_seconds": 2.5},
+    )
+    assert result["status"] == "failed"
+    assert result["terminated_by_budget"] is True
+    assert "TimeoutError: evaluation" in result["error"]
+    assert "terminated" in calls
+
+
 def test_ddp_device_parser_and_explicit_plan_are_deterministic() -> None:
     class FakeDistributed:
         @staticmethod
@@ -579,3 +628,75 @@ def test_ddp_auto_single_gpu_fallback_keeps_timeout_guard(monkeypatch) -> None:
     )
     assert captured["overrides"]["_hpo_max_duration_seconds"] == 5
     assert captured["overrides"]["_run_opts"] == {}
+
+
+@pytest.mark.parametrize("stage", ["training", "evaluation"])
+def test_child_import_error_is_returned_instead_of_generic_exit_code(monkeypatch, stage):
+    import builtins
+    from agent.hpo import FailurePolicy
+    original_import = builtins.__import__
+    results = []
+
+    def failing_import(name, *args, **kwargs):
+        if name == "speechbrain_backend":
+            raise ModuleNotFoundError("required backend dependency")
+        return original_import(name, *args, **kwargs)
+
+    class Connection:
+        closed = False
+
+        def send(self, result):
+            results.append(result)
+
+        def close(self):
+            self.closed = True
+
+    connection = Connection()
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", failing_import)
+        if stage == "training":
+            speechbrain_runner_module._run_speechbrain_training_process(connection, "unused", {})
+        else:
+            speechbrain_runner_module._run_speechbrain_evaluation_process(connection, "unused", None, None, {})
+    assert connection.closed
+    assert results[0]["status"] == "failed"
+    assert "ModuleNotFoundError" in results[0]["error"]
+    assert FailurePolicy().classify(results[0]["error"]).scope == "study"
+
+
+def test_ddp_nonzero_rank_retains_cause_for_launcher(monkeypatch, tmp_path):
+    import json
+    import agent.runners.speechbrain_backend as backend
+    from agent.runners import speechbrain_ddp_worker as worker
+    from agent.runners.speechbrain_distributed import _distributed_failure_message
+    from agent.hpo import FailurePolicy
+    request_path = tmp_path / "request.json"
+    result_path = tmp_path / "result_launch.json"
+    request_path.write_text(json.dumps({
+        "config_path": "unused.yaml", "overrides": {}, "result_path": str(result_path),
+        "plan": {"backend": "nccl", "world_size": 2, "devices": [0, 1], "batch_size_semantics": "global"},
+    }), encoding="utf-8")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    monkeypatch.setenv("RANK", "1")
+
+    def broken(*args):
+        raise ModuleNotFoundError("shared backend dependency")
+
+    monkeypatch.setattr(backend, "run_training", broken)
+    assert worker.main(["--request-file", str(request_path)]) == 1
+    assert not result_path.exists()
+    sidecar = json.loads((tmp_path / "result_launch.rank1.json").read_text())
+    assert sidecar["rank"] == 1
+    assert "ModuleNotFoundError" in sidecar["error"]
+    message = _distributed_failure_message(result_path, tmp_path / "missing.log", {}, 1)
+    assert FailurePolicy().classify(message).scope == "study"
+
+
+def test_ddp_bootstrap_failure_reads_bounded_log_tail(tmp_path):
+    from agent.runners.speechbrain_distributed import _distributed_failure_message
+    from agent.hpo import FailurePolicy
+    log = tmp_path / "launcher.log"
+    log.write_text("unused old output\n" * 10000 + "[rank2]: ImportError: incompatible shared library\nChildFailedError: workers failed\n", encoding="utf-8")
+    message = _distributed_failure_message(tmp_path / "result.json", log, {}, 1)
+    assert len(message.encode()) < 66000
+    assert FailurePolicy().classify(message).scope == "study"

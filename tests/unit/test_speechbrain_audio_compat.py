@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import pickle
 from pathlib import Path
 
 import pytest
@@ -15,6 +17,33 @@ def test_voxceleb_recipes_use_project_audio_compat_layer() -> None:
         source = (project_root / relative).read_text(encoding="utf-8")
         assert "from recipes.voxceleb.audio_compat import audio_io" in source
         assert "from speechbrain.dataio import audio_io" not in source
+
+
+def test_verification_audio_pipeline_is_module_level() -> None:
+    source = Path("recipes/voxceleb/speaker_verification_cosine.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "audio_pipeline"
+        for node in tree.body
+    )
+    dataio_prep = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "dataio_prep"
+    )
+    assert not any(
+        isinstance(node, ast.FunctionDef) and node.name == "audio_pipeline"
+        for node in ast.walk(dataio_prep)
+    )
+
+
+def test_verification_audio_pipeline_is_pickleable() -> None:
+    pytest.importorskip("speechbrain")
+    from recipes.voxceleb import speaker_verification_cosine
+
+    pipeline = speaker_verification_cosine.audio_pipeline
+    assert pickle.loads(pickle.dumps(pipeline)) is pipeline
 
 
 def test_audio_compat_exposes_load_function() -> None:

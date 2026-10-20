@@ -161,6 +161,9 @@ def positive_int(value, name):
 
 
 def validate_config(config):
+    from agent.hpo.resources import positive_limit
+    for name in ("max_gpu_hours", "max_wall_seconds"):
+        positive_limit(config.get(name), name)
     prep_seed = config.setdefault("data_prep_seed", 0)
     if type(prep_seed) is not int or not 0 <= prep_seed < 2**32 - 1:
         raise ValueError(
@@ -852,6 +855,7 @@ def run_variant(plan, item, output):
             },
         },
         budget={
+            **{key: config[key] for key in ("max_gpu_hours", "max_wall_seconds") if config.get(key) is not None},
             "max_training_runs": spec["max_training_runs"],
             "max_total_training_runs": spec["max_training_runs"],
             "max_studies": 1,
@@ -926,6 +930,10 @@ def run_variant(plan, item, output):
         trials = service.list_trials(record["experiment_id"])
         summary["training_runs"] = service.training_runs_used(study)
         summary["study_status"] = study.status
+        summary["failure_guard"] = dict(study.scheduler_state.get("failure_guard") or {})
+        summary["resource_budget"] = dict(
+            (record.get("extensions") or {}).get("optimization", {}).get("resource_budget") or {}
+        )
         summary["strategy_reviews"] = len(study.strategy_reviews)
         summary["search_phases"] = study.search_phases
         if (
@@ -1014,12 +1022,21 @@ def run_variant(plan, item, output):
             )
             for e in attempts
         )
+        summary[f"{stage}_gpu_seconds"] = sum(
+            float(e.get("attempt_cost", {}).get(f"attempt_{stage}_gpu_seconds") or 0)
+            for e in attempts
+        )
+    summary["gpu_hours"] = (
+        summary["resource_budget"]["gpu_hours"] if summary.get("resource_budget")
+        else (summary["training_gpu_seconds"] + summary["evaluation_gpu_seconds"]) / 3600
+    )
     sessions = read_events(run_dir / "sessions.jsonl")
     summary["wall_seconds"] = sum(
         e.get("duration_seconds", 0) for e in sessions
     )
     summary["cost_may_be_incomplete"] = (
-        sum(e.get("event") == "started" for e in sessions)
+        bool(summary.get("resource_budget", {}).get("cost_may_be_incomplete"))
+        or sum(e.get("event") == "started" for e in sessions)
         != sum(e.get("event") == "finished" for e in sessions)
         or sum(
             e.get("event") == "started"
@@ -1130,6 +1147,9 @@ def export_results(plan, output):
         "training_runs",
         "training_seconds",
         "evaluation_seconds",
+        "training_gpu_seconds",
+        "evaluation_gpu_seconds",
+        "gpu_hours",
         "wall_seconds",
         "advisor_requests",
         "advisor_seconds",
@@ -1482,6 +1502,20 @@ def validate_speechbrain_inputs(plan):
                     raise ValueError(f"missing {split} audio: {path}")
 
 
+def read_run_failure_guard(run_dir):
+    """Read the durable Study guard even if final result export was interrupted."""
+    result_path = run_dir / "result.json"
+    if result_path.exists():
+        guard = read_json(result_path).get("failure_guard") or {}
+        if guard.get("status") == "open":
+            return guard
+    for path in sorted((run_dir / "hpo").glob("*/hpo_study/study.json")):
+        guard = (read_json(path).get("scheduler_state") or {}).get("failure_guard") or {}
+        if guard.get("status") == "open":
+            return guard
+    return {}
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     if args.resume or args.evaluate_test:
@@ -1532,6 +1566,17 @@ def main(argv=None):
                     / "sr-agent-speechbrain-benchmark"
                 )
             )
+        # A shared backend failure applies to the other groups and seeds too.
+        # Resume must not skip that failed run and start the next expensive one.
+        for item in plan["run_order"]:
+            if read_run_failure_guard(output / "runs" / item["run_id"]):
+                export_results(plan, output)
+                print(
+                    f"System failure guard is open for {item['run_id']}; "
+                    "remaining groups/seeds are blocked. Inspect its result.json.",
+                    file=sys.stderr,
+                )
+                return 1
         if args.evaluate_test:
             prepare_assets(plan, output)
             rows = evaluate_test(plan, output)
@@ -1556,19 +1601,43 @@ def main(argv=None):
                 )
                 return 130
             except Exception as exc:
+                from agent.hpo import FailurePolicy
+
+                error = f"{type(exc).__name__}: {exc}"
+                guard = read_run_failure_guard(run_dir)
+                if not guard and FailurePolicy().classify(error).scope == "study":
+                    guard = {
+                        "status": "open", "reason_code": "benchmark_system_error",
+                        "failure_stage": "benchmark",
+                        "fingerprint": FailurePolicy.fingerprint(error, "benchmark"),
+                        "error_summary": FailurePolicy.root_error(error),
+                        "trial_ids": [],
+                    }
                 run_dir.mkdir(parents=True, exist_ok=True)
+                previous_result = read_json(run_dir / "result.json") if (run_dir / "result.json").exists() else {}
                 write_json(
                     run_dir / "result.json",
                     {
+                        **previous_result,
                         **item,
+                        "run_dir": str(run_dir),
                         "status": "failed",
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": error,
                         "validation_eer": None,
+                        "validation_min_dcf": None,
                         "confirmation_satisfied": False,
                         "cost_may_be_incomplete": True,
+                        "failure_guard": guard,
                     },
                 )
             export_results(plan, output)
+            if read_run_failure_guard(run_dir):
+                print(
+                    f"System failure in {item['run_id']}; remaining groups/seeds are blocked. "
+                    "Inspect its result.json and repair the cause before a new benchmark.",
+                    file=sys.stderr,
+                )
+                return 1
         results = export_results(plan, output)
         print(f"Results: {output / 'results.csv'}")
         return int(any(r["status"] != "success" for r in results))

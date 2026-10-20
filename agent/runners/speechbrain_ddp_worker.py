@@ -40,9 +40,20 @@ def main(argv: list[str] | None = None) -> int:
         run_opts.pop(key, None)
     overrides["_run_opts"] = run_opts
 
-    from .speechbrain_backend import run_training
-
-    result = run_training(str(request["config_path"]), overrides)
+    try:
+        from .speechbrain_backend import run_training
+        result = run_training(str(request["config_path"]), overrides)
+    except Exception as exc:
+        import traceback
+        result = {
+            "status": "failed", "valid_error_rate": None,
+            "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        }
+    if result.get("status") != "success":
+        # Any rank can fail first. Preserve its cause before torchrun replaces
+        # the other ranks with SIGTERM/ChildFailedError noise.
+        path = Path(request["result_path"])
+        _write_json_atomic(path.with_name(f"{path.stem}.rank{global_rank}.json"), {**result, "rank": global_rank})
     if global_rank == 0:
         _write_json_atomic(Path(request["result_path"]), result)
     return 0 if result.get("status") == "success" else 1

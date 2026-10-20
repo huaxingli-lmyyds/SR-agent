@@ -27,6 +27,7 @@ patch_torchaudio_compatibility()
 import speechbrain as sb
 from recipes.voxceleb.audio_compat import audio_io
 from recipes.voxceleb.batch_compat import with_padded_batch
+from recipes.voxceleb.score_normalization import CohortStatistics, validate_cohort_size
 from recipes.voxceleb.verification_compat import parse_verification_pair
 from speechbrain.utils.data_utils import download_file
 from speechbrain.utils.distributed import run_on_main
@@ -102,24 +103,23 @@ def score_norm_mode(configuration=None):
         raise ValueError(
             "score_norm must be one of: z-norm, t-norm, s-norm, none/off"
         )
+    validate_cohort_size(configuration.get("cohort_size"))
     return value
 
 def get_verification_scores(veri_test):
     """Computes positive and negative scores given the verification split."""
-    scores = []
     positive_scores = []
     negative_scores = []
-
-    save_file = os.path.join(params["output_folder"], "scores.txt")
-    s_file = open(save_file, "w", encoding="utf-8")
 
     # Cosine similarity initialization
     similarity = torch.nn.CosineSimilarity(dim=-1, eps=1e-6)
     norm_mode = score_norm_mode()
 
-    # creating cohort for score normalization
-    if norm_mode:
-        train_cohort = torch.stack(list(train_dict.values()))
+    cohort_stats = (
+        CohortStatistics(train_dict, params.get("cohort_size")) if norm_mode else None
+    )
+    save_file = os.path.join(params["output_folder"], "scores.txt")
+    s_file = open(save_file, "w", encoding="utf-8")
 
     for i, line in enumerate(veri_test):
         # Reading verification file (label enrol_file test_file)
@@ -134,30 +134,10 @@ def get_verification_scores(veri_test):
         enrol = enrol_dict[enrol_id]
         test = test_dict[test_id]
 
-        if norm_mode:
-            # Getting norm stats for enrol impostors
-            enrol_rep = enrol.repeat(train_cohort.shape[0], 1, 1)
-            score_e_c = similarity(enrol_rep, train_cohort)
-
-            if "cohort_size" in params:
-                score_e_c = torch.topk(
-                    score_e_c, k=params["cohort_size"], dim=0
-                )[0]
-
-            mean_e_c = torch.mean(score_e_c, dim=0)
-            std_e_c = torch.std(score_e_c, dim=0)
-
-            # Getting norm stats for test impostors
-            test_rep = test.repeat(train_cohort.shape[0], 1, 1)
-            score_t_c = similarity(test_rep, train_cohort)
-
-            if "cohort_size" in params:
-                score_t_c = torch.topk(
-                    score_t_c, k=params["cohort_size"], dim=0
-                )[0]
-
-            mean_t_c = torch.mean(score_t_c, dim=0)
-            std_t_c = torch.std(score_t_c, dim=0)
+        if norm_mode in {"z-norm", "s-norm"}:
+            mean_e_c, std_e_c = cohort_stats.get(f"enrol:{enrol_id}", enrol)
+        if norm_mode in {"t-norm", "s-norm"}:
+            mean_t_c, std_t_c = cohort_stats.get(f"test:{test_id}", test)
 
         # Compute the score for the given sentence
         score = similarity(enrol, test)[0]
@@ -175,8 +155,6 @@ def get_verification_scores(veri_test):
 
         # write score file
         s_file.write("%s %s %i %f\n" % (enrol_id, test_id, lab_pair, score))
-        scores.append(score)
-
         if lab_pair == 1:
             positive_scores.append(score)
         else:
@@ -184,6 +162,20 @@ def get_verification_scores(veri_test):
 
     s_file.close()
     return positive_scores, negative_scores
+
+
+@sb.utils.data_pipeline.takes("wav", "start", "stop")
+@sb.utils.data_pipeline.provides("sig")
+def audio_pipeline(wav, start, stop):
+    """Load a verification segment in a DataLoader-worker-safe pipeline."""
+    start = int(start)
+    stop = int(stop)
+    num_frames = stop - start
+    sig, _sample_rate = audio_io.load(
+        wav, num_frames=num_frames, frame_offset=start
+    )
+    return sig.transpose(0, 1).squeeze(1)
+
 
 def dataio_prep(params):
     "Creates the dataloaders and their data processing pipelines."
@@ -220,17 +212,6 @@ def dataio_prep(params):
     datasets = [enrol_data, test_data]
     if train_data is not None:
         datasets.insert(0, train_data)
-
-    # Define audio pipeline
-    @sb.utils.data_pipeline.takes("wav", "start", "stop")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav, start, stop):
-        start = int(start)
-        stop = int(stop)
-        num_frames = stop - start
-        sig, fs = audio_io.load(wav, num_frames=num_frames, frame_offset=start)
-        sig = sig.transpose(0, 1).squeeze(1)
-        return sig
 
     sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
 

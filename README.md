@@ -144,6 +144,44 @@ hashes). A merely similar metric or dataset name is not considered comparable.
 training runs in a child process; a run that exceeds the deadline is terminated
 and recorded with `terminated_by_budget`, timeout, exit code, and failure status.
 
+The HPO scheduler stops the Study immediately for shared program, dependency,
+data-file, or device-configuration failures. Two consecutive distinct Trials
+with the same unknown execution error in the same stage also open the failure
+guard. Repeated identical connection/worker failures are also bounded: two
+distinct Trials or three consecutive attempts (including retries) open the guard.
+Unknown non-OOM CUDA failures use this bounded path too, rather than treating
+every CUDA error as candidate-specific memory pressure.
+PID/worker/rank IDs are normalized so process restarts do not evade this check.
+OOM, timeouts, invalid metrics, and candidate-validation failures remain
+Trial-level failures. An open guard prevents further training, promotion, and
+LLM reviews; existing checkpoints and queued Trials are retained. Inspect
+`hpo_study/study.json` under `scheduler_state.failure_guard`, or the experiment
+record under `extensions.optimization.study.failure_guard`, for the error,
+stage, fingerprint, and affected Trial IDs.
+Scheduler-node exceptions also open the guard immediately, with the node name
+and a bounded traceback. Single-process training/verification return import and
+runtime exception causes instead of only process exit codes. DDP workers retain
+per-rank failure JSON alongside their per-launch result; the parent prefers a
+shared root cause over torchrun wrapper errors, with a bounded launcher-log tail
+as fallback. Disk-full, dependency/ABI, fork/CUDA, interface-signature and missing-
+checkpoint contract errors are shared failures, not reasons to train a new candidate.
+The enclosing Campaign is recorded as `failed`, with its source Study identified
+in `extensions.optimization.campaign_failure_guard`. Resuming an older successful
+Study cannot bypass the source Study's live open guard.
+The five-group benchmark also stops subsequent groups/seeds and retains the
+open guard in the failed run's `result.json`, including across benchmark resume.
+
+After repairing the underlying cause, explicitly unblock the remaining work:
+
+```bash
+python main.py --resume-experiment-id EXPERIMENT_ID --reset-failure-guard
+```
+
+Retain the original controller/LLM settings when resuming. Resetting the guard
+is recorded and does not automatically rerun failed Trials. An ordinary resume
+keeps the guard open. The five-group benchmark still enforces its frozen source
+hashes; changed code requires a new benchmark output directory.
+
 One Trial can optionally use multiple visible GPUs through SpeechBrain DDP. Keep
 the HPO controller as one normal Python process; it launches `torchrun` only for
 the selected Trial, and only rank zero returns the result to the Study:
@@ -228,6 +266,60 @@ python scripts/evaluation/evaluate_checkpoint.py \
 The command writes per-pair cosine scores to `scores.txt` and the EER/minDCF
 summary to `evaluation_result.json`. The verification YAML must match the
 checkpoint architecture; use `--config` when evaluating another model.
+
+## Campaign GPU-hour and wall-time budgets
+
+HPO accepts `max_gpu_hours` and `max_wall_seconds` in `AgentTaskRequest.budget`.
+Both are optional finite positive numbers. CLI users can append, for example:
+
+```bash
+--max-gpu-hours 72 --max-wall-seconds 86400
+```
+
+For `scripts/experiments/run_hpo_benchmark.py`, add the same keys to its JSON
+configuration. These limits apply **separately to each group/seed Campaign**, not
+to the sum of all five groups. Without these keys, existing run-count budgeting
+is unchanged. All configured ceilings apply together; the first exhausted one
+stops scheduling. Declared `resource_profile` limits (`gpu_hours`, `wall_seconds`,
+their `*_remaining` aliases, or the canonical `max_*` keys) are enforced too;
+when multiple limits are supplied, the tighter allowance wins.
+
+- GPU hours mean stage elapsed time times allocated GPU count. Three-card DDP
+  training for one hour costs three GPU hours; one-hour verification costs one.
+  CPU stages cost zero GPU hours. This is not a GPU-utilization/energy measure.
+  Training, verification, failed attempts and retries all enter the ledger.
+- Wall time starts when the Campaign is created, before LLM planning. It includes
+  planning/review, training, verification and retry delays. Its original deadline
+  survives resume, **including time spent paused/offline**. Benchmark asset
+  preparation and the separately requested held-out final test are outside this
+  optimization Campaign allowance.
+- Before each stage, remaining wall time, remaining GPU allowance divided by
+  GPU count, and the Trial's training duration cap determine the effective
+  timeout. SpeechBrain single-card/DDP training and isolated verification stop
+  their worker on timeout. LLM requests also use the remaining wall allowance,
+  without SDK retries extending that deadline. Worker termination and record
+  cleanup may add a small overrun; that time is charged, not hidden. Custom
+  runners must honor the `_hpo_max_duration_seconds` override themselves.
+- Scheduling, promotion, review and retries stop on resource exhaustion. An
+  interrupted Study is `cancelled`, its result is not reported as a successful
+  full search, and existing checkpoints/results are preserved. Resource
+  exhaustion is distinct from the system-failure circuit breaker.
+- The authoritative journal is
+  `<experiments_dir>/campaign_resources/<campaign_id>.json`, shared across all
+  Studies of that Campaign. It records each attempt/stage, GPU count, elapsed
+  time and recovery estimates. `extensions.optimization.resource_budget` and
+  Study `scheduler_state.resource_budget` expose consumed/remaining allowance
+  and the stop reason. Benchmark `results.json`/`results.csv` include GPU costs.
+- Resume reloads the ledger; limits cannot be increased or reset. Two controllers
+  cannot spend one ledger concurrently. A hard crash with an unsettled stage
+  conservatively charges its reserved allowance (or longer observed elapsed
+  time) and marks `cost_may_be_incomplete`, rather than silently refunding it.
+  Resume only after the previous training/evaluation workers have stopped.
+  Old Campaigns without a ledger cannot acquire new resource limits on resume,
+  because their historical costs are unverified; start a new Campaign instead.
+
+Benchmark source hashes are frozen: after updating code, use a **new output
+directory** rather than resuming an experiment created with older sources.
 
 ## Add a New Model
 

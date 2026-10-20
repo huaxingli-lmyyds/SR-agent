@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from hashlib import sha256
 from math import isfinite, prod
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .contracts import (
@@ -29,6 +31,7 @@ class FailureDecision:
     category: str
     recoverable: bool
     retry_delay_seconds: float = 0.0
+    scope: str = "trial"
 
 
 class FailurePolicy:
@@ -52,19 +55,96 @@ class FailurePolicy:
         "missing",
     )
 
+    SYSTEM_ERROR_TYPES = (
+        "attributeerror:", "nameerror:", "unboundlocalerror:",
+        "importerror:", "modulenotfounderror:", "syntaxerror:",
+        "indentationerror:", "filenotfounderror:", "permissionerror:",
+        "picklingerror:", "unpicklingerror:",
+        "scannererror:", "parsererror:", "constructorerror:",
+    )
+    SYSTEM_ERROR_MARKERS = (
+        "can't get local object", "can't pickle", "cannot pickle",
+        "config not found", "config file not found",
+        "verification_pairs file not found", "validation_pairs file not found",
+        "training_exclusion_pairs file not found",
+        "invalid hpo verification_config", "persisted hpo validation input changed",
+        "missing enrol embedding", "missing test embedding",
+        "cannot open shared object file", "dll load failed",
+        "unexpected sample rate", "format not recognised", "error opening ",
+        "invalid device ordinal", "no cuda gpus are available",
+        "no kernel image is available", "not compiled with cuda enabled",
+        "cuda driver version is insufficient", "insufficient shared memory",
+        "bus error",
+        "no space left on device", "disk quota exceeded", "too many open files",
+        "cannot re-initialize cuda in forked subprocess",
+        "distributed package doesn't have nccl built in",
+        "numpy.dtype size changed",
+        "missing checkpoint artifact from current training attempt",
+        "unexpected keyword argument", "got multiple values for argument",
+        "required positional argument",
+    )
+
+    @staticmethod
+    def root_error(error: Optional[str]) -> str:
+        """Ignore traceback source lines when classifying the actual exception."""
+        text = str(error or "").strip()
+        matches = re.findall(
+            r"(?m)^\s*(?:\[rank\d+\]:\s*)?((?:\w+\.)*[A-Za-z_]\w*(?:Error|Exception)|Exception):\s*([^\n]*)",
+            text,
+        )
+        if matches:
+            # Preserve a typed underlying cause hidden by a generic RuntimeError
+            # or torchrun ChildFailedError wrapper; never classify source lines.
+            for kind, message in reversed(matches):
+                normalized = f"{kind}: {message.strip()}".lower()
+                if kind.lower().rsplit(".", 1)[-1] + ":" in FailurePolicy.SYSTEM_ERROR_TYPES or any(
+                    marker in normalized for marker in FailurePolicy.SYSTEM_ERROR_MARKERS
+                ):
+                    return f"{kind}: {message.strip()}"
+            for kind, message in reversed(matches):
+                if "out of memory" in message.lower() or kind.lower().rsplit(".", 1)[-1] in {"timeouterror", "invalidmetricerror"}:
+                    return f"{kind}: {message.strip()}"
+            kind, message = matches[-1]
+            return f"{kind}: {message.strip()}"
+        return text.splitlines()[0] if text else "trial execution failed"
+
+    @classmethod
+    def fingerprint(cls, error: Optional[str], stage: str) -> str:
+        """Match a shared failure even when Trial paths or addresses change."""
+        text = cls.root_error(error).lower()
+        text = re.sub(r"(?:[a-z]:[\\/]|/)[^\s\"']+", "<path>", text)
+        text = re.sub(r"\btrial_[a-z0-9_]+\b|\b0x[0-9a-f]+\b", "<id>", text)
+        text = re.sub(r"\b(pid|process|worker|rank)\s*[:=]?\s*\d+\b", r"\1 <id>", text)
+        return sha256(f"{stage}:{text}".encode("utf-8")).hexdigest()[:20]
+
     def classify(self, error: Optional[str]) -> FailureDecision:
-        text = str(error or "").lower()
+        text = self.root_error(error).lower()
         if "invalidmetricerror" in text or "invalid metric " in text:
             return FailureDecision("invalid_metric", False)
-        if any(marker in text for marker in self.NON_RECOVERABLE_MARKERS):
-            return FailureDecision("configuration", False)
+        exception_type = text.split(":", 1)[0].rsplit(".", 1)[-1] + ":"
+        if exception_type in self.SYSTEM_ERROR_TYPES or any(
+            marker in text for marker in self.SYSTEM_ERROR_MARKERS
+        ):
+            return FailureDecision("infrastructure", False, scope="study")
+        # Resource errors can mention a config path; classify the exception,
+        # not incidental source text in its traceback.
         if "timeout" in text:
             return FailureDecision("timeout", True)
-        if "out of memory" in text or "cuda" in text:
+        if "out of memory" in text:
             return FailureDecision("resource", True)
+        if any(marker in text for marker in self.NON_RECOVERABLE_MARKERS):
+            return FailureDecision("configuration", False)
         if any(marker in text for marker in self.RECOVERABLE_MARKERS):
             return FailureDecision("transient", True)
         return FailureDecision("execution", False)
+
+
+class SystemFailureBlocked(RuntimeError):
+    """A persistent Study guard must also stop its enclosing Campaign."""
+
+    def __init__(self, message: str, guard: Dict[str, Any]) -> None:
+        super().__init__(message)
+        self.guard = dict(guard)
 
 
 class RetryPolicy:

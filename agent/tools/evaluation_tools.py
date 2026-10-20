@@ -69,6 +69,7 @@ def _run_evaluation(
     device: Optional[str] = None,
     precision: Optional[str] = None,
     eval_precision: Optional[str] = None,
+    runtime_deadline_epoch: Optional[float] = None,
 ) -> str:
     """Evaluate a recorded model and return a structured operation result."""
     tracker = ExperimentTracker(experiments_dir)
@@ -222,6 +223,14 @@ def _run_evaluation(
         overrides["verification_file"] = pairs_path
     if run_opts:
         overrides["_run_opts"] = run_opts
+    if runtime_deadline_epoch is not None:
+        from time import time
+        from agent.hpo.resources import positive_limit, ResourceBudgetExhausted
+        positive_limit(runtime_deadline_epoch, "runtime_deadline_epoch")
+        remaining = runtime_deadline_epoch - time()
+        if remaining <= 0:
+            raise ResourceBudgetExhausted("resource budget expired during evaluation preparation")
+        overrides["_hpo_max_duration_seconds"] = remaining
     raw = runner_adapter.run_evaluation(
         config_path,
         model_path=model_path,
@@ -348,6 +357,7 @@ def RunEvaluation(
     device: Optional[str] = None,
     precision: Optional[str] = None,
     eval_precision: Optional[str] = None,
+    runtime_deadline_epoch: Optional[float] = None,
 ) -> str:
     """Evaluate through a registered runner and always return OperationResult JSON."""
     try:
@@ -367,12 +377,13 @@ def RunEvaluation(
             device=device,
             precision=precision,
             eval_precision=eval_precision,
+            runtime_deadline_epoch=runtime_deadline_epoch,
         )
     except Exception as exc:
         return OperationResult(
             status="failed",
             stage="evaluation",
-            error=str(exc),
+            error=f"{type(exc).__name__}: {exc}",
             experiment_id=experiment_id,
         ).to_json()
 

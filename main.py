@@ -83,6 +83,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Resume the persisted HPO Study for an existing experiment id.",
     )
     parser.add_argument(
+        "--reset-failure-guard",
+        action="store_true",
+        help="After repairing a system failure, explicitly unblock a resumed HPO Study.",
+    )
+    parser.add_argument(
         "--max-training-runs",
         type=int,
         default=None,
@@ -90,6 +95,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-studies", type=int, default=1)
     parser.add_argument("--max-total-training-runs", type=int, default=None)
+    parser.add_argument("--max-gpu-hours", type=float, default=None,
+                        help="Campaign GPU-hour ceiling, including DDP, evaluation and retries.")
+    parser.add_argument("--max-wall-seconds", type=float, default=None,
+                        help="Campaign wall-clock deadline in seconds; persists across resume.")
     parser.add_argument("--campaign-patience", type=int, default=None)
     parser.add_argument("--campaign-min-improvement", type=float, default=0.0)
     parser.add_argument("--target-value", type=float, default=None)
@@ -250,6 +259,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         context["pruner"] = args.pruner
     if args.resume_experiment_id is not None:
         context["resume_experiment_id"] = args.resume_experiment_id
+    if args.reset_failure_guard:
+        if not args.resume_experiment_id:
+            raise SystemExit("--reset-failure-guard requires --resume-experiment-id")
+        context["reset_failure_guard"] = True
     if args.sampler_config_json is not None:
         if not isinstance(args.sampler_config_json, dict):
             raise SystemExit("--sampler-config-json must be a JSON object")
@@ -308,6 +321,12 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def build_budget(args: argparse.Namespace) -> dict[str, Any]:
+    from agent.hpo.resources import positive_limit
+    for name in ("max_gpu_hours", "max_wall_seconds"):
+        try:
+            positive_limit(getattr(args, name, None), name)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     if args.candidate_batch_size is not None and args.candidate_batch_size <= 0:
         raise SystemExit("--candidate-batch-size must be positive")
     budget: dict[str, Any] = {
@@ -320,6 +339,8 @@ def build_budget(args: argparse.Namespace) -> dict[str, Any]:
         "max_retries": args.max_retries,
     }
     optional_values = {
+        "max_gpu_hours": getattr(args, "max_gpu_hours", None),
+        "max_wall_seconds": getattr(args, "max_wall_seconds", None),
         "max_total_training_runs": args.max_total_training_runs,
         "campaign_patience": args.campaign_patience,
         "target_value": args.target_value,
