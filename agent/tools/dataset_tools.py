@@ -18,6 +18,8 @@ from agent.data_processing import (
     profile_from_dict,
     publish_dataset_version,
 )
+from agent.data_processing.contracts import QualityPolicy
+from agent.data_processing.scope import bind_evaluation_scope
 from agent.utils import ExperimentTracker, get_experiment_artifact_dir
 
 
@@ -64,6 +66,8 @@ def InspectDataset(
     task_type: str = "generic",
     max_files: int = 10000,
     experiment_id: Optional[str] = None,
+    quality_policy_json: Optional[str] = None,
+    training_exclusion_pairs: Optional[str] = None,
 ) -> str:
     """Inspect any local dataset and return a model-agnostic quality profile."""
     try:
@@ -75,7 +79,11 @@ def InspectDataset(
             task_type=task_type,
             max_files=max_files,
         )
-        profile = profile_dataset(dataset)
+        bind_evaluation_scope(dataset, training_exclusion_pairs)
+        policy = QualityPolicy.for_task(
+            task_type, _payload(quality_policy_json) if quality_policy_json else None
+        )
+        profile = profile_dataset(dataset, policy)
         profile_data = profile.to_dict()
         _update_lifecycle(
             experiment_id,

@@ -39,7 +39,11 @@ agent/results/
 agent/logs/
 agent/prep_cache/
 agent/memory/episodes.jsonl
+agent/memory/agent_memory.json
+agent/memory/working/
+experiment_results/
 experiment_archives/
+/result_v*/
 result_of_stage_*/
 results/
 save/
@@ -49,6 +53,8 @@ save/
 **/logs/
 **/train_log.txt
 **/*.log
+**/checkpoints/
+**/CKPT+*/
 **/model_checkpoints/
 **/pretrained_model_checkpoints/
 **/pretrained_models/
@@ -58,6 +64,12 @@ save/
 *.onnx
 *.safetensors
 scores.txt
+
+# Training dashboards and experiment-tracking output
+events.out.tfevents.*
+tensorboard/
+wandb/
+mlruns/
 
 # -----------------------------------------------------------------------------
 # Temporary files produced by tests, scripts, and local tooling

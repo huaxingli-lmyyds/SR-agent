@@ -6,14 +6,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from agent.tasks.speaker_verification import METRIC_PROTOCOL_ID, METRIC_UNITS
 from agent.utils import ConfigParser
 from agent.utils.path_tool import resolve_config_path, resolve_project_path
-
-METRIC_PROTOCOL_ID = "speaker_verification.v2.eer_ratio.mindcf_x100"
-METRIC_UNITS = {
-    "eer": "ratio_0_1",
-    "min_dcf": "x100",
-}
 
 
 def file_sha256(path: Path) -> str:

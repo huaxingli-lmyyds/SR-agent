@@ -7,6 +7,31 @@ def parse_args(*args):
     return build_arg_parser().parse_args(list(args))
 
 
+@pytest.mark.parametrize("status", ["success", "failed"])
+def test_cli_saves_result_and_returns_failure_exit_code(tmp_path, monkeypatch, status):
+    import json
+    import sys
+    from types import SimpleNamespace
+    import main
+
+    captured = {}
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run=lambda **_: SimpleNamespace(
+            status=status, experiment_id="test_run", to_dict=lambda: {"status": status},
+        ))
+    monkeypatch.setattr("agent.agents.orchestrator.CoordinatorAgent", create)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--output-dir", str(tmp_path)])
+    if status == "failed":
+        with pytest.raises(SystemExit) as error:
+            main.main()
+        assert error.value.code == 1
+    else:
+        main.main()
+    assert captured["output_dir"] == str(tmp_path)
+    assert json.loads((tmp_path / "result.json").read_text())["status"] == status
+
+
 def test_cli_resource_limits():
     budget = build_budget(parse_args("--max-gpu-hours", "48", "--max-wall-seconds", "86400"))
     assert budget["max_gpu_hours"] == 48
@@ -28,6 +53,16 @@ def test_cli_exposes_resume_experiment_id() -> None:
     args = parse_args("--resume-experiment-id", "hpo_abc123")
 
     assert build_context(args)["resume_experiment_id"] == "hpo_abc123"
+
+
+def test_evaluation_recovery_requires_explicit_resume():
+    with pytest.raises(SystemExit, match="requires --resume-experiment-id"):
+        build_context(parse_args("--retry-failed-evaluations"))
+    context = build_context(parse_args(
+        "--resume-experiment-id", "hpo_abc123", "--retry-failed-evaluations",
+    ))
+    assert context["retry_failed_evaluations"] is True
+    assert parse_args("--hpo-experiments-dir", "/tmp/recovered/hpo").hpo_experiments_dir == "/tmp/recovered/hpo"
 
 
 def test_cli_requires_explicit_resume_to_reset_failure_guard() -> None:

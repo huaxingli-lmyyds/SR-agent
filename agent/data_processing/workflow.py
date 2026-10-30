@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from .contracts import QualityPolicy
+from .scope import bind_evaluation_scope
 from .service import (
     build_processing_plan,
     execute_plan,
@@ -20,6 +21,7 @@ DataStrategyAdvisor = Callable[[Dict[str, Any]], Dict[str, Any]]
 
 
 class DataProcessingGraphState(TypedDict, total=False):
+    training_exclusion_pairs: str
     dataset_uri: str
     dataset_type: str
     task_type: str
@@ -114,7 +116,10 @@ class DataProcessingWorkflow:
             dataset_type=state.get("dataset_type", "auto"),
             task_type=state.get("task_type", "generic"),
         )
-        self._policy = QualityPolicy.from_dict(state.get("quality_policy"))
+        self._policy = QualityPolicy.for_task(
+            self._dataset.task_type, state.get("quality_policy")
+        )
+        bind_evaluation_scope(self._dataset, state.get("training_exclusion_pairs"))
         self._profile = profile_dataset(self._dataset, self._policy)
         return {"profile": self._profile.to_dict()}
 

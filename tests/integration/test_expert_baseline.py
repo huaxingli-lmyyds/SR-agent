@@ -445,5 +445,8 @@ raise SystemExit(main(sys.argv[1:]))
     assert plan["config"]["full_epochs"] == 10 and plan["config"]["seeds"] == [
         1986
     ]
-    assert plan["expert_parameters"]["batch_size"] == 32
+    from agent.utils import ConfigParser
+
+    supplied = ConfigParser(plan["config"]["train_config"]).load_config()
+    assert plan["expert_parameters"]["batch_size"] == supplied["batch_size"]
     assert not output.exists()

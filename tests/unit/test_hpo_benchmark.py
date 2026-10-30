@@ -13,6 +13,24 @@ def config():
     return benchmark.read_json(benchmark.DEFAULT_CONFIG)
 
 
+@pytest.mark.parametrize("kind", ["parse", "request"])
+def test_partial_advisor_failure_marks_controller_degraded(kind):
+    advisor = [{"status": "success", "duration_seconds": 1},
+               {"status": "failed" if kind == "request" else "success", "duration_seconds": 2}]
+    proposals = [{"raw": {"action": "keep_strategy"}},
+                 {"raw": {"action": "invalid_proposal"}}]
+    result = benchmark.advisor_outcome(advisor, proposals, uses_advisor=True)
+    assert result["llm_valid_proposals"] == 1
+    assert result["invalid_advisor_proposals"] == 1
+    assert result["advisor_failures"] == (kind == "request")
+    assert result["controller_degraded"]
+    assert result["advisor_seconds"] == 3
+
+
+def test_fixed_baseline_does_not_require_advisor():
+    assert not benchmark.advisor_outcome([], [], uses_advisor=False)["controller_degraded"]
+
+
 def test_five_groups_have_explicit_budgets():
     cfg = config()
     specs = [benchmark.variant_spec(cfg, name) for name in benchmark.VARIANTS]
@@ -235,6 +253,47 @@ def test_output_lock_rejects_concurrent_writer(tmp_path):
         with pytest.raises(OSError):
             with benchmark.exclusive_run(tmp_path):
                 pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shared file locks")
+def test_parallel_gpu_locks_reserve_devices_and_exclude_serial_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark.tempfile, "gettempdir", lambda: str(tmp_path))
+    cfg = {"parallel_single_gpu": True, "device": "cuda:0"}
+    first = "GPU-00000000-0000-0000-0000-000000000001"
+    second = "GPU-00000000-0000-0000-0000-000000000002"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", first)
+    with benchmark.speechbrain_execution_lock(cfg):
+        with pytest.raises(OSError):
+            with benchmark.speechbrain_execution_lock(cfg):
+                pass
+        with pytest.raises(OSError):
+            with benchmark.speechbrain_execution_lock({}):
+                pass
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", second)
+        with benchmark.speechbrain_execution_lock(cfg):
+            pass
+    with benchmark.speechbrain_execution_lock({}):
+        with pytest.raises(OSError):
+            with benchmark.speechbrain_execution_lock(cfg):
+                pass
+
+
+@pytest.mark.parametrize("visible", ["", "0", "GPU-invalid", "0,1"])
+def test_parallel_gpu_lock_requires_full_uuid(visible, monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    with pytest.raises(ValueError, match="full GPU UUID"):
+        benchmark.independent_gpu_uuid({"parallel_single_gpu": True, "device": "cuda:0"})
+
+
+def test_parallel_gpu_assignment_is_frozen(tmp_path, monkeypatch):
+    first = "GPU-00000000-0000-0000-0000-000000000001"
+    second = "GPU-00000000-0000-0000-0000-000000000002"
+    plan = {"schema_version": benchmark.SCHEMA_VERSION, "output_root": str(tmp_path),
+            "config": {"parallel_single_gpu": True, "device": "cuda:0"},
+            "gpu_assignment": {"physical_gpu_uuid": first}}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", second)
+    with pytest.raises(ValueError, match="GPU assignment changed"):
+        benchmark.verify_frozen(plan, tmp_path)
 
 
 def test_isolated_snapshot_rebinds_hardcoded_artifact_paths(tmp_path):

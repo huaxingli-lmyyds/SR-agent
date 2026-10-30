@@ -41,7 +41,8 @@ def test_speechbrain_is_an_external_dependency() -> None:
     dependencies = metadata["project"]["dependencies"]
     optional = metadata["project"]["optional-dependencies"]
 
-    assert not (project_root / "speechbrain").exists()
+    # Leftover __pycache__ directories are not a vendored Python package.
+    assert not list((project_root / "speechbrain").rglob("*.py"))
     assert metadata["project"]["readme"] == "README.md"
     assert metadata["project"]["requires-python"] == ">=3.10"
     assert 'name = "sr-agent"' in pyproject

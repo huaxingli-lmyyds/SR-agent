@@ -39,7 +39,8 @@ class AudioDataProfiler:
         self, dataset: DatasetSpec, policy: QualityPolicy
     ) -> DataProfile:
         source = Path(dataset.source_uri).resolve()
-        files = list(_iter_audio_files(source, policy.max_audio_files))
+        speech_root = source / "wav" if (source / "wav").is_dir() else source
+        files = list(_iter_audio_files(speech_root, policy.max_audio_files))
         manifest = _profile_manifests(source, policy)
         referenced = [Path(value) for value in manifest["existing_audio_paths"]]
         probes = list(dict.fromkeys([*files, *referenced]))[
@@ -752,6 +753,10 @@ class BuildDebugSubsetProcessor(_AudioSubsetProcessor):
         with cache_path.open("w", encoding="utf-8") as stream:
             for path in _iter_audio_files(source, None):
                 scanned += 1
+                # Count remaining paths without decoding audio so impact is
+                # relative to the whole input, even after the subset is full.
+                if selected >= limit:
+                    continue
                 speaker = _speaker(source, path) or "unknown"
                 if counts[speaker] >= per_speaker:
                     continue
@@ -760,9 +765,6 @@ class BuildDebugSubsetProcessor(_AudioSubsetProcessor):
                 stream.write(json.dumps(relative.as_posix()) + "\n")
                 selected += 1
                 estimated += path.stat().st_size
-                if selected >= limit:
-                    scan_complete = False
-                    break
         return {
             "scanned_samples": scanned,
             "selected_samples": selected,
@@ -819,7 +821,20 @@ def _profile_manifests(
     policy: QualityPolicy | None = None,
 ) -> Dict[str, Any]:
     active_policy = policy or QualityPolicy()
-    manifests = list(source.rglob("*.csv"))[:50] if source.is_dir() else []
+    manifests = []
+    if source.is_dir():
+        for manifest in sorted(source.rglob("*.csv")):
+            # Augmentation asset CSVs have a different schema from speech
+            # identity manifests and must not be audited as speaker labels.
+            if (source / "wav").is_dir() and (
+                manifest.relative_to(source).parts[0].lower()
+                in {"noise", "rir", "musan"}
+                or manifest.name.lower() in {"noise.csv", "rir.csv"}
+            ):
+                continue
+            manifests.append(manifest)
+            if len(manifests) >= 50:
+                break
     schema, details, issues = {}, {"files": []}, []
     speakers_by_split: Dict[str, set[str]] = defaultdict(set)
     files_by_split: Dict[str, set[str]] = defaultdict(set)
@@ -828,7 +843,7 @@ def _profile_manifests(
     missing = path_violations = missing_speaker = invalid_speaker = (
         duplicates
     ) = rows_total = 0
-    seen_paths: set[str] = set()
+    seen_paths: Dict[str, set[str]] = defaultdict(set)
     for manifest in manifests:
         try:
             with manifest.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -847,7 +862,10 @@ def _profile_manifests(
             continue
         split = (
             manifest.stem.lower()
-            if manifest.stem.lower() in SPLITS
+            if (
+                manifest.stem.lower() in SPLITS
+                or manifest.stem.lower() in active_policy.split_roles
+            )
             else "unspecified"
         )
         local_invalid = 0
@@ -877,9 +895,11 @@ def _profile_manifests(
                 local_invalid += 1
                 continue
             normalized = str(resolved).lower()
-            if normalized in seen_paths:
+            # Endpoint manifests can legitimately reference the same audio.
+            # Cross-split leakage is handled separately by the role policy.
+            if normalized in seen_paths[split]:
                 duplicates += 1
-            seen_paths.add(normalized)
+            seen_paths[split].add(normalized)
             files_by_split[split].add(normalized)
             if not resolved.exists():
                 missing += 1
@@ -897,10 +917,12 @@ def _profile_manifests(
     speaker_overlap = sum(
         len(speakers_by_split[a] & speakers_by_split[b])
         for a, b in combinations(sorted(speakers_by_split), 2)
+        if not active_policy.permits_overlap(a, b)
     )
     file_overlap = sum(
         len(files_by_split[a] & files_by_split[b])
         for a, b in combinations(sorted(files_by_split), 2)
+        if not active_policy.permits_overlap(a, b, files=True)
     )
     checks = (
         (
@@ -965,6 +987,7 @@ def _profile_manifests(
                 issue.severity = "warning"
     issues.extend(trials["issues"])
     return {
+        **trials,
         "schema": schema,
         "details": details,
         "issues": issues,
@@ -981,7 +1004,6 @@ def _profile_manifests(
         "duplicate_sample_count": duplicates,
         "speaker_overlap_count": speaker_overlap,
         "file_overlap_count": file_overlap,
-        **trials,
     }
 
 
@@ -1099,13 +1121,20 @@ def _iter_audio_files(
     if not source.is_dir():
         return
     yielded = 0
-    for path in source.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
-            continue
-        yield path.resolve()
-        yielded += 1
-        if limit is not None and yielded >= limit:
-            return
+    # Stable traversal makes bounded profiles and debug subsets reproducible
+    # without sorting/materializing the entire dataset in memory.
+    import os
+
+    for directory, subdirs, filenames in os.walk(source):
+        subdirs.sort()
+        for filename in sorted(filenames):
+            path = Path(directory) / filename
+            if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
+                continue
+            yield path.resolve()
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                return
 
 
 def _first_field(row: Dict[str, Any], candidates: Iterable[str]) -> str | None:
@@ -1118,6 +1147,11 @@ def _speaker(source: Path, path: Path) -> str | None:
         parts = path.resolve().relative_to(source).parts
     except ValueError:
         return path.parent.name or None
+    # VoxCeleb: [wav/]idNNNN/video_id/utterance.wav. A video's name is
+    # never the speaker ID, even when the caller passes wav/ as its root.
+    for index, part in enumerate(parts[:-2]):
+        if re.fullmatch(r"id\d+", part) and len(parts) - index >= 3:
+            return part
     if len(parts) >= 3 and parts[0].lower() in SPLITS:
         return parts[1]
     return path.parent.name or None

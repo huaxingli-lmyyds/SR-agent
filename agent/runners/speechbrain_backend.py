@@ -24,6 +24,7 @@ from agent.utils.path_tool import (
     resolve_project_path,
 )
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility, require_speechbrain
+from agent.utils.logger import progressbar_enabled
 
 patch_torchaudio_compatibility()
 
@@ -213,6 +214,8 @@ def _apply_distributed_batch_size(
     hparams: Dict[str, Any], metadata: Dict[str, Any]
 ) -> None:
     if not metadata.get("enabled"):
+        hparams["global_batch_size"] = hparams.get("batch_size")
+        hparams["batch_size_per_device"] = hparams.get("batch_size")
         return
     semantics = metadata.get("batch_size_semantics")
     world_size = int(metadata.get("world_size") or 1)
@@ -264,6 +267,15 @@ def _extract_best_valid_error_rate(train_log_path: Path) -> Optional[float]:
     return best
 
 
+def _device_runtime(torch_module: Any, run_opts: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = {"run_opts": dict(run_opts)}
+    device = str(run_opts.get("device") or "cpu")
+    if device.startswith("cuda"):
+        runtime["cuda_visible_devices"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+        runtime["device_name"] = torch_module.cuda.get_device_name(device)
+    return runtime
+
+
 def _get_prep_cache_dir(tag: str, root: Optional[str] = None) -> Path:
     cache_dir = resolve_project_path(root) / tag if root else get_prep_cache_dir(tag)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +315,8 @@ def _prepare_cached_data(stage, params, splits, sentence_len, random_segment=Fal
         "split_speaker": params.get("split_speaker", False),
         "data_prep_seed": params.get("data_prep_seed"),
     }
+    if params.get("split_unit") is not None:
+        arguments["split_unit"] = params["split_unit"]
     pairs = Path(arguments["verification_file"])
     pairs_hash = hashlib.sha256(pairs.read_bytes()).hexdigest() if pairs.is_file() else None
     cache_dir = _get_prep_cache_dir(
@@ -357,8 +371,8 @@ def run_data_prep(
     random_segment: bool,
     amp_th: float,
     split_speaker: bool,
-    signal:str = None,
     data_prep_seed: Optional[int] = None,
+    split_unit: str = "utterance",
 ) -> Dict[str, Any]:
     try:
         require_speechbrain()
@@ -396,6 +410,7 @@ def run_data_prep(
                 split_speaker=split_speaker,
                 random_segment=random_segment,
                 skip_prep=skip_prep,
+                split_unit=split_unit,
             )
 
         return {
@@ -424,6 +439,9 @@ def run_evaluation(
     verification_module = None
     params = None
     try:
+        from agent.runners.speechbrain_validation import validate_verification_config
+
+        validate_verification_config(config_path)
         require_speechbrain()
         import torch
         import speechbrain as sb
@@ -591,6 +609,7 @@ def run_evaluation(
             "min_dcf": float(min_dcf) * 100,
             "output_folder": str(params["output_folder"]),
             "scores_path": str(scores_path),
+            "runtime": _device_runtime(torch, run_opts),
         }
     except Exception as exc:
         return {
@@ -775,8 +794,13 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 "splits": splits,
                 "split_ratio": hparams["split_ratio"],
                 "seg_dur": hparams["sentence_len"],
+                "random_segment": hparams.get("random_chunk", False),
+                "amp_th": hparams.get("amp_th", 5e-4),
+                "split_speaker": hparams.get("split_speaker", False),
                 "skip_prep": hparams["skip_prep"],
             }
+            if hparams.get("split_unit") is not None:
+                preparation_kwargs["split_unit"] = hparams["split_unit"]
             if distributed_runtime["enabled"]:
                 sb.utils.distributed.run_on_main(
                     prepare_module.prepare_voxceleb,
@@ -831,6 +855,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             valid_data,
             train_loader_kwargs=dataloader_options,
             valid_loader_kwargs=dataloader_options,
+            progressbar=progressbar_enabled(run_opts),
         )
 
         train_log_path = hparams.get("train_log")
@@ -849,7 +874,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             "valid_error_rate": valid_error_rate,
             "error": None,
             "runtime": {
-                "run_opts": dict(run_opts),
+                **_device_runtime(torch, run_opts),
                 "ddp": distributed_runtime,
                 "global_batch_size": hparams.get("global_batch_size"),
                 "batch_size_per_device": hparams.get("batch_size_per_device"),

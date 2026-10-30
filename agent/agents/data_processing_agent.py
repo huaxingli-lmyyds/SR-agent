@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
@@ -42,6 +41,7 @@ class DataProcessingAgent(LangGraphAgent):
         implementation: str = "speechbrain",
         runner: str = "speechbrain",
         enable_llm_advisor: bool = False,
+        memory_service: Optional[MemoryService] = None,
     ) -> None:
         super().__init__(model_name, temperature, max_iterations, verbose)
         self.config_path = str(resolve_config_path(config_path))
@@ -56,7 +56,7 @@ class DataProcessingAgent(LangGraphAgent):
         self.runner = runner
         self.enable_llm_advisor = enable_llm_advisor
         self.tracker = ExperimentTracker(self.experiments_dir)
-        self.memory_service = MemoryService()
+        self.memory_service = memory_service if memory_service is not None else MemoryService()
         self.memory_scope = MemoryScope(
             agent_type="data_processing",
             task_type=task_type,
@@ -152,6 +152,9 @@ class DataProcessingAgent(LangGraphAgent):
                 "output_path": str(version_path),
                 "requested_operations": requested_operations,
                 "quality_policy": quality_policy,
+                "training_exclusion_pairs": (
+                    request.context.get("runtime_options") or {}
+                ).get("training_exclusion_pairs"),
             }
         )
         if state.get("status") != "success":
@@ -199,7 +202,12 @@ class DataProcessingAgent(LangGraphAgent):
                     "profile_before": state.get("profile"),
                     "plan": state.get("plan"),
                     "operation_results": state.get("results"),
-                    "published_version": published,
+                    "published_version": {
+                        key: value for key, value in published.items()
+                        if key not in {"file_hashes", "quality_metrics", "quality_policy", "operations"}
+                    },
+                    "dataset_version_path": str(version_path),
+                    "file_hash_count": len(published.get("file_hashes") or {}),
                     "llm_advice": advice,
                 }
             },
@@ -271,12 +279,7 @@ class DataProcessingAgent(LangGraphAgent):
         prompt = render_prompt(
             "data_processing_planning_advice", context=context
         )
-        response = self.llm.invoke(prompt)
-        try:
-            value = json.loads(self._extract_message_content(response))
-            return value if isinstance(value, dict) else {"advice": value}
-        except Exception as exc:
-            return {"advice_error": f"{type(exc).__name__}: {exc}"}
+        return self._request_json_advice(prompt)
 
     def get_execution_details(self) -> Dict[str, Any]:
         return {

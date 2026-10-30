@@ -9,6 +9,75 @@ from agent.hpo import (
 from agent.utils.experiment_tracker import ExperimentTracker
 
 
+def test_evaluation_recovery_reuses_checkpoint_without_training_or_new_budget(
+    study_factory, tmp_path, minimal_config, monkeypatch,
+):
+    import json
+    from types import SimpleNamespace
+    from agent.agents.hpo_agent import HPOAgent
+    from agent.tools import evaluation_tools, training_tools
+
+    service, study = study_factory(max_training_runs=1, initial_trial_count=1, candidate_batch_size=1)
+    checkpoint = tmp_path / "retained.ckpt"
+    checkpoint.write_text("trained model")
+    calls = []
+    def train(payload):
+        calls.append("training")
+        service.record_trial(
+            study, payload["trial_id"], status="running",
+            cost={"training": {"status": "success"}},
+            artifacts=[{"type": "checkpoint", "path": str(checkpoint)}],
+        )
+        return json.dumps({"status": "success", "artifacts": [{"type": "checkpoint", "path": str(checkpoint)}]})
+    def evaluate(payload):
+        calls.append("evaluation")
+        assert payload["model_path"] == str(checkpoint)
+        broken = calls.count("evaluation") == 1
+        service.record_trial(
+            study, payload["trial_id"], status="running",
+            cost={"evaluation": {"status": "failed" if broken else "success"}},
+        )
+        return json.dumps({"status": "failed" if broken else "success",
+                           "error": "AttributeError: broken loader" if broken else None,
+                           "metrics": {} if broken else {"validation": {"eer": 0.02}}})
+    monkeypatch.setattr(training_tools, "TrainModel", SimpleNamespace(invoke=train))
+    monkeypatch.setattr(evaluation_tools, "RunEvaluation", SimpleNamespace(invoke=evaluate))
+    agent = HPOAgent(config_path=str(minimal_config), experiments_dir=str(service.tracker.experiments_dir), runner="recovery_fake")
+    execute = agent._trial_executor(study.experiment_id, str(tmp_path), {"device": "cpu"})
+    failed = HPOScheduler(service, execute).run(study)
+    assert failed.study.status == "failed"
+    assert service.training_runs_used(study) == 1
+    # A normal resume remains blocked, even if recovery was requested.
+    HPOScheduler(service, execute).run(failed.study, resume=True, retry_failed_evaluations=True)
+    assert calls == ["training", "evaluation"]
+    repaired = HPOScheduler(service, execute).run(
+        failed.study, resume=True, reset_failure_guard=True, retry_failed_evaluations=True,
+    )
+    assert repaired.study.status == "completed"
+    assert calls == ["training", "evaluation", "evaluation"]
+    assert service.training_runs_used(repaired.study) == 1
+    assert len(repaired.trials) == 1
+    trial = repaired.trials[0]
+    assert trial.metrics["eer"] == 0.02
+    assert trial.cost["attempt_training_seconds"] == 0
+    assert trial.cost["training"]["status"] == "success"
+    assert trial.provenance["evaluation_recovery_events"][0]["previous_error"]
+    assert repaired.advice["resume"]["evaluation_retry_trial_ids"] == [trial.trial_id]
+
+
+def test_evaluation_recovery_validates_checkpoints_before_reopening(study_factory):
+    service, study = study_factory(max_training_runs=1)
+    trial = service.suggest_trials(study, 1)[0]
+    service.record_trial(study, trial.trial_id, status="running")
+    service.record_trial(study, trial.trial_id, status="failed", cost={
+        "training": {"status": "success"}, "evaluation": {"status": "failed"},
+        "evaluated_checkpoint": "/does-not-exist/model.ckpt",
+    })
+    with pytest.raises(ValueError, match="missing checkpoint"):
+        service.prepare_resume(study, retry_failed_evaluations=True)
+    assert service.load_trial(study.experiment_id, trial.trial_id).status == "failed"
+
+
 @pytest.fixture
 def study_factory(tmp_path, minimal_config, dataset_dir):
     service = HPOService(ExperimentTracker(tmp_path / "experiments"))

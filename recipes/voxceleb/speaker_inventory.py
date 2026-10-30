@@ -54,16 +54,13 @@ def eligible_training_speaker_ids(
     data_folder: str | Path,
     exclusion_pairs: str | Path,
 ) -> list[str]:
-    """Return sorted dataset speakers after applying the training protocol."""
+    """Apply an exclusion denylist to the speakers present in this data view.
+
+    A frozen full-corpus exclusion protocol may contain identities already
+    absent from a training-only view. Their absence is expected, not an error.
+    """
     dataset = dataset_speaker_ids(data_folder)
     excluded = excluded_speaker_ids(exclusion_pairs)
-    unknown = excluded - dataset
-    if unknown:
-        preview = ", ".join(sorted(unknown)[:5])
-        raise ValueError(
-            f"training exclusion protocol references {len(unknown)} unknown "
-            f"speakers; examples: {preview}"
-        )
     eligible = sorted(dataset - excluded)
     if not eligible:
         raise ValueError("training exclusion protocol removes every speaker")

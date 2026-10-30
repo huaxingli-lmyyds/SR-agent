@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
-from time import perf_counter
 from typing import Any, Dict, List, Optional
 
 from agent.agents.base_agent import LangGraphAgent
+from agent.agents.hpo_execution import TrialExecutor
+from agent.hpo import reporting, resource_analysis
+from agent.agents.advisory_response import decode_json_response, response_diagnostics, trial_ids_from_evidence
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
-from agent.core.metrics import is_finite_metric
 from agent.hpo.effects import summarize_decision_effect
-from agent.hpo.history import budget_key, observation_signature
+from agent.hpo.history import budget_key
 from agent.hpo.policies import SystemFailureBlocked
 from agent.hpo.resources import (
-    CampaignResourceBudget, ResourceBudgetExhausted, positive_limit, stage_gpu_count,
+    CampaignResourceBudget, ResourceBudgetExhausted, positive_limit,
 )
 from agent.hpo.protocol import (
     METRIC_PROTOCOL_ID,
@@ -236,6 +236,10 @@ class HPOAgent(LangGraphAgent):
             request.context.get("runtime_options"),
             require_explicit=True,
         )
+        if self.runner == "speechbrain":
+            from agent.runners.speechbrain_validation import validate_verification_config
+
+            validate_verification_config(runtime_options["verification_config"])
         if self.runner == "speechbrain" and runtime_options.get("ddp_devices"):
             from agent.runners.speechbrain_distributed import (
                 freeze_ddp_runtime_options,
@@ -572,54 +576,9 @@ class HPOAgent(LangGraphAgent):
                     else None
                 ),
             }
-            experiment_id = tracker.create_hpo_experiment(
-                config_path=self.config_path,
-                data_folder=data_folder,
-                output_folder=str(output) if output else None,
-                description=f"Optimization campaign {campaign.campaign_id} study {study_index + 1}",
-                task={
-                    "type": self.task_type,
-                    "dataset": data_folder,
-                    "dataset_id": data_handoff.get("dataset_id"),
-                    "dataset_version": data_handoff.get("dataset_version"),
-                    "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
-                    "primary_metric": objectives[0].metric,
-                    "metric_mode": objectives[0].mode,
-                    "metric_protocol": METRIC_PROTOCOL_ID,
-                    "metric_units": dict(METRIC_UNITS),
-                    "controller_mode": controller_mode,
-                },
-                model={"family": self.model_family, "implementation": self.implementation, "config_path": self.config_path},
-                execution={
-                    "runner": self.runner,
-                    "output_folder": str(output) if output else None,
-                    "evaluation_config_path": runtime_options["verification_config"],
-                    "validation_pairs_path": runtime_options["validation_pairs"],
-                    "training_exclusion_pairs_path": runtime_options[
-                        "training_exclusion_pairs"
-                    ],
-                    "verification_config_sha256": runtime_options[
-                        "verification_config_sha256"
-                    ],
-                    "validation_pairs_sha256": runtime_options[
-                        "validation_pairs_sha256"
-                    ],
-                    "training_exclusion_pairs_sha256": runtime_options[
-                        "training_exclusion_pairs_sha256"
-                    ],
-                    "training_runtime_options": self._training_runtime_options(
-                        runtime_options
-                    ),
-                    "metric_protocol": METRIC_PROTOCOL_ID,
-                },
-                extra_fields={"version": {
-                    "campaign_id": campaign.campaign_id,
-                    "study_index": study_index + 1,
-                    "model_key": f"{self.task_type}/{self.model_family}/{self.implementation}",
-                    "dataset_id": data_handoff.get("dataset_id"),
-                    "dataset_version": data_handoff.get("dataset_version"),
-                    "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
-                }},
+            experiment_id = self._create_study_record(
+                tracker, campaign, study_index, objectives[0], data_handoff,
+                runtime_options, output, controller_mode,
             )
             self._resource_experiment_ids.append(experiment_id)
             self._check_resource_budget()
@@ -898,6 +857,63 @@ class HPOAgent(LangGraphAgent):
             request_id=request.request_id,
         )
 
+    def _create_study_record(
+        self, tracker, campaign, study_index, objective, data_handoff,
+        runtime_options, output, controller_mode,
+    ) -> str:
+        """Create the frozen identity/protocol record before scheduling Trials."""
+        data_folder = data_handoff["consumer_uri"]
+        return tracker.create_hpo_experiment(
+            config_path=self.config_path,
+            data_folder=data_folder,
+            output_folder=str(output) if output else None,
+            description=f"Optimization campaign {campaign.campaign_id} study {study_index + 1}",
+            task={
+                "type": self.task_type,
+                "dataset": data_folder,
+                "dataset_id": data_handoff.get("dataset_id"),
+                "dataset_version": data_handoff.get("dataset_version"),
+                "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
+                "primary_metric": objective.metric,
+                "metric_mode": objective.mode,
+                "metric_protocol": METRIC_PROTOCOL_ID,
+                "metric_units": dict(METRIC_UNITS),
+                "controller_mode": controller_mode,
+            },
+            model={"family": self.model_family, "implementation": self.implementation, "config_path": self.config_path},
+            execution={
+                "runner": self.runner,
+                "output_folder": str(output) if output else None,
+                "evaluation_config_path": runtime_options["verification_config"],
+                "validation_pairs_path": runtime_options["validation_pairs"],
+                "training_exclusion_pairs_path": runtime_options[
+                    "training_exclusion_pairs"
+                ],
+                "verification_config_sha256": runtime_options[
+                    "verification_config_sha256"
+                ],
+                "validation_pairs_sha256": runtime_options[
+                    "validation_pairs_sha256"
+                ],
+                "training_exclusion_pairs_sha256": runtime_options[
+                    "training_exclusion_pairs_sha256"
+                ],
+                "training_runtime_options": self._training_runtime_options(
+                    runtime_options
+                ),
+                "metric_protocol": METRIC_PROTOCOL_ID,
+            },
+            extra_fields={"version": {
+                "campaign_id": campaign.campaign_id,
+                "study_index": study_index + 1,
+                "model_key": f"{self.task_type}/{self.model_family}/{self.implementation}",
+                "dataset_id": data_handoff.get("dataset_id"),
+                "dataset_version": data_handoff.get("dataset_version"),
+                "data_processing_experiment_id": data_handoff.get("data_processing_experiment_id"),
+            }},
+        )
+
+
     def _resume_existing_study(
         self,
         request: AgentTaskRequest,
@@ -952,6 +968,10 @@ class HPOAgent(LangGraphAgent):
                     "training runtime"
                 )
         runtime_options.update(persisted_training_runtime)
+        if runner == "speechbrain":
+            from agent.runners.speechbrain_validation import validate_verification_config
+
+            validate_verification_config(runtime_options["verification_config"])
         request.context["runtime_options"] = runtime_options
 
         model_adapter = get_model_adapter(model_family)
@@ -1057,6 +1077,7 @@ class HPOAgent(LangGraphAgent):
         ).run(
             study, resume=True,
             reset_failure_guard=request.context.get("reset_failure_guard") is True,
+            retry_failed_evaluations=request.context.get("retry_failed_evaluations") is True,
         )
         if scheduled.study.status != "completed":
             error = "; ".join(scheduled.errors) or "resumed HPO workflow failed"
@@ -1203,199 +1224,13 @@ class HPOAgent(LangGraphAgent):
             request_id=request.request_id,
         )
 
-    @staticmethod
-    def _campaign_from_dict(
-        value: Any,
-        fallback_objective: Objective,
-    ) -> OptimizationCampaign:
-        data = dict(value or {}) if isinstance(value, dict) else {}
-        objective_data = data.get("objective") or fallback_objective.to_dict()
-        if (
-            objective_data.get("metric") != fallback_objective.metric
-            or objective_data.get("mode") != fallback_objective.mode
-        ):
-            raise ValueError("persisted Campaign objective conflicts with Study objective")
-        return OptimizationCampaign(
-            objective=fallback_objective,
-            target_value=data.get("target_value"),
-            max_studies=max(int(data.get("max_studies") or 1), 1),
-            patience=max(int(data.get("patience") or 1), 1),
-            min_improvement=float(data.get("min_improvement") or 0.0),
-            max_total_training_runs=data.get("max_total_training_runs"),
-            resource_budget=dict(data.get("resource_budget") or {}),
-            confirmation_signature=dict(data.get("confirmation_signature") or {}),
-            campaign_id=str(
-                data.get("campaign_id")
-                or f"campaign_resume_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            ),
-            study_summaries=[
-                dict(item) for item in (data.get("study_summaries") or [])
-                if isinstance(item, dict)
-            ],
-            best_value=data.get("best_value"),
-            best_experiment_id=data.get("best_experiment_id"),
-            status=str(data.get("status") or "running"),
-            stop_reason=data.get("stop_reason"),
-            created_at=str(data.get("created_at") or datetime.now().isoformat()),
-            updated_at=str(data.get("updated_at") or datetime.now().isoformat()),
-        )
+    _campaign_from_dict = staticmethod(reporting.campaign_from_dict)
 
-    @staticmethod
-    def _merge_campaign_history(
-        existing: List[Dict[str, Any]],
-        trials: List[Any],
-        objective: Objective,
-        pruner: str,
-        limit: int = 200,
-    ) -> List[Dict[str, Any]]:
-        """Keep fidelity-compatible observations for subsequent Study samplers."""
-        merged = {
-            observation_signature(item): dict(item)
-            for item in existing
-            if isinstance(item, dict)
-            and is_finite_metric((item.get("metrics") or {}).get(objective.metric))
-        }
-        for trial in trials:
-            if pruner == "successive_halving" and int(getattr(trial, "rung", 0)) != 0:
-                continue
-            value = (getattr(trial, "metrics", {}) or {}).get(objective.metric)
-            if not is_finite_metric(value):
-                continue
-            if getattr(trial, "status", None) not in {"completed", "promoted"}:
-                continue
-            parameters = dict(getattr(trial, "parameters", {}) or {})
-            observation = {
-                "trial_id": f"warm_{trial.trial_id}",
-                "parameters": parameters,
-                "budget": trial.budget.to_dict(),
-                "status": "completed",
-                "parent_trial_id": getattr(trial, "parent_trial_id", None),
-                "rung": int(getattr(trial, "rung", 0)),
-                "metrics": dict(getattr(trial, "metrics", {}) or {}),
-                "intermediate_metrics": [],
-                "cost": {"source": "prior_study"},
-                "artifacts": [],
-                "stop_reason": None,
-                "candidate_source": getattr(trial, "candidate_source", "optimizer"),
-                "search_phase": int(getattr(trial, "search_phase", 0)),
-                "proposal_id": getattr(trial, "proposal_id", None),
-                "hypothesis_id": getattr(trial, "hypothesis_id", None),
-                "provenance": dict(getattr(trial, "provenance", {}) or {}),
-                "created_at": getattr(trial, "created_at", ""),
-                "updated_at": getattr(trial, "updated_at", ""),
-            }
-            merged[observation_signature(observation)] = observation
-        return list(merged.values())[-max(int(limit), 1):]
+    _merge_campaign_history = staticmethod(reporting.merge_campaign_history)
 
-    @staticmethod
-    def _study_learning_summary(study: Any, best_trial: Any, objective: Objective) -> Dict[str, Any]:
-        reviews = list(getattr(study, "strategy_reviews", []) or [])
-        last_review = reviews[-1] if reviews else {}
-        decision = last_review.get("decision") or {}
-        proposal = last_review.get("proposal") or {}
-        final_sampler = (
-            getattr(study, "candidate_strategy", None)
-            or getattr(study, "sampler_strategy", None)
-            or (
-                "random_search"
-                if getattr(study, "strategy", None) == "successive_halving"
-                else getattr(study, "strategy", None)
-            )
-        )
-        final_pruner = (
-            getattr(study, "pruner_strategy", None)
-            or (
-                "successive_halving"
-                if getattr(study, "strategy", None) == "successive_halving"
-                else "none"
-            )
-        )
-        final_strategy = (
-            "successive_halving"
-            if final_pruner == "successive_halving"
-            else final_sampler
-        )
-        final_search_space = study.search_space.to_dict()
-        deferred_proposal = dict(getattr(study, "next_study_proposal", None) or {})
-        return {
-            "local_search_anchor": {
-                "trial_id": getattr(best_trial, "trial_id", None),
-                "parameters": dict(getattr(best_trial, "parameters", {}) or {}),
-                "metric": objective.metric,
-                "mode": objective.mode,
-                "value": (getattr(best_trial, "metrics", {}) or {}).get(objective.metric),
-            },
-            "final_strategy": final_strategy,
-            "final_candidate_strategy": final_sampler,
-            "final_sampler": final_sampler,
-            "final_sampler_config": dict(
-                getattr(study, "sampler_config", {}) or {}
-            ),
-            "final_pruner": final_pruner,
-            "warm_start_trial_count": len(getattr(study, "warm_start_trials", []) or []),
-            "final_search_space": final_search_space,
-            "search_phases": list(getattr(study, "search_phases", []) or []),
-            "search_phase_summaries": (
-                (last_review.get("feedback") or {}).get("search_phase_summaries") or []
-            ),
-            "last_review": {
-                "trigger": last_review.get("trigger"),
-                "proposal_action": proposal.get("action"),
-                "requested_strategy": proposal.get("requested_strategy"),
-                "reason_codes": proposal.get("reason_codes") or [],
-                "accepted_fields": decision.get("accepted_fields") or [],
-                "rejected_fields": decision.get("rejected_fields") or [],
-                "applied_candidate_strategy": last_review.get("applied_candidate_strategy"),
-            },
-            "next_study_recommendation": {
-                "strategy": final_strategy,
-                "sampler": final_sampler,
-                "sampler_config": dict(
-                    getattr(study, "sampler_config", {}) or {}
-                ),
-                "pruner": final_pruner,
-                "search_space": final_search_space,
-                "anchor_parameters": dict(getattr(best_trial, "parameters", {}) or {}),
-                "reason_codes": proposal.get("reason_codes") or [],
-                "deferred_proposal": deferred_proposal or None,
-            },
-        }
+    _study_learning_summary = staticmethod(reporting.study_learning_summary)
 
-    @staticmethod
-    def _cross_study_memory(campaign: Dict[str, Any]) -> Dict[str, Any]:
-        summaries = list(campaign.get("study_summaries") or [])
-        recent = summaries[-3:]
-        best_summary = None
-        best_value = campaign.get("best_value")
-        best_experiment_id = campaign.get("best_experiment_id")
-        if best_experiment_id:
-            best_summary = next(
-                (item for item in summaries if item.get("experiment_id") == best_experiment_id),
-                None,
-            )
-        if best_summary is None and summaries:
-            best_summary = summaries[-1]
-        latest_learning = (recent[-1].get("learning_summary") if recent else None) or {}
-        return {
-            "prior_study_count": len(summaries),
-            "best_value": best_value,
-            "best_experiment_id": best_experiment_id,
-            "best_parameters": (best_summary or {}).get("best_parameters") or {},
-            "local_search_anchor": latest_learning.get("local_search_anchor"),
-            "next_study_recommendation": latest_learning.get("next_study_recommendation"),
-            "recent_learnings": [
-                {
-                    "experiment_id": item.get("experiment_id"),
-                    "study_id": item.get("study_id"),
-                    "best_value": item.get("best_value"),
-                    "improvement": item.get("improvement"),
-                    "improved": item.get("improved"),
-                    "best_parameters": item.get("best_parameters") or {},
-                    "learning_summary": item.get("learning_summary") or {},
-                }
-                for item in recent
-            ],
-        }
+    _cross_study_memory = staticmethod(reporting.cross_study_memory)
 
     @classmethod
     def _next_study_proposal(
@@ -1432,59 +1267,9 @@ class HPOAgent(LangGraphAgent):
             return None
         return proposal if proposal.action in cls.proposal_actions else None
 
-    @staticmethod
-    def _best_metric_record(trial: Any, objective: Objective) -> Dict[str, Any]:
-        metrics = dict(trial.metrics or {})
-        training, evaluation = HPOAgent._split_trial_metrics(metrics, objective.metric)
-        primary_value = metrics.get(objective.metric)
-        return {
-            "trial_id": trial.trial_id,
-            "primary_metric": objective.metric,
-            "primary_mode": objective.mode,
-            "primary_value": primary_value,
-            "metric_protocol": METRIC_PROTOCOL_ID,
-            "metric_units": dict(METRIC_UNITS),
-            **metrics,
-            "training": training,
-            "evaluation": evaluation,
-        }
+    _best_metric_record = staticmethod(reporting.best_metric_record)
 
-    @staticmethod
-    def _split_trial_metrics(
-        metrics: Dict[str, Any],
-        primary_metric: str,
-    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-        training: Dict[str, Any] = {}
-        evaluation: Dict[str, Any] = {}
-        training_names = {
-            "valid_error_rate",
-            "final_epoch",
-            "final_lr",
-            "final_train_loss",
-            "final_valid_loss",
-            "final_valid_error_rate",
-            "total_epochs",
-            "best_epoch",
-            "best_valid_loss",
-            "best_error_rate",
-        }
-        evaluation_names = {
-            primary_metric,
-            "eer",
-            "min_dcf",
-            "accuracy",
-            "precision",
-            "recall",
-            "f1",
-            "auc",
-        }
-        for key, value in metrics.items():
-            normalized = key.lower()
-            if key in training_names or normalized.startswith(("train_", "valid_", "final_", "best_")):
-                training[key] = value
-            elif key in evaluation_names:
-                evaluation[key] = value
-        return training, evaluation
+    _split_trial_metrics = staticmethod(reporting.split_trial_metrics)
 
     def _trial_executor(
         self,
@@ -1492,148 +1277,19 @@ class HPOAgent(LangGraphAgent):
         data_folder: str,
         runtime_options: Any = None,
         execution_context: Optional[Dict[str, Any]] = None,
-    ):
-        runtime_options = dict(runtime_options or {}) if isinstance(runtime_options, dict) else {}
-        execution_context = dict(execution_context or {})
-        task_type = str(execution_context.get("task_type") or self.task_type)
-        default_model_family = str(
-            execution_context.get("model_family") or self.model_family
+    ) -> TrialExecutor:
+        context = dict(execution_context or {})
+        return TrialExecutor(
+            experiment_id=experiment_id,
+            data_folder=data_folder,
+            experiments_dir=self.experiments_dir,
+            runtime_options=dict(runtime_options or {}) if isinstance(runtime_options, dict) else {},
+            task_type=str(context.get("task_type") or self.task_type),
+            model_family=str(context.get("model_family") or self.model_family),
+            implementation=str(context.get("implementation") or self.implementation),
+            runner=str(context.get("runner") or self.runner),
+            resource_budget=getattr(self, "_resource_budget", None),
         )
-        default_implementation = str(
-            execution_context.get("implementation") or self.implementation
-        )
-        default_runner = str(execution_context.get("runner") or self.runner)
-
-        def execute(trial: Any, attempt: int) -> Dict[str, Any]:
-            from agent.tools.evaluation_tools import RunEvaluation
-            from agent.tools.training_tools import TrainModel
-
-            parameters = dict(trial.parameters)
-            model_family = str(parameters.pop("model_family", default_model_family))
-            implementation = str(parameters.pop("implementation", default_implementation))
-            runner = str(parameters.pop("runner", default_runner))
-            resources = getattr(self, "_resource_budget", None)
-            training_gpu_count = stage_gpu_count(runtime_options, runner)
-            evaluation_gpu_count = stage_gpu_count(runtime_options, runner, evaluation=True)
-
-            def invoke_stage(tool, payload, stage, gpu_count):
-                if resources:
-                    deadline = resources.start_stage(
-                        experiment_id=experiment_id, trial_id=trial.trial_id,
-                        attempt=attempt, stage=stage, gpu_count=gpu_count,
-                        max_seconds=trial.budget.max_duration_seconds if stage == "training" else None,
-                    )
-                    if deadline is not None:
-                        payload["runtime_deadline_epoch"] = deadline
-                try:
-                    return json.loads(tool.invoke(payload))
-                except Exception as exc:
-                    return {"status": "failed", "stage": stage, "error": f"{type(exc).__name__}: {exc}"}
-                finally:
-                    if resources:
-                        resources.finish_stage()
-
-            training_started = perf_counter()
-            train_result = invoke_stage(TrainModel, {
-                "experiment_id": experiment_id,
-                "trial_id": trial.trial_id,
-                "data_folder": data_folder,
-                "parameters_json": json.dumps(parameters, ensure_ascii=False),
-                "budget_json": json.dumps(trial.budget.to_dict(), ensure_ascii=False),
-                "training_exclusion_pairs": runtime_options.get(
-                    "training_exclusion_pairs"
-                ),
-                "task_type": task_type,
-                "model_family": model_family,
-                "implementation": implementation,
-                "runner": runner,
-                "experiments_dir": str(self.experiments_dir),
-                "device": runtime_options.get("device"),
-                "ddp_devices": runtime_options.get("ddp_devices"),
-                "distributed_backend": runtime_options.get("distributed_backend"),
-                "batch_size_semantics": runtime_options.get("batch_size_semantics"),
-                "precision": runtime_options.get("precision"),
-                "eval_precision": runtime_options.get("eval_precision"),
-            }, "training", training_gpu_count)
-            training_seconds = perf_counter() - training_started
-            training_runtime = dict(
-                (((train_result.get("extensions") or {}).get("speechbrain") or {}).get(
-                    "runtime"
-                ) or {})
-            )
-            ddp_runtime = dict(training_runtime.get("ddp") or {})
-            training_world_size = max(int(ddp_runtime.get("world_size") or training_gpu_count or 1), 1)
-            if train_result.get("status") != "success":
-                return {**train_result, "cost": {
-                    "attempt_training_seconds": training_seconds,
-                    "attempt_training_gpu_seconds": (
-                        training_seconds * training_gpu_count
-                    ),
-                    "training_world_size": training_world_size,
-                    "attempt_evaluation_seconds": 0.0,
-                    "attempt_evaluation_gpu_seconds": 0.0,
-                }}
-            # Bind evaluation to this attempt, not the first historical artifact.
-            current_checkpoint = next(
-                (item.get("path") for item in train_result.get("artifacts") or []
-                 if item.get("type") == "checkpoint" and item.get("path")),
-                None,
-            )
-            if current_checkpoint is None:
-                return {
-                    "status": "failed",
-                    "stage": "training",
-                    "error": "missing checkpoint artifact from current training attempt",
-                    "cost": {
-                        "attempt_training_seconds": training_seconds,
-                        "attempt_training_gpu_seconds": (
-                            training_seconds * training_gpu_count
-                        ),
-                        "training_world_size": training_world_size,
-                        "attempt_evaluation_seconds": 0.0,
-                        "attempt_evaluation_gpu_seconds": 0.0,
-                    },
-                }
-            evaluation_started = perf_counter()
-            evaluation = invoke_stage(RunEvaluation, {
-                "model_path": current_checkpoint,
-                "verification_config": runtime_options.get("verification_config"),
-                "verification_pairs": runtime_options.get("validation_pairs"),
-                "evaluation_split": "validation",
-                "experiment_id": experiment_id,
-                "trial_id": trial.trial_id,
-                "data_folder": data_folder,
-                "experiments_dir": str(self.experiments_dir),
-                "runner": runner,
-                "task_type": task_type,
-                "model_family": model_family,
-                "implementation": implementation,
-                "device": runtime_options.get("device"),
-                "precision": runtime_options.get("precision"),
-                "eval_precision": runtime_options.get("eval_precision"),
-            }, "evaluation", evaluation_gpu_count)
-            metrics: Dict[str, Any] = {}
-            for values in (evaluation.get("metrics") or {}).values():
-                metrics.update(values or {})
-            evaluation_seconds = perf_counter() - evaluation_started
-            return {
-                "status": evaluation.get("status", "failed"),
-                "stage": "evaluation",
-                "error": evaluation.get("error"),
-                "metrics": metrics,
-                "artifacts": evaluation.get("artifacts") or [],
-                "cost": {
-                    "attempt": attempt, "evaluated_checkpoint": current_checkpoint,
-                    "attempt_training_seconds": training_seconds,
-                    "attempt_training_gpu_seconds": (
-                        training_seconds * training_gpu_count
-                    ),
-                    "training_world_size": training_world_size,
-                    "attempt_evaluation_seconds": evaluation_seconds,
-                    "attempt_evaluation_gpu_seconds": evaluation_seconds * evaluation_gpu_count,
-                },
-            }
-        return execute
 
     def _planning_proposal(
         self,
@@ -1707,24 +1363,13 @@ class HPOAgent(LangGraphAgent):
             "reference_profile": self._reference_search_profile(self.model_family),
             "historical_memory": memory_context,
         })
-        try:
-            value = json.loads(self._extract_message_content(
-                self._invoke_strategy_model(
-                    prompt,
-                    objective_metric=str(request.context.get("primary_metric", "eer")),
-                    objective_mode=str(request.context.get("metric_mode", "min")),
-                    confirmation_signature=confirmation_signature,
-                )
-            ))
-            return StrategyProposal.from_dict(value, strict_llm=True)
-        except ResourceBudgetExhausted:
-            raise
-        except Exception as exc:
-            return StrategyProposal(
-                action="invalid_proposal",
-                reason_codes=["proposal_parse_error"],
-                evidence={"error": f"{type(exc).__name__}: {exc}"},
-            )
+        return self._request_strategy_proposal(
+            prompt,
+            objective_metric=str(request.context.get("primary_metric", "eer")),
+            objective_mode=str(request.context.get("metric_mode", "min")),
+            confirmation_signature=confirmation_signature,
+            error_code="proposal_parse_error",
+        )
 
     def _runtime_strategy_reviewer(self, request: AgentTaskRequest, campaign: OptimizationCampaign):
         if not self.enable_llm_advisor:
@@ -1781,27 +1426,69 @@ class HPOAgent(LangGraphAgent):
                 "reference_profile": self._reference_search_profile(self.model_family),
                 "historical_memory": memory_context,
             })
-            try:
-                return StrategyProposal.from_dict(
-                    json.loads(self._extract_message_content(
-                        self._invoke_strategy_model(
-                            prompt,
-                            objective_metric=study.objectives[0].metric,
-                            objective_mode=study.objectives[0].mode,
-                            confirmation_signature=study_confirmation_signature(study),
-                        )
-                    )),
-                    strict_llm=True,
-                )
-            except ResourceBudgetExhausted:
-                raise
-            except Exception as exc:
-                return StrategyProposal(
-                    action="invalid_proposal",
-                    reason_codes=["runtime_proposal_parse_error"],
-                    evidence={"error": f"{type(exc).__name__}: {exc}"},
-                )
+            return self._request_strategy_proposal(
+                prompt,
+                objective_metric=study.objectives[0].metric,
+                objective_mode=study.objectives[0].mode,
+                confirmation_signature=study_confirmation_signature(study),
+                error_code="runtime_proposal_parse_error",
+            )
         return review
+
+    def _request_strategy_proposal(self, prompt: str, *, error_code: str, **options: Any) -> StrategyProposal:
+        with self._advisory_session():
+            failures = []
+            original_prompt = prompt
+            self._advisor_format_events = []
+            try:
+                context = json.loads(original_prompt).get("context", {})
+            except (ValueError, AttributeError):
+                context = {}
+            self._advisor_evidence_trial_ids.update(trial_ids_from_evidence(context))
+            for attempt in range(2):
+                response = None
+                stage = "request"
+                try:
+                    response = self._invoke_strategy_model(prompt, **options)
+                    stage = "json_decode"
+                    value = decode_json_response(response)
+                    stage = "schema_validation"
+                    proposal = StrategyProposal.from_dict(value, strict_llm=True)
+                    for hypothesis in proposal.hypotheses:
+                        references = hypothesis.get("evidence_trial_ids", [])
+                        if not isinstance(references, list) or any(
+                            not isinstance(ref, str) or ref not in self._advisor_evidence_trial_ids
+                            for ref in references
+                        ):
+                            raise ValueError("hypothesis references unobserved Trial IDs")
+                    self._advisor_format_events.append({"attempt": attempt + 1, "status": "success"})
+                    return proposal
+                except ResourceBudgetExhausted:
+                    raise
+                except Exception as exc:
+                    diagnostics = response_diagnostics(response, exc, stage=stage)
+                    failures.append(diagnostics)
+                    self._advisor_format_events.append({"attempt": attempt + 1, "status": "failed", **diagnostics})
+                    if stage == "request" or attempt == 1 or self._advisory_remaining() <= 1:
+                        return StrategyProposal(
+                            action="invalid_proposal", reason_codes=[error_code],
+                            evidence={**diagnostics, "response_attempts": failures},
+                        )
+                    correction = {
+                        "instruction": "Regenerate one complete raw JSON object matching the original schema. "
+                            "No prose, fences, comments or extra punctuation. Use only original evidence and exact Trial IDs. "
+                            "Do not change budgets or invent missing evidence. This is the final format retry.",
+                        "failure_stage": stage,
+                        "validation_error": diagnostics["error"],
+                    }
+                    try:
+                        payload = json.loads(original_prompt)
+                    except (TypeError, ValueError):
+                        payload = {"original_request": original_prompt}
+                    if not isinstance(payload, dict):
+                        payload = {"original_request": payload}
+                    payload["response_correction"] = correction
+                    prompt = json.dumps(payload, ensure_ascii=False)
 
     def _invoke_strategy_model(
         self,
@@ -1867,222 +1554,16 @@ class HPOAgent(LangGraphAgent):
             limits.append(current)
         return limits
 
-    @staticmethod
-    def _resource_snapshot(
-        runtime_options: Any = None,
-        declared_profile: Any = None,
-    ) -> Dict[str, Any]:
-        """Collect bounded planning evidence without making resources mandatory."""
-        runtime = dict(runtime_options or {}) if isinstance(runtime_options, dict) else {}
-        snapshot: Dict[str, Any] = {
-            "requested_runtime": {
-                key: runtime.get(key)
-                for key in (
-                    "device",
-                    "ddp_devices",
-                    "distributed_world_size",
-                    "distributed_backend",
-                    "batch_size_semantics",
-                    "precision",
-                    "eval_precision",
-                )
-                if runtime.get(key) is not None
-            },
-            "cpu_count": os.cpu_count(),
-        }
-        requested_devices = runtime.get("ddp_devices")
-        if isinstance(requested_devices, (list, tuple)):
-            snapshot["requested_runtime"]["training_gpu_count"] = len(
-                requested_devices
-            )
-        if isinstance(declared_profile, dict) and declared_profile:
-            snapshot["declared_limits"] = dict(declared_profile)
-        try:
-            import psutil
+    _resource_snapshot = staticmethod(resource_analysis.resource_snapshot)
 
-            memory = psutil.virtual_memory()
-            snapshot["system_memory_gb"] = {
-                "total": round(float(memory.total) / (1024 ** 3), 2),
-                "available": round(float(memory.available) / (1024 ** 3), 2),
-            }
-        except Exception:
-            snapshot["system_memory_gb"] = None
-        try:
-            import torch
-
-            cuda_available = bool(torch.cuda.is_available())
-            snapshot["cuda"] = {
-                "available": cuda_available,
-                "device_count": int(torch.cuda.device_count()) if cuda_available else 0,
-                "devices": [],
-            }
-            if cuda_available:
-                for index in range(int(torch.cuda.device_count())):
-                    properties = torch.cuda.get_device_properties(index)
-                    device = {
-                        "index": index,
-                        "name": str(properties.name),
-                        "total_memory_gb": round(
-                            float(properties.total_memory) / (1024 ** 3),
-                            2,
-                        ),
-                    }
-                    try:
-                        free_bytes, total_bytes = torch.cuda.mem_get_info(index)
-                        device["free_memory_gb"] = round(
-                            float(free_bytes) / (1024 ** 3),
-                            2,
-                        )
-                        device["observed_total_memory_gb"] = round(
-                            float(total_bytes) / (1024 ** 3),
-                            2,
-                        )
-                    except Exception:
-                        pass
-                    snapshot["cuda"]["devices"].append(device)
-        except Exception as exc:
-            snapshot["cuda"] = {
-                "available": None,
-                "probe_error": type(exc).__name__,
-            }
-        return snapshot
-
-    @staticmethod
-    def _search_budget_analysis(
-        search_space: SearchSpace,
-        budgets: List[TrialBudget],
-        hard_max_training_runs: int,
-        initial_trial_count: int,
-        promotion_limits: List[int],
-        reduction_factor: int,
-        campaign: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        counts = [int(initial_trial_count), *[int(item) for item in promotion_limits]]
-        counts = counts[:len(budgets)]
-        counts.extend([0] * max(len(budgets) - len(counts), 0))
-        rung_plan = []
-        estimated_work_units = 0.0
-        work_is_complete = True
-        for budget, count in zip(budgets, counts):
-            unit_work = None
-            if budget.epochs is not None and budget.data_fraction is not None:
-                unit_work = float(budget.epochs) * float(budget.data_fraction)
-                estimated_work_units += count * unit_work
-            else:
-                work_is_complete = False
-            rung_plan.append({
-                "stage": budget.stage,
-                "planned_runs": count,
-                "epochs": budget.epochs,
-                "data_fraction": budget.data_fraction,
-                "max_duration_seconds": budget.max_duration_seconds,
-                "relative_work_per_run": unit_work,
-            })
-        campaign = campaign or {}
-        summaries = list(campaign.get("study_summaries") or [])
-        used_runs = sum(int(item.get("training_runs") or 0) for item in summaries)
-        total_limit = campaign.get("max_total_training_runs")
-        remaining_runs = (
-            max(int(total_limit) - used_runs, 0)
-            if total_limit is not None else None
-        )
-        resource_sensitive = {
-            "batch_size",
-            "sentence_len",
-            "sample_rate",
-            "embedding_dim",
-            "channels",
-        }
-        return {
-            "search_dimension_count": len(search_space.parameters),
-            "search_parameter_names": [
-                parameter.name for parameter in search_space.parameters
-            ],
-            "resource_sensitive_parameters": [
-                parameter.name
-                for parameter in search_space.parameters
-                if parameter.name in resource_sensitive
-            ],
-            "finite_grid_cardinality": HPOPlanningPolicy.grid_cardinality(
-                search_space
-            ),
-            "hard_max_training_runs": int(hard_max_training_runs),
-            "planned_training_runs": sum(counts),
-            "unused_training_run_capacity": max(
-                int(hard_max_training_runs) - sum(counts),
-                0,
-            ),
-            "reduction_factor": int(reduction_factor),
-            "rung_plan": rung_plan,
-            "estimated_relative_work_units": (
-                round(estimated_work_units, 4) if work_is_complete else None
-            ),
-            "campaign_used_training_runs": used_runs,
-            "campaign_remaining_training_runs": remaining_runs,
-            "recent_resource_summaries": [
-                item.get("resource_summary")
-                for item in summaries[-3:]
-                if item.get("resource_summary")
-            ],
-        }
+    _search_budget_analysis = staticmethod(resource_analysis.search_budget_analysis)
     @staticmethod
     def _strategy_proposal_prompt(context: Dict[str, Any]) -> str:
         return render_prompt("hpo_strategy_proposal", context=context)
 
-    @staticmethod
-    def _compact_campaign(campaign: Dict[str, Any]) -> Dict[str, Any]:
-        objective = campaign.get("objective") or {}
-        summaries = list(campaign.get("study_summaries") or [])
-        return {
-            "campaign_id": campaign.get("campaign_id"),
-            "status": campaign.get("status"),
-            "stop_reason": campaign.get("stop_reason"),
-            "objective": {
-                "metric": objective.get("metric"),
-                "mode": objective.get("mode"),
-            },
-            "target_value": campaign.get("target_value"),
-            "max_studies": campaign.get("max_studies"),
-            "max_total_training_runs": campaign.get("max_total_training_runs"),
-            "resource_budget": campaign.get("resource_budget") or {},
-            "confirmation_signature": campaign.get("confirmation_signature") or {},
-            "best_value": campaign.get("best_value"),
-            "study_count": len(summaries),
-            "recent_studies": summaries[-3:],
-        }
+    _compact_campaign = staticmethod(reporting.compact_campaign)
 
-    @staticmethod
-    def _compact_study(study: Any) -> Dict[str, Any]:
-        return {
-            "study_id": getattr(study, "study_id", None),
-            "experiment_id": getattr(study, "experiment_id", None),
-            "status": getattr(study, "status", None),
-            "strategy": getattr(study, "strategy", None),
-            "sampler_strategy": getattr(study, "sampler_strategy", None),
-            "pruner_strategy": getattr(study, "pruner_strategy", None),
-            "candidate_strategy": getattr(study, "candidate_strategy", None),
-            "controller_mode": getattr(study, "controller_mode", None),
-            "sampler_config": dict(getattr(study, "sampler_config", {}) or {}),
-            "search_phases": list(getattr(study, "search_phases", []) or []),
-            "best_trial_id": getattr(study, "best_trial_id", None),
-            "objective": (
-                study.objectives[0].to_dict()
-                if getattr(study, "objectives", None) else None
-            ),
-            "metric_protocol": (getattr(study, "history_context", {}) or {}).get(
-                "metric_protocol"
-            ),
-            "trial_count": len(getattr(study, "trial_ids", []) or []),
-            "max_training_runs": getattr(study, "max_training_runs", None),
-            "initial_trial_count": getattr(study, "initial_trial_count", None),
-            "promotion_limits": list(getattr(study, "promotion_limits", []) or []),
-            "reduction_factor": getattr(study, "reduction_factor", None),
-            "warm_start_trial_count": len(getattr(study, "warm_start_trials", []) or []),
-            "search_space": study.search_space.to_dict(),
-            "budgets": [item.to_dict() for item in getattr(study, "budgets", [])],
-            "recent_reviews": list(getattr(study, "strategy_reviews", []) or [])[-3:],
-            "next_study_proposal": getattr(study, "next_study_proposal", None),
-        }
+    _compact_study = staticmethod(reporting.compact_study)
 
     def _confirmation_signature_from_inputs(
         self,
@@ -2149,70 +1630,36 @@ class HPOAgent(LangGraphAgent):
 
     @staticmethod
     def _reference_search_profile(model_family: str) -> Dict[str, Any]:
-        profiles = {
-            "ecapa_tdnn": {
-                "baseline_parameters": {
-                    "lr": 0.001,
-                    "batch_size": 32,
-                    "margin": 0.2,
-                    "weight_decay": 2e-6,
-                },
-                "stable_search_space": {
-                    "parameters": [
-                        {"name": "lr", "parameter_type": "float", "low": 3e-4, "high": 3e-3, "scale": "log"},
-                        {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
-                        {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
-                        {"name": "weight_decay", "parameter_type": "float", "low": 5e-7, "high": 2e-5, "scale": "log"},
-                    ],
-                    "constraints": [],
-                },
-                "local_adjustment_policy": {
-                    "max_changed_parameters_per_review": 2,
-                    "lr_boundary_factor": 2.0,
-                    "weight_decay_boundary_factor": 3.0,
-                    "margin_step": 0.05,
-                    "resource_first_on_oom": ["batch_size"],
-                    "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
-                },
-                "rationale": "SpeechBrain ECAPA recipe is stable near lr=0.001, margin=0.2, weight_decay=2e-6; HPO should make local evidence-backed moves before broad exploration.",
-            },
-            "resnet": {
-                "baseline_parameters": {
-                    "lr": 0.001,
-                    "batch_size": 32,
-                    "margin": 0.2,
-                    "weight_decay": 2e-6,
-                },
-                "stable_search_space": {
-                    "parameters": [
-                        {"name": "lr", "parameter_type": "float", "low": 3e-4, "high": 3e-3, "scale": "log"},
-                        {"name": "batch_size", "parameter_type": "categorical", "choices": [16, 24, 32]},
-                        {"name": "sentence_len", "parameter_type": "categorical", "choices": [2.0, 3.0, 4.0]},
-                        {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
-                        {"name": "weight_decay", "parameter_type": "float", "low": 5e-7, "high": 2e-5, "scale": "log"},
-                    ],
-                    "constraints": [],
-                },
-                "local_adjustment_policy": {
-                    "max_changed_parameters_per_review": 2,
-                    "lr_boundary_factor": 2.0,
-                    "weight_decay_boundary_factor": 3.0,
-                    "margin_step": 0.05,
-                    "resource_first_on_oom": ["batch_size", "sentence_len"],
-                    "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
-                },
-                "rationale": "ResNet speaker-recognition tuning should stay near the stable SpeechBrain recipe before widening multiple coupled parameters.",
-            },
+        policy = {
+            "max_changed_parameters_per_review": 2,
+            "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
         }
-        return profiles.get(model_family, {
-            "baseline_parameters": {},
-            "stable_search_space": None,
-            "local_adjustment_policy": {
-                "max_changed_parameters_per_review": 2,
-                "preferred_strategy_progression": ["successive_halving", "adaptive_search", "tpe"],
-            },
+        if model_family not in {"ecapa_tdnn", "resnet"}:
+            return {
+                "baseline_parameters": {},
+                "stable_search_space": None,
+                "local_adjustment_policy": policy,
+            }
+        policy.update({
+            "lr_boundary_factor": 2.0,
+            "weight_decay_boundary_factor": 3.0,
+            "margin_step": 0.05,
+            "resource_first_on_oom": ["batch_size"] + (
+                ["sentence_len"] if model_family == "resnet" else []
+            ),
         })
-
+        return {
+            "baseline_parameters": {
+                "lr": 0.001, "batch_size": 32, "margin": 0.2, "weight_decay": 2e-6,
+            },
+            # The model adapter owns these bounds; do not maintain a second copy.
+            "stable_search_space": get_model_adapter(model_family).default_search_space(),
+            "local_adjustment_policy": policy,
+            "rationale": (
+                f"SpeechBrain {model_family} tuning should stay near the stable recipe "
+                "and make local evidence-backed moves before broad exploration."
+            ),
+        }
 
     def _resolve_search_space(self, value: Optional[Dict[str, Any]]) -> SearchSpace:
         return self._build_search_space(value or self._default_model_search_space())

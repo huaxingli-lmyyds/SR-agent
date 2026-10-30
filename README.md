@@ -1,5 +1,7 @@
 # SR-agent
 
+系统分层、模块职责与接口约定见 [系统结构与模块接口](docs/SYSTEM_ARCHITECTURE.md)。
+
 SR-agent is a multi-agent hyperparameter-optimization framework for speaker-recognition experiments. The project includes LangGraph orchestration, data-processing handoff, HPO strategy selection, trial scheduling, structured experiment records, and pluggable model/runner adapters.
 
 ## Real Demo
@@ -104,6 +106,18 @@ split. A broader `--training-exclusion-pairs` file may be supplied when it must
 also exclude a separately held-out test population; it must contain all
 validation speakers. Held-out test pairs are never accepted by the HPO command.
 EER is recorded as a ratio in `[0,1]`, while minDCF is recorded as `×100`.
+
+Use `--output-dir results/RUN_NAME` to keep a complete system run together:
+`manage/`, `dp/`, `hpo/`, and shared `memory/` live under that directory.
+An explicit `--hpo-experiments-dir` overrides only the HPO location, including
+when resuming a previous Study. The root `result.json` reports orchestration
+status; a failed workflow exits with code 1. Dataset-version files retain the
+complete file hashes; data-processing records reference them rather than
+embedding the same inventory twice.
+
+The training-exclusion file is a denylist for the full protocol. Its speakers
+need not all appear in a smaller training-data view; every speaker that does
+appear and is on that list is still excluded.
 
 `--controller-mode` is explicit and persistent: `fixed` never changes the
 requested search policy, `rule` uses only deterministic feedback rules, and
@@ -213,6 +227,31 @@ Resume an interrupted Study from its persisted experiment record:
 python main.py --resume-experiment-id YYYYMMDD_HHMMSS_0
 ```
 
+After repairing an evaluation infrastructure error, explicitly retry only the
+failed evaluations whose training succeeded and whose local checkpoints still
+exist. For an isolated benchmark, point at that run's `hpo/` directory:
+
+```bash
+python main.py \
+  --hpo-experiments-dir experiment_results/five_group_vox1_3gpu/runs/tpe_seed_11/hpo \
+  --resume-experiment-id 20260928_143407_0 \
+  --controller-mode fixed \
+  --reset-failure-guard \
+  --retry-failed-evaluations
+```
+
+This opt-in recovery preserves Trial IDs, checkpoints, training-run counts and
+the frozen validation protocol. Evaluation still consumes any remaining
+Campaign resource allowance. It does not repeat training or reset exhausted
+resource limits. Ordinary resume leaves terminal failed Trials unchanged.
+For an LLM-controlled run, retain `--enable-llm-advisor --controller-mode llm`.
+Recovered validation scores cannot reconstruct the online decisions missed
+during the original failed search.
+
+The SpeechBrain runner evaluates cosine scores. Its x-vector default is
+`configs/verification_cosine_xvector.yaml`; explicitly passing a PLDA config is
+rejected rather than silently returning cosine results.
+
 For an LLM-controlled Study, also pass
 `--enable-llm-advisor --controller-mode llm`. Resume rejects a controller-mode
 mismatch instead of silently changing the experiment policy. An explicitly
@@ -320,6 +359,46 @@ when multiple limits are supplied, the tighter allowance wins.
 
 Benchmark source hashes are frozen: after updating code, use a **new output
 directory** rather than resuming an experiment created with older sources.
+
+## VoxCeleb data roles and internal development split
+
+`configs/train_ecapa_tdnn_vox1_3gpu.yaml` uses `split_unit: session`:
+train/dev share speaker identities but never recording sessions. Each speaker
+with at least two sessions contributes whole sessions to dev; single-session
+speakers stay in train. The 90/10 target applies to **session counts per speaker**,
+so utterance counts need not be exactly 90/10. Both endpoints of the training
+exclusion protocol remain excluded from train/dev. Preparation randomness uses
+`data_prep_seed`, independently of model seeds. `validation_crop: center` fixes
+the internal classification dev crop; training keeps random chunks. Verification
+continues to use its configured scoring protocol and full utterances.
+
+These options also work when invoking the training recipe directly. Configs
+without the new keys keep utterance splitting and the previous crop behavior.
+The split unit enters the preparation cache key. Start a new benchmark output
+directory to compare the new protocol; do not mix it with historical results.
+Preparation metadata also records the exclusion protocol hash, random-segment
+mode and amplitude threshold; changing them rebuilds the local annotation cache.
+Existing caches without those fields are regenerated on their next preparation.
+
+For `speaker_verification`, the data quality policy interprets `train` as training,
+`dev`/`valid` as internal classification development, `validation` as HPO
+validation, and `enrol`/`test` as endpoints of the final verification population.
+Internal dev may share identities with train but not files; evaluation populations
+must remain isolated from training and from each other. Endpoint lists within
+one evaluation population may overlap. Override `quality_policy.split_roles`
+for other manifest names or protocols. Generic tasks retain strict disjointness.
+
+The data-processing workflow binds `runtime_options.training_exclusion_pairs`
+to a protocol hash and protected speaker inventory. If those identities occur
+in the input corpus, audit operations are allowed, while filtering/rewriting
+is rejected until a training-only view is supplied. This protects held-out
+audio even when a processing plan is constructed directly after scope binding.
+The workflow does not yet build that view automatically. Bind the full exclusion
+protocol, covering both HPO validation and final test speakers. Duration warnings
+alone no longer schedule automatic audio removal. VoxCeleb profiling reads speech
+under `wav/` separately from noise/RIR assets and identifies `idNNNN` speaker
+directories rather than video directories. Header/signal inspection is still
+bounded by the quality policy; a passing sampled audit is not a full-corpus scan.
 
 ## Add a New Model
 

@@ -1,6 +1,12 @@
 """Pluggable model execution runners."""
 
-from .contracts import RunnerAdapter, collect_training_result, validate_runner_compatibility
+from .contracts import (
+    RunnerAdapter,
+    TrainingResultCollector,
+    collect_training_result,
+    validate_runner_compatibility,
+    validate_runner_result,
+)
 from .registry import (
     RUNNER_ADAPTERS,
     RUNNER_REGISTRY,
@@ -19,10 +25,12 @@ __all__ = [
     "RUNNER_ADAPTERS",
     "RUNNER_REGISTRY",
     "RunnerAdapter",
+    "TrainingResultCollector",
     "RunnerRegistry",
     "SpeechBrainRunnerAdapter",
     "collect_training_result",
     "get_runner_adapter",
     "register_runner_adapter",
     "validate_runner_compatibility",
+    "validate_runner_result",
 ]

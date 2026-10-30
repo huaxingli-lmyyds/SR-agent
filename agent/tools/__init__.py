@@ -11,7 +11,7 @@ _EXPORTS: Dict[str, Tuple[str, str]] = {
     "GetConfigStructure": ("agent.tools.config_tools", "GetConfigStructure"),
     "ResetConfig": ("agent.tools.config_tools", "ResetConfig"),
     "TrainModel": ("agent.tools.training_tools", "TrainModel"),
-    "EvaluateModel": ("agent.tools.training_tools", "EvaluateModel"),
+    "EvaluateModel": ("agent.tools.evaluation_tools", "EvaluateModel"),
     "AnalyzeResults": ("agent.tools.training_tools", "AnalyzeResults"),
     "RunEvaluation": ("agent.tools.evaluation_tools", "RunEvaluation"),
     "GetExperimentResults": ("agent.tools.experiment_history_tools", "GetExperimentResults"),

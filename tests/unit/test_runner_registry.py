@@ -215,7 +215,7 @@ def test_speechbrain_runner_returns_child_result_before_join(monkeypatch) -> Non
 
     assert SpeechBrainRunnerAdapter().run_training(
         "unused.yaml", {"_hpo_max_duration_seconds": 3.0}
-    ) == expected
+    ) == {**expected, "process_exitcode": 0}
 
 
 def test_speechbrain_runner_reports_early_child_crash_without_waiting_for_deadline(

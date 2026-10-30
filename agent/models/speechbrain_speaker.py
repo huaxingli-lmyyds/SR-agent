@@ -47,7 +47,7 @@ class SpeechBrainResNetAdapter:
 class SpeechBrainXVectorAdapter:
     model_family: str = "xvector"
     implementation: str = "speechbrain"
-    default_evaluation_config: str | None = "recipes/voxceleb/hparams/verification_plda_xvector.yaml"
+    default_evaluation_config: str | None = "verification_cosine_xvector.yaml"
 
     def validate_config(self, config: Dict[str, Any]) -> None:
         required = ("embedding_model", "classifier", "output_folder", "lr_annealing")

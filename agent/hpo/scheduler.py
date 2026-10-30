@@ -176,9 +176,12 @@ class HPOScheduler:
     def run(
         self, study: HPOStudy, *, resume: bool = False,
         reset_failure_guard: bool = False,
+        retry_failed_evaluations: bool = False,
     ) -> SchedulerResult:
         if reset_failure_guard and not resume:
             raise ValueError("reset_failure_guard requires an explicit Study resume")
+        if retry_failed_evaluations and not resume:
+            raise ValueError("retry_failed_evaluations requires an explicit Study resume")
         if resume:
             study = self.service.load_study(study.experiment_id)
         self._study = study
@@ -194,7 +197,9 @@ class HPOScheduler:
                 advice={"failure_guard": guard},
                 strategy_reviews=study.strategy_reviews,
             )
-        self._resume_record = self.service.prepare_resume(study) if resume else {}
+        self._resume_record = self.service.prepare_resume(
+            study, retry_failed_evaluations=retry_failed_evaluations,
+        ) if resume else {}
         if study.status == "completed":
             self.service._refresh_study(study)
             errors = self.service.completion_errors(study)
@@ -521,7 +526,9 @@ class HPOScheduler:
             trial_id, error, stage, failure, attempt=attempt,
         )
         retry_requested = self.retry_policy.should_retry(attempt, failure)
-        can_retry = retry_requested and self.service.retry_budget_available(self.study)
+        # Evaluation-only recovery is explicitly requested by the caller and
+        # must never consume a training retry or restart training implicitly.
+        can_retry = retry_requested and not current.cost.get("evaluation_only") and self.service.retry_budget_available(self.study)
         self.service.record_trial(
             self.study,
             trial_id,

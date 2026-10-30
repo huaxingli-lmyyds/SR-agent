@@ -408,7 +408,7 @@ def test_hpo_strategy_prompt_is_json_only_and_compact() -> None:
     assert payload["schema"]["action"] == "keep_strategy"
     assert "Return raw JSON only." in payload["rules"]
     assert "runtime_review" == payload["context"]["phase"]
-    assert "trusted recipe anchor" in " ".join(payload["rules"])
+    assert "cross_study_memory.local_search_anchor" in " ".join(payload["rules"])
     assert "cross_study_memory.local_search_anchor" in " ".join(payload["rules"])
     assert "```" not in prompt
 

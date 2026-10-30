@@ -18,8 +18,10 @@ from agent.runners.speechbrain_distributed import (
 )
 from agent.utils import ExperimentTracker, get_experiment_artifact_dir  # noqa: F401
 
-from .contracts import HPOStudy, Objective, SearchParameter, SearchSpace, StrategyProposal, Trial, TrialBudget
+from .contracts import HPOStudy, Objective, SearchSpace, StrategyProposal, Trial, TrialBudget
 from .effects import summarize_decision_effect
+from .records import search_space_from_dict, study_from_dict, trial_from_dict, _write_json_atomic
+from .candidates import (_candidate_signature, _condition_matches, _ordered_search_parameters, _constraints_match, _validate_candidate_value)
 from .feedback import HPOFeedbackAnalyzer
 from .history import incompatibility_reason
 from .policies import (
@@ -1440,12 +1442,25 @@ class HPOService:
         self._refresh_study(study)
         return trial
 
-    def prepare_resume(self, study: HPOStudy) -> Dict[str, Any]:
+    def prepare_resume(self, study: HPOStudy, *, retry_failed_evaluations: bool = False) -> Dict[str, Any]:
         """Make a persisted Study safe to continue after its owning process stopped."""
         now = datetime.now().isoformat()
         previous_status = study.status
         promotion_repairs = self._reconcile_promotions(study)
         persisted_trials = self.list_trials(study.experiment_id)
+        evaluation_retries = {}
+        if retry_failed_evaluations:
+            # Validate every checkpoint before reopening anything. Training
+            # failures and successful-but-invalid metrics are not eligible.
+            for trial in persisted_trials:
+                if (trial.status != "failed"
+                    or trial.cost.get("training", {}).get("status") != "success"
+                    or trial.cost.get("evaluation", {}).get("status") != "failed"):
+                    continue
+                checkpoint = trial.cost.get("evaluated_checkpoint")
+                if not checkpoint or not Path(checkpoint).exists():
+                    raise ValueError(f"missing checkpoint for evaluation recovery: {trial.trial_id}")
+                evaluation_retries[trial.trial_id] = checkpoint
         persisted_ids = {trial.trial_id for trial in persisted_trials}
         known_ids = [trial_id for trial_id in study.trial_ids if trial_id in persisted_ids]
         known_id_set = set(known_ids)
@@ -1490,8 +1505,16 @@ class HPOService:
             }
         recovered_trial_ids: List[str] = []
         for trial in persisted_trials:
-            if trial.status != "running":
+            evaluation_checkpoint = evaluation_retries.get(trial.trial_id)
+            if trial.status != "running" and evaluation_checkpoint is None:
                 continue
+            if evaluation_checkpoint is not None:
+                events = list(trial.provenance.get("evaluation_recovery_events") or [])
+                events.append({"recovered_at": now, "previous_error": trial.stop_reason,
+                               "checkpoint": evaluation_checkpoint})
+                trial.provenance["evaluation_recovery_events"] = events
+                trial.cost["evaluation_only"] = True
+                trial.cost["evaluation_retry_count"] = int(trial.cost.get("evaluation_retry_count", 0)) + 1
             trial.status = "suggested"
             trial.stop_reason = None
             trial.cost["resume_count"] = int(trial.cost.get("resume_count", 0)) + 1
@@ -1510,6 +1533,7 @@ class HPOService:
             "resume_count": resume_count,
             "previous_status": previous_status,
             "recovered_trial_ids": recovered_trial_ids,
+            "evaluation_retry_trial_ids": list(evaluation_retries),
             "reconciled_trial_ids": reconciled_trial_ids,
             "promotion_repairs": promotion_repairs,
             "removed_pending_candidate_count": removed_pending_candidate_count,
@@ -2065,193 +2089,3 @@ def _merge_trial_artifacts(
         seen.add(key)
         merged.append(artifact)
     return merged
-
-
-def _write_json_atomic(path: Path, value: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(value, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def _candidate_signature(parameters: Dict[str, Any]) -> str:
-    return json.dumps(parameters, sort_keys=True, ensure_ascii=False, default=str)
-
-
-def _condition_matches(condition: Dict[str, Any], candidate: Dict[str, Any]) -> bool:
-    return not condition or all(candidate.get(key) == value for key, value in condition.items())
-
-
-def _ordered_search_parameters(search_space: SearchSpace) -> List[SearchParameter]:
-    """Resolve conditional parameters without relying on declaration order."""
-    remaining = list(search_space.parameters)
-    resolved = set()
-    ordered: List[SearchParameter] = []
-    while remaining:
-        ready = [
-            parameter for parameter in remaining
-            if set(parameter.condition).issubset(resolved)
-        ]
-        if not ready:
-            cycle = ", ".join(parameter.name for parameter in remaining)
-            raise ValueError(f"cyclic or unknown search-space conditions: {cycle}")
-        for parameter in ready:
-            remaining.remove(parameter)
-            resolved.add(parameter.name)
-            ordered.append(parameter)
-    return ordered
-
-
-def _constraints_match(candidate: Dict[str, Any], constraints: List[Dict[str, Any]]) -> bool:
-    for constraint in constraints:
-        parameter = constraint.get("parameter")
-        operator = constraint.get("operator")
-        expected = constraint.get("value")
-        current = candidate.get(parameter)
-        if current is None:
-            continue
-        try:
-            if operator == "lte":
-                matches = current <= expected
-            elif operator == "gte":
-                matches = current >= expected
-            elif operator == "eq":
-                matches = current == expected
-            elif operator == "in":
-                matches = current in expected
-            else:
-                return False
-            if not matches:
-                return False
-        except (TypeError, ValueError):
-            return False
-    return True
-
-
-def _validate_candidate_value(parameter: SearchParameter, value: Any) -> Any:
-    if parameter.parameter_type == "categorical":
-        if value not in parameter.choices:
-            raise ValueError(
-                f"candidate value for {parameter.name} is not one of the allowed choices"
-            )
-        return value
-    if parameter.parameter_type == "int":
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise ValueError(f"candidate value for {parameter.name} must be an integer")
-        normalized: Any = int(value)
-    elif parameter.parameter_type == "float":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"candidate value for {parameter.name} must be numeric")
-        normalized = float(value)
-    else:
-        raise ValueError(f"unsupported parameter type: {parameter.parameter_type}")
-    if parameter.low is None or parameter.high is None:
-        raise ValueError(f"low/high are required for {parameter.name}")
-    if normalized < parameter.low or normalized > parameter.high:
-        raise ValueError(
-            f"candidate value for {parameter.name} is outside [{parameter.low}, {parameter.high}]"
-        )
-    return normalized
-
-
-def search_space_from_dict(data: Dict[str, Any]) -> SearchSpace:
-    return SearchSpace(
-        parameters=[SearchParameter(**item) for item in data.get("parameters") or []],
-        constraints=data.get("constraints") or [],
-    )
-
-
-def study_from_dict(data: Dict[str, Any]) -> HPOStudy:
-    study = HPOStudy(
-        study_id=data["study_id"],
-        experiment_id=data["experiment_id"],
-        strategy=data["strategy"],
-        search_space=search_space_from_dict(data["search_space"]),
-        objectives=[Objective(**item) for item in data.get("objectives") or []],
-        budgets=[TrialBudget(**item) for item in data.get("budgets") or []],
-        sampler_strategy=data.get("sampler_strategy"),
-        pruner_strategy=data.get("pruner_strategy"),
-        candidate_strategy=data.get("candidate_strategy"),
-        controller_mode=data.get("controller_mode", "auto"),
-        reduction_factor=data.get("reduction_factor", 3),
-        max_trials=data.get("max_trials"),
-        initial_trial_count=data.get("initial_trial_count"),
-        promotion_limits=data.get("promotion_limits") or [],
-        max_training_runs=data.get("max_training_runs"),
-        min_completed_per_rung=data.get("min_completed_per_rung", 1),
-        candidate_batch_size=data.get("candidate_batch_size"),
-        sampler_config=data.get("sampler_config") or {},
-        search_phases=data.get("search_phases") or [],
-        hypotheses=data.get("hypotheses") or [],
-        pending_candidate_proposals=data.get("pending_candidate_proposals") or [],
-        candidate_proposal_reviews=data.get("candidate_proposal_reviews") or [],
-        candidate_generation_reviews=data.get("candidate_generation_reviews") or [],
-        scheduler_state=data.get("scheduler_state") or {},
-        constraints=data.get("constraints") or [],
-        strategy_reviews=data.get("strategy_reviews") or [],
-        next_study_proposal=data.get("next_study_proposal"),
-        warm_start_trials=data.get("warm_start_trials") or [],
-        history_context=data.get("history_context") or {},
-        trial_ids=data.get("trial_ids") or [],
-        best_trial_id=data.get("best_trial_id"),
-        status=data.get("status", "created"),
-        stop_reason=data.get("stop_reason"),
-        random_seed=data.get("random_seed", 0),
-        created_at=data.get("created_at", ""),
-        updated_at=data.get("updated_at", ""),
-    )
-    if not study.search_phases:
-        sampler = (
-            study.candidate_strategy
-            or study.sampler_strategy
-            or ("random_search" if study.strategy == "successive_halving" else study.strategy)
-        )
-        study.search_phases = [{
-            "phase_index": 0,
-            "sampler": sampler,
-            "sampler_config": dict(study.sampler_config),
-            "start_trial_index": 0,
-            "end_trial_index": None,
-            "trigger": "legacy_study_migration",
-            "proposal_id": None,
-            "decision_id": None,
-            "reason_codes": [],
-            "fallback_sampler": None,
-            "fallback_sampler_config": {},
-            "created_at": study.created_at,
-        }]
-    return study
-
-
-def trial_from_dict(data: Dict[str, Any]) -> Trial:
-    return Trial(
-        trial_id=data["trial_id"],
-        parameters=data.get("parameters") or {},
-        budget=TrialBudget(**data["budget"]),
-        status=data.get("status", "suggested"),
-        parent_trial_id=data.get("parent_trial_id"),
-        rung=data.get("rung", 0),
-        metrics=data.get("metrics") or {},
-        intermediate_metrics=data.get("intermediate_metrics") or [],
-        cost=data.get("cost") or {},
-        artifacts=data.get("artifacts") or [],
-        stop_reason=data.get("stop_reason"),
-        candidate_source=str(data.get("candidate_source") or "optimizer"),
-        search_phase=int(data.get("search_phase") or 0),
-        proposal_id=(
-            str(data["proposal_id"]) if data.get("proposal_id") is not None else None
-        ),
-        hypothesis_id=(
-            str(data["hypothesis_id"]) if data.get("hypothesis_id") is not None else None
-        ),
-        provenance=data.get("provenance") or {},
-        created_at=data.get("created_at", ""),
-        updated_at=data.get("updated_at", ""),
-    )

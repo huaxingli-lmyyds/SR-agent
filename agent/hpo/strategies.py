@@ -292,6 +292,7 @@ class OptunaTPEStrategy:
             seed=seed,
             multivariate=bool(sampler_config.get("multivariate", False)),
             n_startup_trials=int(sampler_config.get("n_startup_trials", 3)),
+            constant_liar=True,
         )
         study = optuna.create_study(
             direction="maximize" if objective and objective.mode == "max" else "minimize",
@@ -328,7 +329,13 @@ class OptunaTPEStrategy:
                 if _condition_matches(parameter.condition, candidate):
                     candidate[parameter.name] = _optuna_suggest(trial, parameter)
             signature = _signature(candidate)
-            if signature in seen or not _constraints_match(candidate, search_space.constraints):
+            if signature in seen:
+                # Failed Optuna trials are ignored by TPE. Retain collisions
+                # as pending within this temporary Study so constant-liar
+                # sampling explores unseen values instead of repeating the
+                # same optimum until the retry limit looks like exhaustion.
+                continue
+            if not _constraints_match(candidate, search_space.constraints):
                 study.tell(trial, state=optuna.trial.TrialState.FAIL)
                 continue
             seen.add(signature)

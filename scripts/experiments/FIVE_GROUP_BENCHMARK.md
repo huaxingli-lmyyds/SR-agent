@@ -1,10 +1,10 @@
 # 五组超参数优化对比实验
 
-入口：[run_hpo_benchmark.py](E:/voxceleb/sr-agent/SR-agent/scripts/experiments/run_hpo_benchmark.py)
+入口：[run_hpo_benchmark.py](run_hpo_benchmark.py)
 
-配置：[five_group_ecapa.json](E:/voxceleb/sr-agent/SR-agent/configs/experiments/five_group_ecapa.json)
+配置：[five_group_ecapa.json](../../configs/experiments/five_group_ecapa.json)
 
-在 `E:\voxceleb\sr-agent\SR-agent` 项目目录执行。示例中的 Python 应为项目的真实训练环境，包含兼容的 PyTorch/CUDA、SpeechBrain、Optuna、LangGraph 和项目依赖。这里的五组比较针对 HPO 子系统；各组共享数据，不混入数据清洗或 Coordinator 路由差异。
+在项目根目录执行。示例中的 Python 应为项目的真实训练环境，包含兼容的 PyTorch/CUDA、SpeechBrain、Optuna、LangGraph 和项目依赖。这里的五组比较针对 HPO 子系统；各组共享数据，不混入数据清洗或 Coordinator 路由差异。
 
 原 comparison/classic Optuna 入口、ResNet/XVector 专用比较启动器及其专用测试已移除。现在仅维护本入口；切换模型应使用匹配的训练/验证配置，而不是复制另一套实验循环。核心训练、评估、HPO 和恢复回归测试保留。
 
@@ -24,7 +24,7 @@ SH 和系统组分别有 13 次训练额度。晋级子 Trial 使用独立输出
 
 固定基线显式返回 keep 决策，不触发默认规则控制器。系统组允许在 `random_search/tpe/adaptive_search` 之间选择和调整配置；可以在初始硬边界内调整空间，但不能增加参数、扩大到原边界之外、改变预算/晋级规则，也不能使用 `agent_proposal`。
 
-**默认是固定搜索配额实验，不是等 GPU 时间实验。** 单保真搜索约为 `9×24=216` 个全数据 epoch；SH 约为 `42.75` 个全数据 epoch，不含评估/控制开销。不能把两者称为相同计算预算。可对比质量与实际成本，系统与 TPE+SH 的预算安排则相同。若要严格等 GPU 小时的结论，需要另加实测资源门禁；本入口没有假装提供该功能。
+**默认是固定搜索配额实验，不是等 GPU 时间实验。** 单保真搜索约为 `9×24=216` 个全数据 epoch；SH 约为 `42.75` 个全数据 epoch，不含评估/控制开销。不能把两者称为相同计算预算。可对比质量与实际成本，系统与 TPE+SH 的预算安排则相同。配置可显式设置 `max_gpu_hours`、`max_wall_seconds`，作为每个组/种子的 Campaign 硬上限；提前耗尽且没有完整确认的运行会保留为失败。设置相同上限也不保证各组实际耗时相等。
 
 ## 2. 准备验证集与最终测试集
 
@@ -88,6 +88,30 @@ python scripts/experiments/run_hpo_benchmark.py --data-folder E:/datasets/VoxCel
 
 系统组沿用项目已有 `.env` 中的模型服务配置，例如 `ZHIPUAI_API_KEY`、`ZHIPUAI_API_BASE_URL`。API 地址应为兼容接口根地址，不要包含 `/chat/completions`。模型名称和温度在 JSON 中配置。没有可用 LLM 时，优化可能按安全回退继续，但结果会记录 `advisor_failures` 和 `controller_degraded`；这种运行不能当成智能体有效性证据。
 
+`advisor_failures` 统计请求失败，`invalid_advisor_proposals` 统计未形成有效提案的咨询，
+包括解析/schema 错误及请求失败回退；两者可能重叠，不应相加。
+只要存在部分失败，系统组也会标记 `controller_degraded`；训练成功状态与控制器质量分别保留。
+日志重定向到文件时自动关闭训练、数据准备及 embedding 的进度条，保留 epoch 汇总和错误信息。
+
+LLM 咨询使用独立 HTTP 客户端，SDK 隐式重试关闭；每次请求遇到连接、超时、429/5xx 等暂时故障最多尝试三次，
+以 1/2 秒退避重试。鉴权和普通参数错误立即失败。工具轮次、网络重试和一次格式重新生成共享
+300 秒咨询时限，并受 Campaign 剩余墙钟预算约束；单次请求超时最多 120 秒。
+网络耗时由 HTTP 客户端的超时控制，超过总预算后返回的响应不会被采用。
+`advisor.jsonl` 保存每次传输尝试、脱敏后的异常因果链、HTTP 状态与请求 ID；
+`proposals.jsonl` 保存格式校验和重新生成记录。JSON 模式仍须经过严格 schema、证据引用和策略门禁，
+不能靠删除非法字符修复模型内容。工具声明使用 strict 模式以兼容 SDK 的 JSON 自动解析。
+服务接受 JSON 模式并不保证所有回复都符合格式；实际探针已验证说明文字导致的失败能通过一次重新生成恢复。
+只有服务明确报告不支持 JSON 模式/工具时才降级对应能力。
+
+默认尊重环境代理。服务器能直连服务时，可在项目 `.env` 设置 `SR_AGENT_LLM_PROXY_MODE=direct`，
+只让 LLM 客户端直连；`environment` 恢复环境代理。不会在失败时暗中切换网络出口。
+新实验前可用虚构内容检查链路（不会读取训练数据，仍会产生少量 API 调用）：
+
+```bash
+python scripts/tools/check_llm_connection.py --requests 3
+```
+
+
 各个组的独立运行同样支持 `--only system` 或 `--only tpe`。如果分开运行，请保持相同输入、配置、种子和数据版本；结果目录不要复用。更推荐一次声明全部组，让入口自动隔离和汇总。
 
 ## 5. 中断恢复
@@ -110,7 +134,19 @@ python scripts/experiments/run_hpo_benchmark.py --resume --output-dir E:/experim
 
 同一个输出目录有操作系统文件锁，禁止两个进程同时写。进程退出后锁自动释放，不需要删除锁文件。
 
-真实 SpeechBrain 运行还共用本机临时目录中的执行锁：同一临时目录下通过本入口启动的任务，即使输出目录不同，也不能并行抢占设备（保守地连不同 GPU 也串行）。这无法阻止其他训练程序占用 GPU；正式测时仍须自行保持设备空闲，并保持数据/增强音频不被外部修改。
+真实 SpeechBrain 默认共用本机临时目录中的独占执行锁。Linux 上可在 JSON 中显式设置
+`parallel_single_gpu: true`，并将每个进程的 `CUDA_VISIBLE_DEVICES` 设为一张卡的完整
+`GPU-...` UUID、`device` 设为 `cuda:0`，不使用 DDP。此时全局锁使用共享模式，
+每张卡另有独占锁：不同卡可并行，相同卡或相同输出目录仍互斥；默认串行模式与并行
+模式也互斥。恢复时校验冻结的 GPU UUID。数字索引或多卡可见列表不能启用此模式，
+以免设备别名造成重复占卡。该锁无法阻止入口以外的训练程序，实际测时仍需记录外部负载。
+
+快速配置 [five_group_ecapa_vox1_fast.json](../../configs/experiments/five_group_ecapa_vox1_fast.json)
+保留原 20.8M ECAPA 网络，使用 BF16、batch 32、三个种子；完整训练 6 轮，SH 为
+9×1 → 3×3 → 1×6 轮。训练数据须配套冻结为 256 个身份、每人四个会话各三个文件，
+按会话 75/25 划分；验证保留 100 个隔离身份及 2,000 对，最终测试保持原协议。
+该配置用于快速代理对照，不能当作完整 VoxCeleb1 训练效果。学习率半周期为 72 个
+更新，对应此数据与 batch 的一轮；更换训练规模时必须重新计算。
 
 ## 6. 独立最终测试
 
@@ -124,6 +160,31 @@ python scripts/experiments/run_hpo_benchmark.py --evaluate-test --output-dir E:/
 - 检查赢家 checkpoint 和运行配置的哈希。
 - 不根据测试分数重新选赢家，也不把测试成绩写入原 HPO 记录。
 - 已有最终测试结果不会重复评估；失败结果也保留。
+
+已完成搜索的单 GPU 任务可显式选择另一张卡做测试。此选项只允许用于 `--evaluate-test`，
+不改变训练计划；源码、依赖、输入和赢家 checkpoint 的冻结校验照常执行。
+实际测试 GPU 写入 `evaluation_assignments.jsonl` 和各测试结果。
+
+```bash
+python scripts/experiments/run_hpo_benchmark.py --evaluate-test --output-dir results/NEW_RUN --evaluation-gpu GPU-完整UUID
+```
+
+具有 `launch_manifest.json` 的多任务 Campaign 可使用独立评估队列：
+
+```bash
+python scripts/experiments/run_heldout_queue.py --campaign-dir results/NEW_CAMPAIGN --gpus 4,5,6,7 --dry-run
+python scripts/experiments/run_heldout_queue.py --campaign-dir results/NEW_CAMPAIGN --gpus 4,5,6,7
+```
+
+队列在显式 GPU 池中选择空闲卡，默认门槛为 4096 MiB 可用显存、利用率不高于 10%，
+可用 `--min-free-mib` 调整其他模型所需显存。它与原 supervisor 共用互斥锁；原 supervisor
+应先退出。连续无可用卡且无活动任务时，默认等待 1800 秒后退出并保留待办；单任务也有
+1800 秒执行时限。`heldout_queue_status.json` 记录等待原因、设备和任务状态，
+日志写入 `heldout_queue_logs/`。所有搜索终态提交后才会开始测试，已有测试成功或失败结果均不重跑。
+队列结束后汇总 `heldout_results.json/csv`；队列状态单独保存，不改写历史训练调度记录。
+
+2026-10-30 修复前的实验已全部完成；它们继续保留原源码指纹。新源码不能直接续跑旧冻结计划，
+也不要改写旧指纹来跳过校验。后续实验使用新输出目录和新源码快照。
 
 ## 7. 结果在哪里
 
@@ -166,4 +227,7 @@ python -m pytest tests/unit/test_hpo_benchmark.py tests/unit/test_benchmark_voxc
 
 这些测试使用真实 HPO 调度器、假训练器和假 LLM，不消耗 GPU 训练或模型 API 费用。真实 GPU 效果需要你在准备好数据与环境后运行上述正式命令。
 
-2026-08-28 清理后验证：上述定向回归 45 项通过；全套测试 334 通过、1 跳过、3 失败。失败仍为两项缺少 PyTorch 的音频兼容测试，以及既有 `test_debug_subset_preview_version_hashes_and_quality_gate` 的 affected_samples 断言；没有删除或跳过这些核心测试。此次未执行真实 GPU 训练或在线 LLM 调用，不能据此声称真实环境已完全验收。
+2026-10-23 启动检查：完整回归 568 通过、1 跳过；115 个生产 Python 文件语法检查和
+Ruff F/E9 检查通过。GPU 5 的 BF16/batch 32 实际一轮训练、验证和 checkpoint 锁定成功。
+后续并行锁验证与本批实验的最终状态以对应实验目录报告为准。
+并行锁补丁后的完整回归为 574 通过、1 跳过；GPU 0、2 的并行真实校准均成功。

@@ -114,6 +114,12 @@ class TaskDispatcher:
         try:
             agent = self.registry.create(agent_type, request.action)
             result = agent.execute_task(request)
+            if not isinstance(result, AgentTaskResult):
+                raise TypeError("execute_task must return AgentTaskResult")
+            if result.status not in {"success", "failed"}:
+                raise ValueError("agent task status must be 'success' or 'failed'")
+            if result.request_id not in {None, request.request_id}:
+                raise ValueError("agent result request_id does not match the request")
         except Exception as exc:
             result = AgentTaskResult(
                 status="failed",

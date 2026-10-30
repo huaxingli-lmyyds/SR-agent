@@ -64,9 +64,19 @@ class QualityPolicy:
     require_disjoint_speakers: bool = True
     require_disjoint_files: bool = True
     require_valid_trials: bool = True
+    split_roles: Dict[str, str] = field(default_factory=dict)
     hash_file_limit: int = 10000
 
     def __post_init__(self) -> None:
+        roles = {"train", "internal_dev", "hpo_validation", "final_test", "cohort"}
+        if not isinstance(self.split_roles, dict) or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(role, str)
+            or role not in roles
+            for name, role in self.split_roles.items()
+        ):
+            raise ValueError("split_roles must map split names to known data roles")
         for name in ("max_audio_files", "max_signal_files", "hash_file_limit"):
             value = getattr(self, name)
             if (
@@ -110,6 +120,36 @@ class QualityPolicy:
                 )
             ):
                 raise ValueError(f"{name} must contain positive integers")
+
+    @classmethod
+    def for_task(
+        cls, task_type: str, value: Optional[Dict[str, Any]] = None
+    ) -> "QualityPolicy":
+        settings = dict(value or {})
+        if task_type == "speaker_verification" and "split_roles" not in settings:
+            settings["split_roles"] = {
+                "train": "train",
+                "dev": "internal_dev",
+                "valid": "internal_dev",
+                "validation": "hpo_validation",
+                "enrol": "final_test",
+                "test": "final_test",
+            }
+        return cls.from_dict(settings)
+
+    def permits_overlap(
+        self, left: str, right: str, *, files: bool = False
+    ) -> bool:
+        a, b = self.split_roles.get(left), self.split_roles.get(right)
+        # Enrol/test are two endpoint lists of one verification population.
+        if a == b and a in {"hpo_validation", "final_test"}:
+            return True
+        return (
+            not files
+            and a is not None
+            and b is not None
+            and {a, b} <= {"train", "internal_dev", "cohort"}
+        )
 
     @classmethod
     def from_dict(cls, value: Optional[Dict[str, Any]]) -> "QualityPolicy":

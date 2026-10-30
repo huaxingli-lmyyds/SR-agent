@@ -24,11 +24,13 @@ from agent.core.contracts import OperationResult
 from agent.core.experiment_service import ExperimentService
 from agent.hpo import FailurePolicy, HPOService
 from agent.hpo.protocol import (
-    METRIC_PROTOCOL_ID,
-    METRIC_UNITS,
     resolve_hpo_validation_protocol,
 )
 from agent.runners import collect_training_result
+from agent.runners.contracts import validate_runner_result
+from agent.tasks.contracts import task_metric_metadata
+from agent.tools.runtime import apply_runtime_deadline, build_run_options
+from agent.tools.evaluation_tools import EvaluateModel as EvaluateModel
 
 @tool
 def TrainModel(config_path: Optional[str] = None,
@@ -111,6 +113,7 @@ def TrainModel(config_path: Optional[str] = None,
             study = hpo_service.load_study(str(experiment_id))
 
         recorded_task = dict((record or {}).get("task") or {})
+        metric_metadata = task_metric_metadata(task_adapter, recorded_task)
         if study is not None:
             objective = study.objectives[0]
             primary_metric, metric_mode = objective.metric, objective.mode
@@ -142,8 +145,7 @@ def TrainModel(config_path: Optional[str] = None,
                     "dataset": df,
                     "primary_metric": primary_metric,
                     "metric_mode": metric_mode,
-                    "metric_protocol": METRIC_PROTOCOL_ID,
-                    "metric_units": dict(METRIC_UNITS),
+                    **metric_metadata,
                 },
                 model={
                     "family": model_family,
@@ -220,39 +222,23 @@ def TrainModel(config_path: Optional[str] = None,
             overrides["_hpo_data_fraction"] = float(data_fraction)
         if max_duration is not None:
             overrides["_hpo_max_duration_seconds"] = float(max_duration)
-        run_opts: Dict[str, Any] = {}
-        if device:
-            run_opts["device"] = device
-        if ddp_devices:
-            run_opts["ddp_devices"] = ddp_devices
-            run_opts["distributed_backend"] = distributed_backend or "nccl"
-            run_opts["batch_size_semantics"] = batch_size_semantics or "global"
-        if precision:
-            run_opts["precision"] = precision
-        if eval_precision:
-            run_opts["eval_precision"] = eval_precision
+        run_opts = build_run_options(
+            device=device, precision=precision, eval_precision=eval_precision,
+            ddp_devices=ddp_devices, distributed_backend=distributed_backend,
+            batch_size_semantics=batch_size_semantics,
+        )
         if run_opts:
             overrides["_run_opts"] = run_opts
-        if runtime_deadline_epoch is not None:
-            from time import time
-            from agent.hpo.resources import positive_limit, ResourceBudgetExhausted
-            positive_limit(runtime_deadline_epoch, "runtime_deadline_epoch")
-            remaining = runtime_deadline_epoch - time()
-            if remaining <= 0:
-                raise ResourceBudgetExhausted("resource budget expired during training preparation")
-            overrides["_hpo_max_duration_seconds"] = min(
-                remaining, float(max_duration) if max_duration is not None else remaining,
-            )
-        train_result = runner_adapter.run_training(config_path_str, overrides)
+        apply_runtime_deadline(overrides, runtime_deadline_epoch, "training")
+        train_result = validate_runner_result(
+            runner_adapter.run_training(config_path_str, overrides), "training"
+        )
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
 
-        status = "success"
-        error_msg = None
-        if isinstance(train_result, dict) and train_result.get("status") == "failed":
-            status = "failed"
-            error_msg = train_result.get("error")
+        status = train_result["status"]
+        error_msg = train_result.get("error")
 
         collected = collect_training_result(runner_adapter, train_result, output_folder_path, exp_dir)
         collected["status"] = status
@@ -265,14 +251,15 @@ def TrainModel(config_path: Optional[str] = None,
 
         # experiment_tracker 更新记录
         operation_result = runner_adapter.normalize_training_result(collected)
+        operation_result.status = status
+        operation_result.error = operation_result.error or error_msg
         operation_result.task = {
             **((record or {}).get("task") or {}),
             "type": task_type,
             "dataset": df,
             "primary_metric": primary_metric,
             "metric_mode": metric_mode,
-            "metric_protocol": recorded_task.get("metric_protocol") or METRIC_PROTOCOL_ID,
-            "metric_units": recorded_task.get("metric_units") or dict(METRIC_UNITS),
+            **metric_metadata,
         }
         operation_result.model = {
             **((record or {}).get("model") or {}),
@@ -290,8 +277,7 @@ def TrainModel(config_path: Optional[str] = None,
             "training_exclusion_pairs_sha256": protocol_runtime.get(
                 "training_exclusion_pairs_sha256"
             ),
-            "metric_protocol": recorded_task.get("metric_protocol")
-            or METRIC_PROTOCOL_ID,
+            "metric_protocol": metric_metadata["metric_protocol"],
         })
         for artifact in operation_result.artifacts:
             if trial_id:
@@ -335,11 +321,11 @@ def TrainModel(config_path: Optional[str] = None,
                         "max_duration_seconds": float(max_duration) if max_duration is not None else None,
                         "terminated_by_budget": bool(collected.get("terminated_by_budget", False)),
                         "process_exitcode": collected.get("process_exitcode"),
+                        "runtime": dict(collected.get("runtime") or {}),
                         "training_exclusion_pairs_sha256": protocol_runtime.get(
                             "training_exclusion_pairs_sha256"
                         ),
-                        "metric_protocol": recorded_task.get("metric_protocol")
-                        or METRIC_PROTOCOL_ID,
+                        "metric_protocol": metric_metadata["metric_protocol"],
                     },
                     "failure_category": failure.category if failure else None,
                     "recoverable": failure.recoverable if failure else None,
@@ -368,31 +354,6 @@ def TrainModel(config_path: Optional[str] = None,
             status="failed",
             stage="training",
             error=f"{type(e).__name__}: {e}",
-            experiment_id=experiment_id,
-        ).to_json()
-
-
-@tool
-def EvaluateModel(
-    experiment_id: Optional[str] = None,
-    verification_config: Optional[str] = None,
-    verification_pairs: Optional[str] = None,
-    evaluation_split: str = "test",
-) -> str:
-    """Evaluate through the registered runner and return OperationResult JSON."""
-    try:
-        from agent.tools.evaluation_tools import RunEvaluation
-        return RunEvaluation.invoke({
-            "experiment_id": experiment_id,
-            "verification_config": verification_config,
-            "verification_pairs": verification_pairs,
-            "evaluation_split": evaluation_split,
-        })
-    except Exception as exc:
-        return OperationResult(
-            status="failed",
-            stage="evaluation",
-            error=str(exc),
             experiment_id=experiment_id,
         ).to_json()
 

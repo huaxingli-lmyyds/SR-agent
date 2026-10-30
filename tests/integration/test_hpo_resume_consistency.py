@@ -298,8 +298,13 @@ def test_coordinator_resume_reads_snapshot_before_mutable_source(study_factory, 
     snapshot = service.tracker.get_config_snapshot(study.experiment_id)
     coordinator = object.__new__(orchestrator.CoordinatorAgent)
     coordinator.config_path = "missing-original-config.yaml"
-    monkeypatch.setattr(orchestrator, "ExperimentTracker", lambda *_: service.tracker)
-    monkeypatch.setattr(orchestrator, "get_hpo_experiments_dir", lambda: snapshot.parent)
+    coordinator.hpo_experiments_dir = service.tracker.experiments_dir
+
+    def capture_tracker(directory):
+        assert directory == service.tracker.experiments_dir
+        return service.tracker
+
+    monkeypatch.setattr(orchestrator, "ExperimentTracker", capture_tracker)
 
     def capture_parser(config_path):
         assert config_path == str(snapshot)

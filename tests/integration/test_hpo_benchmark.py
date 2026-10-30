@@ -474,7 +474,30 @@ def test_different_output_roots_share_real_runner_exclusion(
     cfg["runner"] = "speechbrain"
     benchmark.write_json(env.config, cfg)
     monkeypatch.setattr(benchmark.tempfile, "gettempdir", lambda: str(tmp_path))
+    # This fixture uses a fake dataset; isolate the lock contract from real
+    # VoxCeleb inventory preparation.
+    monkeypatch.setattr(benchmark, "freeze_inputs", lambda *args: None)
     with benchmark.exclusive_run(tmp_path / "sr-agent-speechbrain-benchmark"):
         with pytest.raises(OSError):
             benchmark.main(env.args + ["--only", "default_parameters"])
     assert not env.runner.training and not env.calls
+
+
+def test_evaluate_on_another_gpu_records_assignment_without_changing_training(setup_benchmark, monkeypatch):
+    env = setup_benchmark
+    first = "GPU-00000000-0000-0000-0000-000000000001"
+    second = "GPU-00000000-0000-0000-0000-000000000002"
+    cfg = benchmark.read_json(env.config)
+    cfg.update(parallel_single_gpu=True, device="cuda:0")
+    benchmark.write_json(env.config, cfg)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", first)
+    assert benchmark.main(env.args + ["--only", "default_parameters"]) == 0
+    before = (env.output / "benchmark_plan.json").read_bytes()
+    assert benchmark.main(["--evaluate-test", "--output-dir", str(env.output), "--evaluation-gpu", second]) == 0
+    assert (env.output / "benchmark_plan.json").read_bytes() == before
+    rows = benchmark.read_json(env.output / "heldout_results.json")
+    assert rows[0]["evaluation_gpu_uuid"] == second
+    assert rows[0]["training_gpu_assignment"] == {"physical_gpu_uuid": first}
+    audit = benchmark.read_events(env.output / "evaluation_assignments.jsonl")
+    assert audit[0]["evaluation_gpu_uuid"] == second
+    assert len(env.runner.training) == 1

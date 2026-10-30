@@ -7,9 +7,14 @@ from pathlib import Path
 from typing import Union, List, Any
 from datetime import datetime
 from threading import Lock
+import sys
 
-from agent.utils.agent_middleware import build_agent_logging_middleware
 from agent.utils.path_tool import resolve_project_path
+
+
+def progressbar_enabled(run_opts=None) -> bool:
+    """Keep interactive progress while redirected logs contain only events."""
+    return sys.stderr.isatty() and not bool((run_opts or {}).get("noprogressbar"))
 
 
 class Logger:
@@ -51,26 +56,16 @@ def get_logger(log_path: Union[str, Path]) -> Logger:
     return Logger(log_path)
 
 
-class AgentLogger:
+class AgentLogger(Logger):
     """智能体日志记录器，提供中间件集成。"""
 
     def __init__(self, log_path: Union[str, Path], truncate_limit: int = 800):
-        self.log_path = resolve_project_path(log_path)
+        super().__init__(log_path)
         self.truncate_limit = truncate_limit
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = Lock()
 
-    def append(self, message: str) -> None:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with self._lock:
-            with self.log_path.open("a", encoding="utf-8") as fout:
-                fout.write(f"{timestamp} {message}\n")
-
-    def _truncate(self, text: str) -> str:
-        text = text.strip()
-        if len(text) <= self.truncate_limit:
-            return text
-        return f"{text[:self.truncate_limit]}..."
+    append = Logger.write
 
     def build_middleware(self) -> List[Any]:
+        from agent.utils.agent_middleware import build_agent_logging_middleware
+
         return build_agent_logging_middleware(self, truncate_limit=self.truncate_limit)

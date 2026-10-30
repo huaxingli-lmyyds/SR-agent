@@ -13,9 +13,9 @@ import pytest
 from recipes.voxceleb.verification_compat import parse_verification_pair
 
 
-@pytest.mark.parametrize("split_speaker", [True, False])
+@pytest.mark.parametrize("split_speaker,split_unit", [(True, "utterance"), (False, "utterance"), (False, "session")])
 def test_split_excludes_both_pair_sides_with_native_paths(
-    tmp_path, split_speaker
+    tmp_path, split_speaker, split_unit
 ):
     source = Path("recipes/voxceleb/voxceleb_prepare.py")
     module = ast.parse(source.read_text(encoding="utf-8"))
@@ -46,7 +46,7 @@ def test_split_excludes_both_pair_sides_with_native_paths(
         "0 left/video/audio.wav right_only/video/audio.wav\n", encoding="utf-8"
     )
     train, dev = namespace["_get_utt_split_lists"](
-        [str(tmp_path)], [90, 10], str(pairs), split_speaker
+        [str(tmp_path)], [90, 10], str(pairs), split_speaker, split_unit
     )
     assert len(train + dev) == 1
     assert "training" in str(Path((train + dev)[0]))
@@ -90,6 +90,7 @@ def test_random_segment_csv_reads_metadata_without_decoding(tmp_path):
         "csv": csv,
         "logger": logging.getLogger(__name__),
         "tqdm": lambda values, **_kwargs: values,
+        "progressbar_enabled": lambda: False,
         "audio_io": MetadataOnlyAudioIO(),
         "SAMPLERATE": 16000,
     }
@@ -147,6 +148,18 @@ def test_training_speaker_count_is_bound_from_exclusion_protocol(tmp_path):
     assert _training_annotation_speaker_count(annotation) == 2
 
 
+def test_training_only_view_accepts_full_corpus_exclusions(tmp_path):
+    from recipes.voxceleb.speaker_inventory import eligible_training_speaker_ids
+
+    (tmp_path / "data" / "wav" / "id10001").mkdir(parents=True)
+    pairs = tmp_path / "excluded.txt"
+    pairs.write_text("0 id10002/a/1.wav id10003/a/1.wav\n")
+    assert eligible_training_speaker_ids(tmp_path / "data", pairs) == ["id10001"]
+    pairs.write_text("1 id10001/a/1.wav id10001/a/2.wav\n")
+    with pytest.raises(ValueError, match="removes every speaker"):
+        eligible_training_speaker_ids(tmp_path / "data", pairs)
+
+
 def test_preparation_cache_is_scoped_and_fingerprinted(tmp_path, monkeypatch):
     from agent.runners import speechbrain_backend as backend
 
@@ -180,6 +193,10 @@ def test_preparation_cache_is_scoped_and_fingerprinted(tmp_path, monkeypatch):
     assert calls[-1]["save_folder"] != calls[-2]["save_folder"]
     cfg["data_prep_seed"] = 1
     backend._prepare_cached_data("train", cfg, ["train", "dev"], 3.0)
+    assert calls[-1]["save_folder"] != calls[-2]["save_folder"]
+    cfg["split_unit"] = "session"
+    backend._prepare_cached_data("train", cfg, ["train", "dev"], 3.0)
+    assert calls[-1]["split_unit"] == "session"
     assert calls[-1]["save_folder"] != calls[-2]["save_folder"]
     monkeypatch.setattr(
         backend,

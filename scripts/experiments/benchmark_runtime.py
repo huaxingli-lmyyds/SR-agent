@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any
 
 from agent.agents.hpo_agent import HPOAgent
+from agent.agents.advisory_response import exception_diagnostics
 from agent.hpo import StrategyProposal
 
 
@@ -126,6 +127,7 @@ class BenchmarkHPOAgent(HPOAgent):
                 "phase": "planning",
                 "raw": raw.to_dict(),
                 "restricted": restricted.to_dict(),
+                "format_attempts": list(getattr(self, "_advisor_format_events", [])),
             },
         )
         return restricted
@@ -148,6 +150,7 @@ class BenchmarkHPOAgent(HPOAgent):
                     "study_id": study.study_id,
                     "raw": raw.to_dict() if raw else None,
                     "restricted": restricted.to_dict(),
+                    "format_attempts": list(getattr(self, "_advisor_format_events", [])),
                 },
             )
             return restricted
@@ -156,6 +159,7 @@ class BenchmarkHPOAgent(HPOAgent):
 
     def _invoke_strategy_model(self, prompt: str, **objective: Any) -> Any:
         started = perf_counter()
+        transport_start = len(getattr(self, "_advisor_transport_events", []))
         payload = json.loads(prompt)
         context = dict(payload.get("context") or {})
         context["execution_constraints"] = {
@@ -189,10 +193,11 @@ class BenchmarkHPOAgent(HPOAgent):
             return response
         except Exception as exc:
             event.update(
-                {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                {"status": "failed", **exception_diagnostics(exc)}
             )
             raise
         finally:
+            event["transport_attempts"] = list(getattr(self, "_advisor_transport_events", []))[transport_start:]
             event["duration_seconds"] = perf_counter() - started
             self.event_sink("advisor", event)
 

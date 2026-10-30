@@ -21,6 +21,7 @@ from hyperpyyaml import load_hyperpyyaml
 from tqdm import tqdm
 
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
+from agent.utils.logger import progressbar_enabled
 
 patch_torchaudio_compatibility()
 
@@ -67,7 +68,7 @@ def compute_embedding_loop(data_loader):
     embedding_dict = {}
 
     with torch.no_grad():
-        for batch in tqdm(data_loader, dynamic_ncols=True):
+        for batch in tqdm(data_loader, dynamic_ncols=True, disable=not progressbar_enabled(run_opts)):
             batch = batch.to(run_opts["device"])
             seg_ids = batch.id
             wavs, lens = batch.sig
@@ -164,8 +165,6 @@ def get_verification_scores(veri_test):
     return positive_scores, negative_scores
 
 
-@sb.utils.data_pipeline.takes("wav", "start", "stop")
-@sb.utils.data_pipeline.provides("sig")
 def audio_pipeline(wav, start, stop):
     """Load a verification segment in a DataLoader-worker-safe pipeline."""
     start = int(start)
@@ -213,7 +212,11 @@ def dataio_prep(params):
     if train_data is not None:
         datasets.insert(0, train_data)
 
-    sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
+    # Keep the function itself importable by name. Decorating it at module
+    # scope replaces that name with a DynamicItem whose .func cannot be pickled.
+    sb.dataio.dataset.add_dynamic_item(
+        datasets, audio_pipeline, takes=["wav", "start", "stop"], provides=["sig"]
+    )
 
     # Set output
     sb.dataio.dataset.set_output_keys(datasets, ["id", "sig"])

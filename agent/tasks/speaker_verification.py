@@ -1,9 +1,12 @@
 """Speaker verification task metrics."""
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, ClassVar, Dict
 
 from agent.core.metrics import InvalidMetricError, require_finite_metric
+
+METRIC_PROTOCOL_ID = "speaker_verification.v2.eer_ratio.mindcf_x100"
+METRIC_UNITS = {"eer": "ratio_0_1", "min_dcf": "x100"}
 
 
 @dataclass
@@ -11,6 +14,13 @@ class SpeakerVerificationTaskAdapter:
     task_type: str = "speaker_verification"
     primary_metric: str = "eer"
     metric_mode: str = "min"
+    metric_protocol: ClassVar[str] = METRIC_PROTOCOL_ID
+    metric_units: ClassVar[Dict[str, str]] = METRIC_UNITS
+
+    def resolve_evaluation_metrics(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        from agent.utils.metrics import resolve_evaluation_metrics
+
+        return resolve_evaluation_metrics(raw)
 
     def validate_metrics(self, metrics: Dict[str, Any]) -> None:
         require_finite_metric(metrics, self.primary_metric)

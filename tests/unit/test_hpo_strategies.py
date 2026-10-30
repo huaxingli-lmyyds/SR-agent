@@ -178,6 +178,26 @@ def test_optuna_tpe_uses_completed_history_and_returns_unique_candidates() -> No
     assert len({tuple(sorted(item.items())) for item in suggestions}) == 3
 
 
+def test_tpe_does_not_mistake_repeated_optimum_for_exhausted_space():
+    import pytest
+
+    pytest.importorskip("optuna")
+    space = SearchSpace([SearchParameter("lr", "categorical", choices=[0.001, 0.0015])])
+    history = [Trial(
+        "old", {"lr": 0.001}, TrialBudget("full", epochs=1),
+        status="completed", metrics={"eer": 0.25},
+    )]
+    options = {
+        "seed": 1, "existing": [trial.parameters for trial in history],
+        "history": history, "objective": Objective("eer"),
+        "config": {"n_startup_trials": 1},
+    }
+    strategy = OptunaTPEStrategy()
+    assert strategy.suggest(space, 1, **options) == [{"lr": 0.0015}]
+    options["existing"].append({"lr": 0.0015})
+    assert strategy.suggest(space, 1, **options) == []
+
+
 def test_registry_hides_unavailable_optional_strategy(monkeypatch) -> None:
     registry = CandidateStrategyRegistry()
     strategy = OptunaTPEStrategy()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -63,6 +62,8 @@ class CoordinatorAgent(AdvisoryAgentBase):
         registry: Optional[AgentRegistry] = None,
         completion_policy: Optional[CompletionPolicy] = None,
         enable_llm_advisor: bool = False,
+        hpo_experiments_dir: Optional[str] = None,
+        output_dir: Optional[str] = None,
     ) -> None:
         super().__init__(model_name, temperature, max_iterations, verbose)
         self.config_path = str(resolve_config_path(config_path))
@@ -72,8 +73,22 @@ class CoordinatorAgent(AdvisoryAgentBase):
         self.implementation = implementation
         self.runner = runner
         self.enable_llm_advisor = enable_llm_advisor
-        self.manage_tracker = ExperimentTracker(get_manage_experiments_dir())
-        self.memory_service = MemoryService()
+        self.output_dir = resolve_config_value_path(output_dir) if output_dir else None
+        self.data_experiments_dir = (
+            self.output_dir / "dp" if self.output_dir else get_data_processing_experiments_dir()
+        )
+        self.hpo_experiments_dir = (
+            resolve_config_value_path(hpo_experiments_dir)
+            if hpo_experiments_dir else (
+                self.output_dir / "hpo" if self.output_dir else get_hpo_experiments_dir()
+            )
+        )
+        self.manage_tracker = ExperimentTracker(
+            self.output_dir / "manage" if self.output_dir else get_manage_experiments_dir()
+        )
+        self.memory_service = MemoryService(
+            self.output_dir / "memory" if self.output_dir else None
+        )
         self.memory_scope = MemoryScope(
             agent_type="coordinator",
             task_type=task_type,
@@ -103,7 +118,8 @@ class CoordinatorAgent(AdvisoryAgentBase):
                 max_iterations=self.data_iterations,
                 verbose=self.verbose,
                 config_path=self.config_path,
-                experiments_dir=get_data_processing_experiments_dir(),
+                experiments_dir=self.data_experiments_dir,
+                memory_service=self.memory_service,
                 task_type=self.task_type,
                 model_family=self.model_family,
                 implementation=self.implementation,
@@ -121,7 +137,8 @@ class CoordinatorAgent(AdvisoryAgentBase):
                 max_iterations=self.max_iterations,
                 verbose=self.verbose,
                 config_path=self.config_path,
-                experiments_dir=get_hpo_experiments_dir(),
+                experiments_dir=self.hpo_experiments_dir,
+                memory_service=self.memory_service,
                 task_type=self.task_type,
                 model_family=self.model_family,
                 implementation=self.implementation,
@@ -149,7 +166,7 @@ class CoordinatorAgent(AdvisoryAgentBase):
         run_config_path = self.config_path
         if run_context.get("resume_experiment_id"):
             run_config_path = str(
-                ExperimentTracker(get_hpo_experiments_dir()).get_config_snapshot(
+                ExperimentTracker(self.hpo_experiments_dir).get_config_snapshot(
                     str(run_context["resume_experiment_id"])
                 )
             )
@@ -242,6 +259,10 @@ class CoordinatorAgent(AdvisoryAgentBase):
         self.manage_tracker.update_orchestration_experiment(
             self._manage_experiment_id,
             status=status,
+            error=next(
+                (record.result.get("error") for record in records if record.status == "failed"),
+                "; ".join(completion.reasons) if not completion.complete else None,
+            ),
             duration=duration,
             linked_experiments=self._linked_experiments,
             agent_messages=compact_messages,
@@ -280,12 +301,7 @@ class CoordinatorAgent(AdvisoryAgentBase):
     def _coordination_advisor(self, agents: List[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
         compact_context = self._compact_request_context(context)
         prompt = render_prompt("orchestration_coordination_advisor", agents=agents, context=compact_context)
-        response = self.llm.invoke(prompt)
-        try:
-            value = json.loads(self._extract_message_content(response))
-            return value if isinstance(value, dict) else {}
-        except Exception as exc:
-            return {"advice_error": f"{type(exc).__name__}: {exc}"}
+        return self._request_json_advice(prompt)
 
     def _latest_experiment_ids(self) -> Dict[str, Any]:
         return {key: values[-1] if values else None for key, values in self._linked_experiments.items()}

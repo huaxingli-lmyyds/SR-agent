@@ -18,11 +18,13 @@ Author
 import os
 import random
 import sys
+from functools import partial
 
 import torch
 from hyperpyyaml import load_hyperpyyaml
 
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
+from agent.utils.logger import progressbar_enabled
 
 patch_torchaudio_compatibility()
 
@@ -118,6 +120,38 @@ class SpeakerBrain(sb.core.Brain):
             )
 
 
+def audio_pipeline(
+    wav, start, stop, duration, *, sample_rate, sentence_len, random_chunk,
+    crop_mode=None,
+):
+    """Load a training chunk using worker-serializable configuration."""
+    snt_len_sample = int(sample_rate * sentence_len)
+    if crop_mode not in {None, "random", "center", "bounds"}:
+        raise ValueError("validation_crop must be 'random', 'center', or 'bounds'")
+    use_random = random_chunk if crop_mode is None else crop_mode == "random"
+    if crop_mode == "center":
+        start = max(0, (int(float(duration) * sample_rate) - snt_len_sample) // 2)
+        stop = start + snt_len_sample
+    elif use_random:
+        duration_sample = max(0, int(float(duration) * sample_rate))
+        if duration_sample > snt_len_sample:
+            start = random.randint(0, duration_sample - snt_len_sample)
+        else:
+            start = 0
+        stop = start + snt_len_sample
+    else:
+        start = max(0, int(start))
+        stop = max(start + 1, int(stop))
+    num_frames = max(1, stop - start)
+    sig, _sample_rate = audio_io.load(wav, num_frames=num_frames, frame_offset=start)
+    return sig.transpose(0, 1).squeeze(1)
+
+
+def label_pipeline(spk_id, *, label_encoder):
+    """Encode a static speaker label after fitting the shared encoder."""
+    return label_encoder.encode_sequence_torch([spk_id])
+
+
 def dataio_prep(hparams):
     "Creates the datasets and their data processing pipelines."
 
@@ -137,38 +171,24 @@ def dataio_prep(hparams):
     datasets = [train_data, valid_data]
     label_encoder = sb.dataio.encoder.CategoricalEncoder()
 
-    snt_len_sample = int(hparams["sample_rate"] * hparams["sentence_len"])
-
-    # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav", "start", "stop", "duration")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav, start, stop, duration):
-        if hparams["random_chunk"]:
-            duration_sample = max(0, int(float(duration) * hparams["sample_rate"]))
-            if duration_sample > snt_len_sample:
-                start = random.randint(0, duration_sample - snt_len_sample)
-            else:
-                start = 0
-            stop = start + snt_len_sample
-        else:
-            start = max(0, int(start))
-            stop = max(start + 1, int(stop))
-        num_frames = max(1, stop - start)
-        sig, fs = audio_io.load(wav, num_frames=num_frames, frame_offset=start)
-        sig = sig.transpose(0, 1).squeeze(1)
-        return sig
-
-    sb.dataio.dataset.add_dynamic_item(datasets, audio_pipeline)
-
-    # 3. Define text pipeline:
-    @sb.utils.data_pipeline.takes("spk_id")
-    @sb.utils.data_pipeline.provides("spk_id", "spk_id_encoded")
-    def label_pipeline(spk_id):
-        yield spk_id
-        spk_id_encoded = label_encoder.encode_sequence_torch([spk_id])
-        yield spk_id_encoded
-
-    sb.dataio.dataset.add_dynamic_item(datasets, label_pipeline)
+    # Bind only small, serializable configuration; do not capture the entire
+    # HyperPyYAML graph (model, optimizer, checkpointer) in a local closure.
+    validation_crop = hparams.get("validation_crop")
+    if validation_crop not in {None, "random", "center", "bounds"}:
+        raise ValueError("validation_crop must be 'random', 'center', or 'bounds'")
+    for data, crop in ((train_data, None), (valid_data, validation_crop)):
+        sb.dataio.dataset.add_dynamic_item(
+            [data],
+            partial(
+                audio_pipeline,
+                sample_rate=hparams["sample_rate"],
+                sentence_len=hparams["sentence_len"],
+                random_chunk=hparams["random_chunk"],
+                crop_mode=crop,
+            ),
+            takes=["wav", "start", "stop", "duration"],
+            provides=["sig"],
+        )
 
     # 3. Fit encoder:
     # Load or compute the label encoder (with multi-GPU DDP support)
@@ -177,6 +197,12 @@ def dataio_prep(hparams):
         path=lab_enc_file,
         from_didatasets=[train_data],
         output_key="spk_id",
+    )
+    if hparams.get("out_n_neurons") is not None:
+        label_encoder.expect_len(int(hparams["out_n_neurons"]))
+    sb.dataio.dataset.add_dynamic_item(
+        datasets, partial(label_pipeline, label_encoder=label_encoder),
+        takes=["spk_id"], provides=["spk_id_encoded"],
     )
 
     # 4. Set output:
@@ -217,7 +243,9 @@ if __name__ == "__main__":
             "verification_pairs_file": veri_file_path,
             "splits": ["train", "dev"],
             "split_ratio": hparams["split_ratio"],
+            "split_unit": hparams.get("split_unit", "utterance"),
             "seg_dur": hparams["sentence_len"],
+            "random_segment": hparams["random_chunk"],
             "skip_prep": hparams["skip_prep"],
         },
     )
@@ -252,4 +280,5 @@ if __name__ == "__main__":
         valid_data,
         train_loader_kwargs=dataloader_options,
         valid_loader_kwargs=dataloader_options,
+        progressbar=progressbar_enabled(run_opts),
     )

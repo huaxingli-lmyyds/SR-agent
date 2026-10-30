@@ -27,6 +27,7 @@ from .materialization import (
     validate_materialization_mode,
 )
 from .quality import DefaultQualityGate
+from .scope import validate_mutation_scope
 from .registry import PROCESSORS, PROFILERS, register_processor
 
 TYPE_EXTENSIONS = {
@@ -97,7 +98,7 @@ def profile_dataset(
     dataset: DatasetSpec,
     policy: Optional[QualityPolicy] = None,
 ) -> DataProfile:
-    active_policy = policy or QualityPolicy()
+    active_policy = policy or QualityPolicy.for_task(dataset.task_type)
     profiler = PROFILERS.get(dataset.dataset_type)
     return (
         profiler.profile(dataset, active_policy)
@@ -222,6 +223,9 @@ def build_processing_plan(
     requested_operations: Optional[List[Dict[str, Any]]] = None,
     policy: Optional[QualityPolicy] = None,
 ) -> DataProcessingPlan:
+    policy = policy or QualityPolicy.for_task(
+        profile.dataset.task_type, profile.extensions.get("quality_policy")
+    )
     operations: List[DataOperation] = []
     rejected_operations: List[Dict[str, Any]] = []
     seen = set()
@@ -234,6 +238,8 @@ def build_processing_plan(
             processor = PROCESSORS.get(
                 operation_name, profile.dataset.dataset_type
             )
+            if operation_name not in AUDIT_OPERATIONS:
+                validate_mutation_scope(profile.dataset)
             parameters = dict(requested.get("parameters") or {})
             if advisory:
                 for name, rule in getattr(
@@ -274,10 +280,28 @@ def build_processing_plan(
             )
         )
     for issue in profile.issues:
+        # A warning is evidence to review, not permission to discard speech.
+        # In particular, long recordings remain useful for random chunking.
+        if (
+            issue.severity not in {"error", "critical"}
+            and issue.suggested_operation == "filter_by_duration"
+        ):
+            continue
         operation_name = issue.suggested_operation
         if not operation_name or operation_name in AUDIT_OPERATIONS:
             continue
         if operation_name in seen:
+            continue
+        try:
+            validate_mutation_scope(profile.dataset)
+        except ValueError as exc:
+            rejected_operations.append(
+                {
+                    "operation": operation_name,
+                    "reason": str(exc),
+                    "source": "quality_policy",
+                }
+            )
             continue
         seen.add(operation_name)
         operations.append(
@@ -290,7 +314,7 @@ def build_processing_plan(
         dataset=profile.dataset,
         operations=operations,
         rejected_operations=rejected_operations,
-        quality_policy=(policy or QualityPolicy()).to_dict(),
+        quality_policy=policy.to_dict(),
         target_goal=target_goal,
     )
 
@@ -591,9 +615,11 @@ def execute_plan(
     results: List[DataOperationResult] = []
     current_dataset = plan.dataset
     dataset_changed = False
-    policy = QualityPolicy.from_dict(plan.quality_policy)
+    policy = QualityPolicy.for_task(current_dataset.task_type, plan.quality_policy)
     operations = _execution_operations(plan.operations)
     for index, operation in enumerate(operations):
+        if operation.operation not in AUDIT_OPERATIONS:
+            validate_mutation_scope(current_dataset)
         processor = PROCESSORS.get(
             operation.operation, current_dataset.dataset_type
         )

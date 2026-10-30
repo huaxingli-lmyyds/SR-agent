@@ -6,6 +6,7 @@ Download: http://www.robots.ox.ac.uk/~vgg/data/voxceleb/
 
 import csv
 import glob
+import hashlib
 import os
 import random
 import shutil
@@ -16,6 +17,7 @@ import torch
 from tqdm import tqdm
 
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
+from agent.utils.logger import progressbar_enabled
 
 patch_torchaudio_compatibility()
 
@@ -50,6 +52,7 @@ def prepare_voxceleb(
     split_speaker=False,
     random_segment=False,
     skip_prep=False,
+    split_unit="utterance",
 ):
     """
     Prepares the csv files for the Voxceleb1 or Voxceleb2 datasets.
@@ -106,7 +109,15 @@ def prepare_voxceleb(
         "save_folder": save_folder,
         "seg_dur": seg_dur,
         "split_speaker": split_speaker,
+        "random_segment": random_segment,
+        "amp_th": amp_th,
     }
+    with open(verification_pairs_file, "rb") as protocol:
+        conf["verification_pairs_sha256"] = hashlib.sha256(
+            protocol.read()
+        ).hexdigest()
+    if split_unit != "utterance":
+        conf["split_unit"] = split_unit
 
     if not os.path.exists(save_folder):
         os.makedirs(save_folder)
@@ -145,7 +156,7 @@ def prepare_voxceleb(
 
     # Split data into 90% train and 10% validation (verification split)
     wav_lst_train, wav_lst_dev = _get_utt_split_lists(
-        data_folder, split_ratio, verification_pairs_file, split_speaker
+        data_folder, split_ratio, verification_pairs_file, split_speaker, split_unit
     )
 
     # Creating csv file for training data
@@ -260,7 +271,8 @@ def _check_voxceleb_folders(data_folders, splits):
 
 # Used for verification split
 def _get_utt_split_lists(
-    data_folders, split_ratio, verification_pairs_file, split_speaker=False
+    data_folders, split_ratio, verification_pairs_file, split_speaker=False,
+    split_unit="utterance",
 ):
     """
     Tot. number of speakers vox1= 1211.
@@ -268,6 +280,10 @@ def _get_utt_split_lists(
     Splits the audio file list into train and dev.
     This function automatically removes verification test files from the training and dev set (if any).
     """
+    if split_unit not in {"utterance", "session"}:
+        raise ValueError("split_unit must be 'utterance' or 'session'")
+    if split_speaker and split_unit == "session":
+        raise ValueError("session splitting requires shared train/dev speaker identities")
     train_lst = []
     dev_lst = []
 
@@ -318,6 +334,13 @@ def _get_utt_split_lists(
                 if spk_id not in test_spks:
                     audio_files_list.append(f)
 
+            if split_unit == "session":
+                from recipes.voxceleb.splits import split_sessions
+
+                train_snts, dev_snts = split_sessions(audio_files_list, split_ratio[0])
+                train_lst.extend(train_snts)
+                dev_lst.extend(dev_snts)
+                continue
             random.shuffle(audio_files_list)
             split = int(0.01 * split_ratio[0] * len(audio_files_list))
             train_snts = audio_files_list[:split]
@@ -371,7 +394,7 @@ def prepare_csv(seg_dur, wav_lst, csv_file, random_segment=False, amp_th=0):
     my_sep = "--"
     entry = []
     # Processing all the wav files in the list
-    for wav_file in tqdm(wav_lst, dynamic_ncols=True):
+    for wav_file in tqdm(wav_lst, dynamic_ncols=True, disable=not progressbar_enabled()):
         # Getting sentence and speaker ids
         try:
             [spk_id, sess_id, utt_id] = wav_file.split("/")[-3:]

@@ -106,7 +106,13 @@ class SpeechBrainRunnerAdapter:
             stage="evaluation",
             metrics={"test": raw.get("metrics") or {}},
             artifacts=artifacts,
-            extensions={"speechbrain": {"output_folder": raw.get("output_folder")}},
+            extensions={"speechbrain": {
+                "output_folder": raw.get("output_folder"),
+                "timeout_seconds": raw.get("timeout_seconds"),
+                "terminated_by_budget": bool(raw.get("terminated_by_budget", False)),
+                "process_exitcode": raw.get("process_exitcode"),
+                "runtime": dict(raw.get("runtime") or {}),
+            }},
             error=raw.get("error"),
         )
 
@@ -120,88 +126,84 @@ def _run_speechbrain_training_with_timeout(
     timeout = overrides.get("_hpo_max_duration_seconds")
     if timeout is None:
         return run_training(config_path, overrides)
-    if (
+    return _run_isolated_stage(
+        _run_speechbrain_training_process,
+        (config_path, overrides),
+        timeout=timeout,
+        stage="training",
+    )
+
+
+def _stop_process(process: Any, grace_seconds: float = 5.0) -> None:
+    """Reap a worker, escalating to kill when termination is ignored."""
+    if process.is_alive():
+        process.terminate()
+        process.join(grace_seconds)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(5.0)
+
+
+def _run_isolated_stage(
+    target, args: tuple, *, timeout: Optional[float], stage: str
+) -> Dict[str, Any]:
+    """Share spawn, result delivery, timeout and cleanup across both stages."""
+    if timeout is not None and (
         isinstance(timeout, bool)
         or not isinstance(timeout, (int, float))
-        or not math.isfinite(float(timeout))
-        or float(timeout) <= 0
+        or not math.isfinite(timeout)
+        or timeout <= 0
     ):
         raise ValueError("_hpo_max_duration_seconds must be a finite positive number")
     context = multiprocessing.get_context("spawn")
     receive_connection, send_connection = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_run_speechbrain_training_process,
-        args=(send_connection, config_path, overrides),
-    )
+    process = context.Process(target=target, args=(send_connection, *args))
+    result = None
+    timed_out = False
     try:
         process.start()
         send_connection.close()
         ready = wait_for_process_io(
-            [receive_connection, process.sentinel], float(timeout)
+            [receive_connection, process.sentinel], timeout
         )
-        if receive_connection in ready:
-            try:
-                result = receive_connection.recv()
-            except EOFError:
-                result = None
-            if result is not None:
-                process.join(10.0)
-                if process.is_alive():
-                    process.terminate()
-                    process.join(5.0)
-                    if process.is_alive() and hasattr(process, "kill"):
-                        process.kill()
-                        process.join(5.0)
-                return result
-        if process.sentinel in ready:
-            # The process can close immediately after sending, so perform
-            # one final non-blocking receive before declaring a crash.
-            process.join(10.0)
-            if receive_connection.poll():
+        timed_out = not ready
+        if ready:
+            # Drain the pipe even when process exit and result delivery race.
+            if receive_connection in ready or receive_connection.poll():
                 try:
                     result = receive_connection.recv()
                 except EOFError:
-                    result = None
-                if result is not None:
-                    return result
-            return {
-                "status": "failed",
-                "valid_error_rate": None,
-                "error": f"training process exited with code {process.exitcode}",
-                "timeout_seconds": float(timeout),
-                "terminated_by_budget": False,
-                "process_exitcode": process.exitcode,
+                    pass
+            process.join(30.0 if stage == "evaluation" else 10.0)
+        _stop_process(process, 10.0)
+        exitcode = getattr(process, "exitcode", None)
+        if result is not None:
+            result.setdefault("process_exitcode", exitcode)
+            return result
+        defaults = (
+            {"valid_error_rate": None}
+            if stage == "training"
+            else {
+                "eer": None, "min_dcf": None,
+                "output_folder": None, "scores_path": None,
             }
-        if process.is_alive():
-            process.terminate()
-            process.join(10.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(5.0)
-            return {
-                "status": "failed",
-                "valid_error_rate": None,
-                "error": f"TimeoutError: training exceeded {timeout} seconds",
-                "timeout_seconds": float(timeout),
-                "terminated_by_budget": True,
-                "process_exitcode": process.exitcode,
-            }
-        process.join(0.0)
+        )
         return {
+            **defaults,
             "status": "failed",
-            "valid_error_rate": None,
-            "error": f"training process exited with code {process.exitcode}",
-            "timeout_seconds": float(timeout),
-            "terminated_by_budget": False,
-            "process_exitcode": process.exitcode,
+            "error": (
+                f"TimeoutError: {stage} exceeded {timeout} seconds"
+                if timed_out else (
+                    f"{stage} process exited without returning a result "
+                    f"(exit code {exitcode})"
+                )
+            ),
+            "terminated_by_budget": timed_out,
+            "timeout_seconds": timeout,
+            "process_exitcode": exitcode,
         }
     finally:
-        if process.is_alive():
-            process.terminate()
-            process.join(5.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(5.0)
+        _stop_process(process)
         receive_connection.close()
         send_connection.close()
 
@@ -228,93 +230,15 @@ def _run_speechbrain_evaluation_isolated(
     data_folder: Optional[str],
     overrides: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Evaluate in a one-shot process so CUDA and log handlers cannot leak.
-
-    SpeechBrain configures process-wide logging in
-    ``create_experiment_directory``.  Evaluation also retains CUDA tensors in
-    recipe module globals while embeddings are scored.  Keeping evaluation in
-    the long-lived benchmark process therefore contaminates later Trial logs
-    and can reserve almost all memory on the first visible GPU.  A spawned
-    process gives both resources an unambiguous lifetime.
-    """
+    """Give evaluation CUDA tensors and process-wide log handlers a bounded lifetime."""
     overrides = dict(overrides)
     timeout = overrides.pop("_hpo_max_duration_seconds", None)
-    if timeout is not None:
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-            raise ValueError("_hpo_max_duration_seconds must be a finite positive number")
-    context = multiprocessing.get_context("spawn")
-    receive_connection, send_connection = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_run_speechbrain_evaluation_process,
-        args=(
-            send_connection,
-            config_path,
-            model_path,
-            data_folder,
-            overrides,
-        ),
+    return _run_isolated_stage(
+        _run_speechbrain_evaluation_process,
+        (config_path, model_path, data_folder, overrides),
+        timeout=timeout,
+        stage="evaluation",
     )
-    try:
-        process.start()
-        send_connection.close()
-        ready = wait_for_process_io(
-            [receive_connection, process.sentinel], timeout
-        )
-        if not ready:
-            return {
-                "status": "failed",
-                "error": f"TimeoutError: evaluation exceeded {timeout} seconds",
-                "terminated_by_budget": True,
-                "timeout_seconds": timeout,
-                "eer": None, "min_dcf": None,
-                "output_folder": None, "scores_path": None,
-            }
-        result = None
-        if receive_connection in ready:
-            try:
-                result = receive_connection.recv()
-            except EOFError:
-                result = None
-        elif process.sentinel in ready:
-            process.join(10.0)
-            if receive_connection.poll():
-                try:
-                    result = receive_connection.recv()
-                except EOFError:
-                    result = None
-
-        process.join(30.0)
-        if process.is_alive():
-            process.terminate()
-            process.join(10.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(5.0)
-
-        if result is None:
-            return {
-                "status": "failed",
-                "error": (
-                    "evaluation process exited without returning a result "
-                    f"(exit code {process.exitcode})"
-                ),
-                "eer": None,
-                "min_dcf": None,
-                "output_folder": None,
-                "scores_path": None,
-                "process_exitcode": process.exitcode,
-            }
-        result.setdefault("process_exitcode", process.exitcode)
-        return result
-    finally:
-        if process.is_alive():
-            process.terminate()
-            process.join(5.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(5.0)
-        receive_connection.close()
-        send_connection.close()
 
 
 def _run_speechbrain_evaluation_process(

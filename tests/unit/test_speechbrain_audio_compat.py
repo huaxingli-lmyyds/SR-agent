@@ -120,7 +120,10 @@ def test_audio_compat_uses_shared_soundfile_backend() -> None:
     audio_source = Path("recipes/voxceleb/audio_compat.py").read_text(encoding="utf-8")
     backend_source = Path("agent/runners/soundfile_audio.py").read_text(encoding="utf-8")
 
-    assert "from agent.runners.soundfile_audio import load_audio" in audio_source
+    from agent.runners.soundfile_audio import load_audio
+    from recipes.voxceleb import audio_compat
+
+    assert audio_compat.load_audio is load_audio
     assert "from speechbrain.dataio import audio_io" not in audio_source
     assert "import torchaudio" not in audio_source
     assert "def load_audio" in backend_source
@@ -253,7 +256,7 @@ def test_ecapa_verification_config_disables_score_norm_by_default() -> None:
         source = (project_root / relative).read_text(encoding="utf-8")
         assert "score_norm: none" in source
         assert "score_norm: s-norm" not in source
-        assert "batch_size: 32" in source
+        assert "batch_size: 8" in source
         assert "num_workers: 4" in source
 
 

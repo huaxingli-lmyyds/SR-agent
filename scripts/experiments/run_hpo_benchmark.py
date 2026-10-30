@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import statistics
 import sys
 import tempfile
 from time import perf_counter
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -491,6 +492,9 @@ def freeze_inputs(plan, output):
         Path(__file__).with_name("benchmark_runtime.py"),
     ]
     plan["output_root"] = str(output.resolve())
+    gpu_uuid = independent_gpu_uuid(plan["config"])
+    if gpu_uuid:
+        plan["gpu_assignment"] = {"physical_gpu_uuid": gpu_uuid}
     plan["environment"] = {
         "python": sys.version,
         "platform": platform.platform(),
@@ -531,7 +535,7 @@ def freeze_inputs(plan, output):
         }
 
 
-def verify_frozen(plan, output):
+def verify_frozen(plan, output, *, evaluation_gpu=None):
     if plan.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(
             "benchmark protocol version changed; use a new output directory"
@@ -540,6 +544,14 @@ def verify_frozen(plan, output):
         raise ValueError(
             "benchmark output was moved/copied; resume only at its original output root"
         )
+    actual_gpu = independent_gpu_uuid(plan["config"])
+    if evaluation_gpu is not None:
+        if actual_gpu is None or evaluation_gpu != actual_gpu:
+            raise ValueError("evaluation GPU requires matching single-GPU parallel binding")
+    elif plan.get("gpu_assignment") != (
+        {"physical_gpu_uuid": actual_gpu} if actual_gpu else None
+    ):
+        raise ValueError("parallel benchmark GPU assignment changed on resume")
     if plan["environment"]["packages"] != package_versions():
         raise ValueError(
             "benchmark dependency versions changed; restore the original environment"
@@ -1047,23 +1059,26 @@ def run_variant(plan, item, output):
         or any(run_dir.glob("*.partial"))
     )
     advisor = read_events(run_dir / "advisor.jsonl")
-    summary["advisor_requests"] = len(advisor)
-    summary["advisor_seconds"] = sum(
-        e.get("duration_seconds", 0) for e in advisor
-    )
-    summary["advisor_failures"] = sum(
-        e.get("status") != "success" for e in advisor
-    )
     proposals = read_events(run_dir / "proposals.jsonl")
-    summary["llm_valid_proposals"] = sum(
-        (e.get("raw") or {}).get("action") in agent.proposal_actions
-        for e in proposals
-    )
-    summary["controller_degraded"] = (
-        item["variant"] == "system" and summary["llm_valid_proposals"] == 0
-    )
+    summary.update(advisor_outcome(advisor, proposals, uses_advisor=item["variant"] == "system"))
     write_json(run_dir / "result.json", summary)
     return summary
+
+
+def advisor_outcome(advisor, proposals, *, uses_advisor):
+    from agent.agents.hpo_agent import HPOAgent
+
+    failures = sum(event.get("status") != "success" for event in advisor)
+    invalid = sum((event.get("raw") or {}).get("action") == "invalid_proposal" for event in proposals)
+    valid = sum((event.get("raw") or {}).get("action") in HPOAgent.proposal_actions for event in proposals)
+    return {
+        "advisor_requests": len(advisor),
+        "advisor_seconds": sum(event.get("duration_seconds", 0) for event in advisor),
+        "advisor_failures": failures,
+        "invalid_advisor_proposals": invalid,
+        "llm_valid_proposals": valid,
+        "controller_degraded": bool(uses_advisor and (not valid or failures or invalid)),
+    }
 
 
 def summarize(results):
@@ -1153,6 +1168,8 @@ def export_results(plan, output):
         "wall_seconds",
         "advisor_requests",
         "advisor_seconds",
+        "advisor_failures",
+        "invalid_advisor_proposals",
         "llm_valid_proposals",
         "controller_degraded",
         "confirmation_satisfied",
@@ -1251,6 +1268,8 @@ def evaluate_test(plan, output):
             "error": payload.get("error"),
             "duration_seconds": perf_counter() - start,
             "checkpoint_sha256": winner["checkpoint_sha256"],
+            "evaluation_gpu_uuid": independent_gpu_uuid(config),
+            "training_gpu_assignment": plan.get("gpu_assignment"),
         }
         if result["status"] == "success" and not finite(result["eer"]):
             result.update(status="failed", error="invalid held-out EER")
@@ -1294,8 +1313,10 @@ def evaluate_test(plan, output):
 
 
 @contextmanager
-def exclusive_run(output):
+def exclusive_run(output, *, shared=False):
     """OS-owned lock is released on a crash; no stale lock-file deletion needed."""
+    if shared and sys.platform == "win32":
+        raise ValueError("parallel_single_gpu requires POSIX shared file locks")
     output.mkdir(parents=True, exist_ok=True)
     with (output / ".benchmark.lock").open("a+b") as lock:
         lock.seek(0, 2)
@@ -1311,7 +1332,8 @@ def exclusive_run(output):
             else:
                 import fcntl
 
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+                fcntl.flock(lock.fileno(), mode | fcntl.LOCK_NB)
         except OSError as exc:
             raise OSError(
                 f"another benchmark holds the execution lock: {output}"
@@ -1324,6 +1346,39 @@ def exclusive_run(output):
                 msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def independent_gpu_uuid(config):
+    """Require an unambiguous physical device for explicitly enabled parallelism."""
+    enabled = config.get("parallel_single_gpu", False)
+    if type(enabled) is not bool:
+        raise ValueError("parallel_single_gpu must be a boolean")
+    if not enabled:
+        return None
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    try:
+        if not visible.startswith("GPU-"):
+            raise ValueError
+        gpu_uuid = "GPU-" + str(UUID(visible[4:]))
+    except ValueError as exc:
+        raise ValueError(
+            "parallel_single_gpu requires CUDA_VISIBLE_DEVICES set to one full GPU UUID"
+        ) from exc
+    if config.get("ddp_devices") or config.get("device") != "cuda:0":
+        raise ValueError("parallel_single_gpu requires device=cuda:0 and no DDP")
+    return gpu_uuid
+
+
+@contextmanager
+def speechbrain_execution_lock(config):
+    """Parallel jobs share the global gate and exclusively reserve their own GPU."""
+    root = Path(tempfile.gettempdir()) / "sr-agent-speechbrain-benchmark"
+    gpu_uuid = independent_gpu_uuid(config)
+    with ExitStack() as stack:
+        stack.enter_context(exclusive_run(root, shared=gpu_uuid is not None))
+        if gpu_uuid:
+            stack.enter_context(exclusive_run(root / "devices" / gpu_uuid))
+        yield
 
 
 def parser():
@@ -1344,6 +1399,10 @@ def parser():
         "--dry-run",
         action="store_true",
         help="Print the plan only; no GPU, LLM or output writes",
+    )
+    result.add_argument(
+        "--evaluation-gpu",
+        help="Explicit full GPU UUID for held-out evaluation only; training binding stays frozen",
     )
     modes = result.add_mutually_exclusive_group()
     modes.add_argument(
@@ -1384,6 +1443,9 @@ def preflight(plan):
         ConfigParser(plan["frozen_inputs"]["train_config"]).load_config()
     )
     if cfg.get("runner", "speechbrain") == "speechbrain":
+        from agent.runners.speechbrain_validation import validate_verification_config
+
+        validate_verification_config(plan["frozen_inputs"]["validation_config"])
         validate_speechbrain_inputs(plan)
         import torch
 
@@ -1518,6 +1580,13 @@ def read_run_failure_guard(run_dir):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.evaluation_gpu:
+        if not args.evaluate_test:
+            raise ValueError("--evaluation-gpu requires --evaluate-test")
+        if not args.evaluation_gpu.startswith("GPU-"):
+            raise ValueError("--evaluation-gpu must be a full GPU UUID")
+        args.evaluation_gpu = "GPU-" + str(UUID(args.evaluation_gpu[4:]))
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.evaluation_gpu
     if args.resume or args.evaluate_test:
         if args.dry_run or any(
             getattr(args, k)
@@ -1544,7 +1613,7 @@ def main(argv=None):
         path = output / "benchmark_plan.json"
         if args.resume or args.evaluate_test:
             plan = read_json(path)
-            verify_frozen(plan, output)
+            verify_frozen(plan, output, evaluation_gpu=args.evaluation_gpu)
         else:
             if (
                 path.exists()
@@ -1558,14 +1627,7 @@ def main(argv=None):
             freeze_inputs(plan, output)
             write_json(path, plan)
         if plan["config"].get("runner", "speechbrain") == "speechbrain":
-            # Conservative process-wide exclusion, including different output roots.
-            # This cannot block unrelated GPU jobs launched outside this entry point.
-            stack.enter_context(
-                exclusive_run(
-                    Path(tempfile.gettempdir())
-                    / "sr-agent-speechbrain-benchmark"
-                )
-            )
+            stack.enter_context(speechbrain_execution_lock(plan["config"]))
         # A shared backend failure applies to the other groups and seeds too.
         # Resume must not skip that failed run and start the next expensive one.
         for item in plan["run_order"]:
@@ -1578,6 +1640,12 @@ def main(argv=None):
                 )
                 return 1
         if args.evaluate_test:
+            if args.evaluation_gpu:
+                append_event(output, "evaluation_assignments", {
+                    "training_gpu_assignment": plan.get("gpu_assignment"),
+                    "evaluation_gpu_uuid": args.evaluation_gpu,
+                    "reason": "explicit_evaluation_only_rebinding",
+                })
             prepare_assets(plan, output)
             rows = evaluate_test(plan, output)
             print(f"Held-out results: {output / 'heldout_results.json'}")

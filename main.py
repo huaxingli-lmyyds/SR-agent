@@ -6,7 +6,7 @@ import argparse
 import json
 from typing import Any
 
-from agent.utils.path_tool import get_config_file
+from agent.utils.path_tool import get_config_file, resolve_config_value_path
 
 
 def _json_object(value: str) -> Any:
@@ -86,6 +86,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--reset-failure-guard",
         action="store_true",
         help="After repairing a system failure, explicitly unblock a resumed HPO Study.",
+    )
+    parser.add_argument(
+        "--retry-failed-evaluations", action="store_true",
+        help="On resume, evaluate retained checkpoints of Trials whose training succeeded; do not retrain them.",
+    )
+    parser.add_argument(
+        "--hpo-experiments-dir",
+        help="HPO record directory, including the hpo/ directory of an isolated benchmark run.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="Root directory for this system run's manage, dp, hpo and memory records.",
     )
     parser.add_argument(
         "--max-training-runs",
@@ -263,6 +275,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         if not args.resume_experiment_id:
             raise SystemExit("--reset-failure-guard requires --resume-experiment-id")
         context["reset_failure_guard"] = True
+    if args.retry_failed_evaluations:
+        if not args.resume_experiment_id:
+            raise SystemExit("--retry-failed-evaluations requires --resume-experiment-id")
+        context["retry_failed_evaluations"] = True
     if args.sampler_config_json is not None:
         if not isinstance(args.sampler_config_json, dict):
             raise SystemExit("--sampler-config-json must be a JSON object")
@@ -371,6 +387,8 @@ def main() -> None:
         implementation=args.implementation,
         runner=args.runner,
         enable_llm_advisor=args.enable_llm_advisor,
+        hpo_experiments_dir=args.hpo_experiments_dir,
+        output_dir=args.output_dir,
     )
     result = pipeline.run(
         objective=args.objective,
@@ -378,6 +396,14 @@ def main() -> None:
         budget=build_budget(args),
     )
     print(result.experiment_id)
+    if args.output_dir:
+        output = resolve_config_value_path(args.output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "result.json").write_text(
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    if result.status != "success":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

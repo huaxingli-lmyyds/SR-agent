@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import os
+import json
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, List, Optional
+
+from .advisory_response import (
+    decode_json_response, extract_message_content, response_diagnostics,
+    exception_diagnostics, retryable_request_error, unsupported_feature, trial_ids_from_evidence,
+)
 
 
 def _load_env() -> None:
@@ -53,24 +61,67 @@ class AdvisoryAgentBase:
 
             _load_env()
             api_base = os.getenv("ZHIPUAI_API_BASE_URL")
+            import httpx
+            mode = os.getenv("SR_AGENT_LLM_PROXY_MODE", "environment")
+            if mode not in {"environment", "direct"}:
+                raise ValueError("SR_AGENT_LLM_PROXY_MODE must be environment or direct")
+            # Dedicated clients avoid sharing a cached transport across advisors.
+            # Direct mode is explicit; never bypass an environment proxy on error.
             self._llm = ChatOpenAI(
                 model=self.model_name,
                 temperature=self.temperature,
                 base_url=api_base,
                 timeout=300,
-                max_retries=0 if getattr(self, "_resource_budget", None) else 2,
+                max_retries=0,
+                http_client=httpx.Client(trust_env=mode == "environment"),
+                http_async_client=httpx.AsyncClient(trust_env=mode == "environment"),
             )
         return self._llm
 
     @staticmethod
     def _extract_message_content(message: Any) -> str:
-        if message is None:
-            return ""
-        if isinstance(message, dict):
-            content = message.get("content", message)
-        else:
-            content = getattr(message, "content", message)
-        return str(content)
+        return extract_message_content(message)
+
+    @contextmanager
+    def _advisory_session(self):
+        """One deadline covers tool rounds, transport retries and format repair."""
+        outer = getattr(self, "_advisory_deadline", None)
+        if outer is None:
+            self._advisory_deadline = time.monotonic() + 300.0
+            self._advisor_transport_events = []
+            self._advisor_evidence_trial_ids = set()
+        try:
+            yield
+        finally:
+            if outer is None:
+                self._advisory_deadline = None
+
+    def _advisory_remaining(self):
+        resources = getattr(self, "_resource_budget", None)
+        remaining = resources.check()["wall_seconds_remaining"] if resources else None
+        local = max(0.0, getattr(self, "_advisory_deadline", None) - time.monotonic())
+        return min(local, remaining) if remaining is not None else local
+
+    def _json_model(self, model):
+        if getattr(getattr(model, "bound", model), "root_client", None) is not None:
+            if not getattr(self, "_json_mode_unsupported", False):
+                return model.bind(response_format={"type": "json_object"})
+        return model
+
+    def _request_json_advice(self, prompt: str) -> dict:
+        with self._advisory_session():
+            response = None
+            stage = "request"
+            try:
+                response = self._invoke_advisory_model(self._json_model(self.llm), prompt)
+                stage = "json_decode"
+                return decode_json_response(response)
+            except Exception as exc:
+                from agent.hpo.resources import ResourceBudgetExhausted
+                if isinstance(exc, ResourceBudgetExhausted):
+                    raise
+                diagnostics = response_diagnostics(response, exc, stage=stage)
+                return {"advice_error": diagnostics["error"], "advice_diagnostics": diagnostics}
 
     def _invoke_with_readonly_tools(
         self,
@@ -80,12 +131,21 @@ class AdvisoryAgentBase:
         max_tool_rounds: int = 2,
     ) -> Any:
         """Run a bounded read-only tool loop, then require a final model answer."""
+        with self._advisory_session():
+            return self._invoke_readonly_rounds(prompt, tools, max_tool_rounds=max_tool_rounds)
+
+    def _invoke_readonly_rounds(self, prompt, tools, *, max_tool_rounds):
         if not tools or not hasattr(self.llm, "bind_tools"):
-            return self._invoke_advisory_model(self.llm, prompt)
+            return self._invoke_advisory_model(self._json_model(self.llm), prompt)
         try:
             from langchain_core.messages import HumanMessage, ToolMessage
 
-            bound = self.llm.bind_tools(tools)
+            # The SDK auto-parser used for response_format requires strict tools.
+            if getattr(self.llm, "root_client", None) is not None:
+                bound = self.llm.bind_tools(tools, strict=True)
+            else:
+                bound = self.llm.bind_tools(tools)
+            bound = self._json_model(bound)
             messages: List[Any] = [HumanMessage(content=prompt)]
             by_name = {getattr(item, "name", ""): item for item in tools}
             for _ in range(max(int(max_tool_rounds), 0)):
@@ -102,7 +162,12 @@ class AdvisoryAgentBase:
                         result = f"read-only tool is not available: {name}"
                     else:
                         try:
-                            result = str(selected.invoke(call.get("args") or {}))
+                            raw_result = selected.invoke(call.get("args") or {})
+                            result = raw_result if isinstance(raw_result, str) else json.dumps(raw_result, default=str)
+                            try:
+                                self._advisor_evidence_trial_ids.update(trial_ids_from_evidence(json.loads(result)))
+                            except ValueError:
+                                pass
                         except Exception as exc:
                             result = f"{type(exc).__name__}: {exc}"
                     messages.append(ToolMessage(content=result, tool_call_id=call_id))
@@ -112,33 +177,58 @@ class AdvisoryAgentBase:
                     "object required by the original schema. Do not call another tool."
                 )
             ))
-            return self._invoke_advisory_model(self.llm, messages)
+            return self._invoke_advisory_model(self._json_model(self.llm), messages)
         except Exception as exc:
             from agent.hpo.resources import ResourceBudgetExhausted
             if isinstance(exc, ResourceBudgetExhausted):
                 raise
-            # Provider/tool-calling incompatibility must not disable the advisor.
-            return self._invoke_advisory_model(self.llm, prompt)
+            if not unsupported_feature(exc, "tool"):
+                raise
+            return self._invoke_advisory_model(self._json_model(self.llm), prompt)
 
     def _invoke_advisory_model(self, model: Any, prompt: Any) -> Any:
-        resources = getattr(self, "_resource_budget", None)
-        if resources:
-            remaining = resources.check()["wall_seconds_remaining"]
-            if remaining is not None:
-                # OpenAI accepts a per-request timeout. Disable SDK retries on
-                # already-created clients too, otherwise each retry gets a new timeout.
-                base = getattr(model, "bound", model)
+        with self._advisory_session():
+            for attempt in range(3):
+                remaining = self._advisory_remaining()
+                if remaining <= 0:
+                    raise TimeoutError("advisor consultation deadline exceeded")
+                current = model
+                base = getattr(current, "bound", current)
                 client = getattr(base, "root_client", None)
                 if client is not None and hasattr(client, "with_options"):
                     client = client.with_options(max_retries=0)
                     copied = base.model_copy(update={"root_client": client, "client": client.chat.completions})
-                    model = copied.bind(**getattr(model, "kwargs", {}))
-                if hasattr(model, "bind"):
-                    model = model.bind(timeout=min(300.0, remaining))
-        response = model.invoke(prompt)
-        if resources:
-            resources.check()
-        return response
+                    current = copied.bind(**getattr(current, "kwargs", {}))
+                if hasattr(current, "bind"):
+                    current = current.bind(timeout=min(120.0, remaining))
+                started = time.monotonic()
+                try:
+                    response = current.invoke(prompt)
+                except Exception as exc:
+                    self._advisor_transport_events.append({
+                        "attempt": attempt + 1, "status": "failed",
+                        "duration_seconds": time.monotonic() - started,
+                        **exception_diagnostics(exc),
+                    })
+                    remaining = self._advisory_remaining()
+                    if attempt < 2 and unsupported_feature(exc, "response_format"):
+                        self._json_mode_unsupported = True
+                        kwargs = dict(getattr(model, "kwargs", {}))
+                        kwargs.pop("response_format", None)
+                        model = base.bind(**kwargs)
+                        continue
+                    delay = float(2 ** attempt)
+                    if attempt == 2 or not retryable_request_error(exc) or remaining <= delay:
+                        raise
+                    time.sleep(delay)
+                    continue
+                self._advisor_transport_events.append({
+                    "attempt": attempt + 1, "status": "success",
+                    "duration_seconds": time.monotonic() - started,
+                })
+                if self._advisory_remaining() <= 0:
+                    raise TimeoutError("advisor consultation deadline exceeded")
+                return response
 
 
 class LangGraphAgent(AdvisoryAgentBase):

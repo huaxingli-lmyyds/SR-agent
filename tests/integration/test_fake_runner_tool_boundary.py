@@ -82,12 +82,12 @@ def test_evaluation_tool_uses_registered_runner_and_records_result(
     (tmp_path / "evaluation").mkdir()
 
     try:
-        payload = json.loads(evaluation_tools._run_evaluation(
-            experiment_id=experiment_id,
-            verification_config=protocol["verification_config"],
-            verification_pairs=protocol["validation_pairs"],
-            evaluation_split="test",
-        ))
+        payload = json.loads(evaluation_tools.RunEvaluation.invoke({
+            "experiment_id": experiment_id,
+            "verification_config": protocol["verification_config"],
+            "verification_pairs": protocol["validation_pairs"],
+            "evaluation_split": "test",
+        }))
     finally:
         if previous is None:
             RUNNER_ADAPTERS.pop("fake", None)
