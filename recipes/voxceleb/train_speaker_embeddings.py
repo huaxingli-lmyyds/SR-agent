@@ -24,6 +24,7 @@ import torch
 from hyperpyyaml import load_hyperpyyaml
 
 from agent.runners.speechbrain_dependency import patch_torchaudio_compatibility
+from agent.runners.training_observation import scheduler_snapshot
 from agent.utils.logger import progressbar_enabled
 
 patch_torchaudio_compatibility()
@@ -115,7 +116,12 @@ class SpeakerBrain(sb.core.Brain):
                 valid_stats=stage_stats,
             )
             self.checkpointer.save_and_keep_only(
-                meta={"ErrorRate": stage_stats["ErrorRate"]},
+                meta={"ErrorRate": stage_stats["ErrorRate"], "training_observation": {
+                    "checkpoint_epoch": epoch,
+                    "learning_rate_schedule": scheduler_snapshot(self.hparams.lr_annealing),
+                    "optimizer_lr_at_checkpoint": float(self.optimizer.param_groups[0]["lr"]),
+                    "selection_metric": "classification_validation_ErrorRate",
+                }},
                 min_keys=["ErrorRate"],
             )
 

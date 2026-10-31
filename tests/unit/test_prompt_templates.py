@@ -40,7 +40,9 @@ def test_render_prompt_merges_runtime_fields_without_mutating_template() -> None
     template = load_prompt_template("hpo_strategy_proposal")
 
     assert payload["schema"] == template["schema"]
-    assert payload["rules"] == template["rules"]
+    assert payload["rules"] == template["rules"] + template["stage_profiles"]["study_planning"]["rules"]
+    assert "stage_profiles" not in payload
+    assert "stage_profiles" in template
     assert payload["context"] == {"phase": "study_planning"}
     rules = " ".join(payload["rules"])
     assert "cross_study_memory.local_search_anchor" in rules
@@ -112,3 +114,49 @@ def test_hpo_prompt_declares_gpu_hours_as_a_hard_ceiling() -> None:
     assert "hard ceilings" in rules
     assert "GPU-hours mean GPU count multiplied by elapsed GPU time" in rules
     assert template["decision_priority"][0].startswith("Satisfy explicit GPU-hours")
+
+
+@pytest.mark.parametrize('phase,probe', [('study_planning',False),('runtime_review',False),('runtime_review',True)])
+def test_stage_prompt_has_only_compatible_examples_and_contract(phase, probe):
+    context = {'phase':phase, 'available_samplers':['tpe','random_search','agent_proposal'],
+               'feedback':{'hypothesis_probe':{'enabled':probe,'eligible':True,'maximum_candidates':2}}}
+    before = json.dumps(load_prompt_template('hpo_strategy_proposal'), sort_keys=True)
+    payload = json.loads(render_prompt('hpo_strategy_proposal', context=context))
+    contract = payload['response_contract']
+    assert set(contract['required_keys']) == set(StrategyProposal.LLM_FIELDS)
+    assert contract['phase'] == ('hypothesis_probe' if probe else phase)
+    if phase == 'runtime_review':
+        assert contract['locked_values']['budgets'] is None
+        assert 'adjust_budget' not in contract['allowed_actions']
+        assert 'The conservative baseline is 9+3+1.' not in ' '.join(payload['rules'])
+    if probe:
+        assert contract['locked_values']['search_space'] is None
+        assert contract['locked_values']['sampler_config'] == {}
+        assert contract['allowed_samplers'] == ['agent_proposal']
+        assert contract['maximum_candidates'] == 2
+        assert 'falsification_criterion' in contract['hypothesis_field_types']
+        assert 'trial_observed' not in json.dumps(payload)
+    for example in payload['examples']:
+        output = example['output']
+        StrategyProposal.from_dict(output, strict_llm=True)
+        assert output['action'] in contract['allowed_actions']
+        assert all(output[key] == value for key, value in contract['locked_values'].items())
+    assert json.dumps(load_prompt_template('hpo_strategy_proposal'), sort_keys=True) == before
+
+
+def test_benchmark_constraints_remove_inapplicable_sampler_examples():
+    context = {'phase':'runtime_review', 'available_samplers':['tpe','agent_proposal'],
+               'execution_constraints':{'allowed_samplers':['random_search'], 'agent_proposal_allowed':False,
+                                        'locked_fields':['budgets','max_training_runs']}}
+    payload = json.loads(render_prompt('hpo_strategy_proposal', context=context))
+    assert payload['response_contract']['allowed_samplers'] == []
+    assert payload['response_contract']['locked_values']['candidate_proposals'] == []
+    assert all(example['output']['action'] == 'keep_strategy' for example in payload['examples'])
+
+
+def test_non_hpo_prompts_distinguish_pre_execution_advice_from_results():
+    for name, kind in [('data_processing_planning_advice','data_processing'),('orchestration_coordination_advisor','coordination')]:
+        payload = json.loads(render_prompt(name, context={}))
+        assert payload['response_contract']['kind'] == kind
+        assert set(payload['response_contract']['required_keys']) == set(payload['schema'])
+        assert 'before' in payload['task'] or 'pre-execution' in payload['task']

@@ -100,6 +100,54 @@ python main.py \
   --validation-pairs datasets/protocols/hpo_validation.txt
 ```
 
+Add `--hypothesis-probes` to the command above to enable bounded hypothesis
+experiments. The Study starts with TPE and waits for three successful observations
+at the initial budget. An agent batch replaces normal search candidates, uses at
+most three runs and at most one third of the initial candidate quota across the
+Study, then returns to TPE. The original search space and training/promotion
+budgets stay fixed. At most two eligible runtime consultations are allowed;
+planning, exhausted quota and promotion-only work skip the LLM.
+
+Each hypothesis cites observed Trial IDs, an anchor, the parameters being tested
+and a numeric falsification criterion. Single-factor experiments hold other
+parameters fixed; an interaction requires both single-factor controls and the
+joint change; a boundary probe includes an endpoint and an interior level.
+Invalid or duplicate designs fall back to TPE without training. Outcomes are
+recorded as `supported_observation`, `not_supported`, or `inconclusive`, and their
+observations feed subsequent TPE sampling. A low-budget result is not a causal
+claim or a final-quality improvement. See the
+[hypothesis benchmark protocol](scripts/experiments/FIVE_GROUP_BENCHMARK.md#假设候选模式)
+for the opt-in comparison configuration and cost/quality reporting.
+
+For a cross-budget decision loop, select `--cross-stage-probes` instead of
+`--hypothesis-probes`, together with an LLM controller, TPE and successive halving.
+The [cross-stage benchmark configuration](configs/experiments/five_group_ecapa_vox1_cross_stage.json)
+provides a ready-to-use 9→3→1 plan. At least three first-transition promotion
+slots and a completed initial batch of at least three configurations are required;
+the first two budgets must use the same data fraction.
+
+After the initial TPE batch, the agent may promote the current winner and one
+initially worse challenger early, using two existing promotion slots. At least
+one slot remains for merit selection after the remaining initial candidates.
+The hypothesis predicts a ranking reversal by a declared minimum objective gain.
+A failed or missing arm remains inconclusive. Both promotions restart training.
+After the paired result, the agent may allocate one TPE batch to a broad numeric
+region around the higher-budget winner, or keep global search. This batch uses
+at most one third of initial candidate slots and retains at least half each
+focused parameter's original linear/log interval. Global bounds are never
+replaced; subsequent sampling returns to the full domain. These two committed
+decision opportunities share the existing per-consultation retry/deadline rules;
+an interrupted consultation falls back rather than being repeated on resume.
+
+Trial observations now include the selected checkpoint's actual epoch and CLR
+scheduler state when available. Older checkpoints retain unknown metadata.
+The selection criterion is classification validation ErrorRate, distinct from
+verification EER. A pair evaluated at 1 and 3 epochs does not establish a ranking
+at the 6-epoch final budget or causality for cycle phase. `results.json.cross_stage`
+records pair outcomes, accepted/rejected decisions and the local batch's
+same-budget improvement; overall quality/cost comparison remains in
+`summary.json.paired_efficiency`.
+
 Both validation arguments are mandatory for a new HPO run. The validation-pair
 speakers are excluded from training and every Trial is evaluated only on that
 split. A broader `--training-exclusion-pairs` file may be supplied when it must
@@ -148,6 +196,24 @@ their effective Trial index, affected Trial IDs, and realized metric/time
 outcome. They also report a decision-before, same-Study, same-rung and exact-
 budget observational reference when one exists. This estimate is explicitly
 non-causal; causal system claims still require frozen multi-seed control runs.
+
+Advisor prompts define a JSON response skeleton, explicit field types and a
+phase-specific response contract. HPO planning, runtime review and hypothesis
+probes receive only their relevant rules and compatible examples; benchmark
+constraints are applied before rendering the final prompt. Synthetic budget and
+anchor examples are omitted from live requests to avoid copying them as facts.
+Data-processing advice specifies operation/parameters/reason objects, while the
+coordination advisor provides pre-execution diagnostics rather than a results
+summary. Both stages validate their response keys, arrays and operation shapes
+before the workflow consumes them.
+
+Each consultation permits at most one complete regeneration for a JSON or
+response-contract error. The correction includes the validation error, preserves
+the original phase and evidence, and asks for a shorter complete response after
+truncation. It shares the existing consultation deadline with network retries
+and tool rounds. Request failures do not trigger an additional format retry;
+repeated format failure returns recorded failure advice for deterministic fallback.
+HPO policy and hypothesis-design gates remain authoritative after parsing.
 
 The LLM read-only history tool returns only successful experiments with a finite
 best objective and an exact full confirmation signature match (final budget,

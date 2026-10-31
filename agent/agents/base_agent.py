@@ -11,6 +11,7 @@ from typing import Any, List, Optional
 
 from .advisory_response import (
     decode_json_response, extract_message_content, response_diagnostics,
+    correction_prompt, validate_advice_response,
     exception_diagnostics, retryable_request_error, unsupported_feature, trial_ids_from_evidence,
 )
 
@@ -108,20 +109,35 @@ class AdvisoryAgentBase:
                 return model.bind(response_format={"type": "json_object"})
         return model
 
-    def _request_json_advice(self, prompt: str) -> dict:
+    def _request_json_advice(self, prompt: str, *, validator=None) -> dict:
         with self._advisory_session():
-            response = None
-            stage = "request"
-            try:
-                response = self._invoke_advisory_model(self._json_model(self.llm), prompt)
-                stage = "json_decode"
-                return decode_json_response(response)
-            except Exception as exc:
-                from agent.hpo.resources import ResourceBudgetExhausted
-                if isinstance(exc, ResourceBudgetExhausted):
-                    raise
-                diagnostics = response_diagnostics(response, exc, stage=stage)
-                return {"advice_error": diagnostics["error"], "advice_diagnostics": diagnostics}
+            original_prompt = prompt
+            self._advisor_format_events = []
+            failures = []
+            for attempt in range(2):
+                response = None
+                stage = "request"
+                try:
+                    response = self._invoke_advisory_model(self._json_model(self.llm), prompt)
+                    stage = "json_decode"
+                    value = decode_json_response(response)
+                    stage = "schema_validation"
+                    validate_advice_response(value, original_prompt)
+                    if validator is not None:
+                        validator(value)
+                    self._advisor_format_events.append({"attempt": attempt + 1, "status": "success"})
+                    return value
+                except Exception as exc:
+                    from agent.hpo.resources import ResourceBudgetExhausted
+                    if isinstance(exc, ResourceBudgetExhausted):
+                        raise
+                    diagnostics = response_diagnostics(response, exc, stage=stage)
+                    failures.append(diagnostics)
+                    self._advisor_format_events.append({"attempt": attempt + 1, "status": "failed", **diagnostics})
+                    if stage == "request" or attempt == 1 or self._advisory_remaining() <= 1:
+                        return {"advice_error": diagnostics["error"],
+                                "advice_diagnostics": {**diagnostics, "response_attempts": failures}}
+                    prompt = correction_prompt(original_prompt, diagnostics)
 
     def _invoke_with_readonly_tools(
         self,
@@ -174,7 +190,10 @@ class AdvisoryAgentBase:
             messages.append(HumanMessage(
                 content=(
                     "Using the read-only evidence already collected, return the final raw JSON "
-                    "object required by the original schema. Do not call another tool."
+                    "object required by the original schema and phase-specific response_contract. "
+                    "Include every required key and preserve locked values. Do not wrap the object "
+                    "in schema or data, narrate tool use, or call another tool. If evidence remains "
+                    "insufficient, return the permitted no-change response."
                 )
             ))
             return self._invoke_advisory_model(self._json_model(self.llm), messages)

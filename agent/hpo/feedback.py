@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional
 
 from agent.core.metrics import is_finite_metric
+from . import cross_stage, hypothesis_probes
 from .protocol import METRIC_PROTOCOL_ID, METRIC_UNITS
 from .contracts import HPOStudy, StrategyProposal, Trial
 
@@ -61,6 +62,9 @@ class HPOFeedbackAnalyzer:
             best_parameters = dict(ranked[0].parameters)
             ranked_trials = [self._trial_summary(trial, objective.metric) for trial in ranked[:5]]
         return {
+            "hypothesis_probe": hypothesis_probes.opportunity(study, trials),
+            "cross_stage": {"opportunity": cross_stage.opportunity(study, trials),
+                            "evidence": cross_stage.evidence(study, trials)} if cross_stage.enabled(study) else {"opportunity": {"enabled": False}},
             "objective": objective.to_dict(),
             "metric_protocol": study.history_context.get(
                 "metric_protocol", METRIC_PROTOCOL_ID

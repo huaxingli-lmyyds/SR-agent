@@ -18,6 +18,7 @@ from agent.runners.speechbrain_distributed import (
 )
 from agent.utils import ExperimentTracker, get_experiment_artifact_dir  # noqa: F401
 
+from . import cross_stage, hypothesis_probes
 from .contracts import HPOStudy, Objective, SearchSpace, StrategyProposal, Trial, TrialBudget
 from .effects import summarize_decision_effect
 from .records import search_space_from_dict, study_from_dict, trial_from_dict, _write_json_atomic
@@ -130,6 +131,8 @@ class HPOService:
         proposal_id: Optional[str] = None,
         planning_decision_id: Optional[str] = None,
         controller_mode: str = "auto",
+        hypothesis_probes_enabled: bool = False,
+        cross_stage_probes_enabled: bool = False,
     ) -> HPOStudy:
         self._validate_record_id(experiment_id, "experiment_id")
         if pruner_strategy is None and strategy == "successive_halving" and len(budgets) < 2:
@@ -197,6 +200,13 @@ class HPOService:
                 candidate_batch_size=candidate_batch_size,
                 sampler_config=sampler_config,
             )
+        if type(cross_stage_probes_enabled) is not bool:
+            raise ValueError("cross_stage_probes must be a boolean")
+        probe_policy = hypothesis_probes.policy_for(hypothesis_probes_enabled)
+        if probe_policy and (controller_mode != "llm" or sampler_strategy != "tpe"):
+            raise ValueError("hypothesis probes require an LLM controller starting with TPE")
+        if probe_policy and (hypotheses or candidate_proposals):
+            raise ValueError("hypothesis probes require observed TPE trials before proposing candidates")
         normalized_sampler_config = self.validate_sampler_config(
             sampler_strategy, sampler_config
         )
@@ -244,6 +254,8 @@ class HPOService:
             scheduler_state={
                 "active_decision_id": planning_decision_id,
                 "active_proposal_id": proposal_id,
+                **({"hypothesis_probe_policy": probe_policy} if probe_policy else {}),
+                **({"cross_stage_policy": {"version": 1}} if cross_stage_probes_enabled else {}),
             },
             warm_start_trials=list(warm_start_trials or []),
             history_context=self._build_history_context(experiment_id, objectives[0]),
@@ -251,6 +263,11 @@ class HPOService:
             created_at=now,
             updated_at=now,
         )
+        if cross_stage_probes_enabled:
+            cross_stage.validate_plan(study)
+            study.scheduler_state["cross_stage_policy"]["original_search_space"] = study.search_space.to_dict()
+            if hypotheses or candidate_proposals:
+                raise ValueError("cross-stage mode starts with observed TPE evidence, not planning candidates")
         if hypotheses:
             hypothesis_review = self.register_hypotheses(
                 study,
@@ -541,6 +558,9 @@ class HPOService:
             if self._active_pruner(study) == "successive_halving"
             else all_history
         )
+        sampling_space, focus = cross_stage.sampling_region(study, existing_trials)
+        if focus:
+            count = min(count, focus["maximum_candidates"])
         strategy = STRATEGIES.get(sampler_strategy)
         suggest_kwargs = {
             "seed": study.random_seed + len(existing_trials),
@@ -554,13 +574,25 @@ class HPOService:
                 study.pending_candidate_proposals
             )
         raw_suggestions = strategy.suggest(
-            study.search_space,
+            sampling_space,
             # A stale invalid item must not hide valid candidates later in the
             # persisted queue. Apply the batch limit after validation instead.
             max(count, len(study.pending_candidate_proposals))
             if sampler_strategy == "agent_proposal" else count,
             **suggest_kwargs,
         )
+        if focus:
+            focus["consumed"] = True
+            focus["compatible_initial_observations"] = sum(
+                all(name in t.parameters and bounds["low"] <= t.parameters[name] <= bounds["high"]
+                    for name, bounds in focus["bounds"].items())
+                for t in sampler_history if t.rung == 0 and t.status in {"completed", "promoted"}
+            )
+            if not raw_suggestions:
+                focus["fallback_reason"] = "region_produced_no_unique_candidate"
+                raw_suggestions = strategy.suggest(study.search_space, count, **suggest_kwargs)
+                focus = None
+            self._save_study(study)
         suggestions = []
         rejected = []
         proposal_by_signature = {
@@ -582,6 +614,11 @@ class HPOService:
                 "rejected": rejected,
                 "created_at": datetime.now().isoformat(),
             })
+        if focus and not suggestions:
+            focus["fallback_reason"] = "region_candidates_rejected_by_validator"
+            self._save_study(study)
+            # The focus has already been consumed; this bounded retry uses the global domain.
+            return self.suggest_trials(study, count)
         if not suggestions and sampler_strategy == "agent_proposal":
             # Also covers resumed queues containing only consumed/invalid items.
             # This fallback is bounded: _agent_fallback never returns agent_proposal.
@@ -668,6 +705,7 @@ class HPOService:
                         key: value for key, value in metadata.items()
                         if key not in {"parameters", "proposal_id", "hypothesis_id"}
                     },
+                    **({"region_id": focus["region_id"], "search_region": focus["bounds"]} if focus else {}),
                     "history_context": dict(study.history_context),
                     "decision_id": active_decision_id,
                     "phase_proposal_id": active_proposal_id,
@@ -938,6 +976,7 @@ class HPOService:
                 "expected_signal": dict(expected_signal),
                 "proposal_id": proposal_id,
                 "status": "proposed",
+                **{key: raw[key] for key in ("anchor_trial_id", "probe_design", "tested_parameters", "falsification_criterion") if key in raw},
             }
             existing_ids.add(hypothesis_id)
             study.hypotheses.append(normalized)
@@ -1040,6 +1079,19 @@ class HPOService:
                 action="keep_strategy", reason_codes=["fixed_controller"]
             )
         else:
+            if cross_stage.enabled(study) and proposal is not None and (
+                proposal.action != "keep_strategy" or any((proposal.search_space, proposal.sampler_config,
+                    proposal.hypotheses, proposal.candidate_proposals, proposal.requested_sampler, proposal.requested_strategy,
+                    proposal.requested_pruner, proposal.budgets, proposal.max_training_runs,
+                    proposal.initial_trial_count, proposal.promotion_limits, proposal.reduction_factor))
+            ):
+                controller_rejections.append({"field": "cross_stage_policy", "reason": "use the dedicated cross-stage decision contract"})
+                proposal = StrategyProposal(action="keep_strategy", reason_codes=["cross_stage_policy_frozen"])
+            proposal, probe_rejections = hypothesis_probes.validate_proposal(
+                study, trials, proposal, self.validate_candidate_parameters,
+                additional_existing=[t.parameters for t in self.compatible_warm_start_trials(study)],
+            )
+            controller_rejections.extend(probe_rejections)
             gate = self.evidence_gate.review(
                 study,
                 feedback,
@@ -1141,6 +1193,7 @@ class HPOService:
         feedback = analyzer.analyze(study, trials)
         mode = self._controller_mode(study, proposal)
         submitted_proposal = proposal
+        probe_opportunity = hypothesis_probes.opportunity(study, trials)
         controller_rejections: List[Dict[str, Any]] = []
         gate_record: Dict[str, Any] = {}
         if mode == "fixed":
@@ -1160,6 +1213,19 @@ class HPOService:
                 })
             proposal = analyzer.propose(study, feedback, self.available_samplers())
         else:
+            if cross_stage.enabled(study) and proposal is not None and (
+                proposal.action != "keep_strategy" or any((proposal.search_space, proposal.sampler_config,
+                    proposal.hypotheses, proposal.candidate_proposals, proposal.requested_sampler, proposal.requested_strategy,
+                    proposal.requested_pruner, proposal.budgets, proposal.max_training_runs,
+                    proposal.initial_trial_count, proposal.promotion_limits, proposal.reduction_factor))
+            ):
+                controller_rejections.append({"field": "cross_stage_policy", "reason": "use the dedicated cross-stage decision contract"})
+                proposal = StrategyProposal(action="keep_strategy", reason_codes=["cross_stage_policy_frozen"])
+            proposal, probe_rejections = hypothesis_probes.validate_proposal(
+                study, trials, proposal, self.validate_candidate_parameters,
+                additional_existing=[t.parameters for t in self.compatible_warm_start_trials(study)],
+            )
+            controller_rejections.extend(probe_rejections)
             gate = self.evidence_gate.review(
                 study,
                 feedback,
@@ -1352,6 +1418,7 @@ class HPOService:
         review = {
             "trigger": trigger,
             "scope": "current_study",
+            "hypothesis_probe_opportunity": probe_opportunity,
             "controller_mode": mode,
             "feedback": feedback,
             "proposal": submitted_proposal.to_dict() if submitted_proposal else None,
@@ -1874,6 +1941,11 @@ class HPOService:
         ))
         for hypothesis in study.hypotheses:
             hypothesis_id = str(hypothesis.get("id") or "")
+            if study.scheduler_state.get("hypothesis_probe_policy") and hypothesis.get("probe_design"):
+                outcome = hypothesis_probes.hypothesis_outcome(study, trials, hypothesis)
+                hypothesis["status"] = outcome["status"]
+                hypothesis["result"] = outcome
+                continue
             related = [
                 trial for trial in trials
                 if str(trial.hypothesis_id or "") == hypothesis_id

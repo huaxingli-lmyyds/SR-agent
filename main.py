@@ -67,6 +67,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow LLMs to submit structured strategy/data-processing proposals.",
     )
+    parser.add_argument("--cross-stage-probes", action="store_true",
+                        help="Use paired early promotions and one temporary TPE region (requires LLM/TPE/SH).")
+    parser.add_argument("--hypothesis-probes", action="store_true",
+                        help="Use bounded, falsifiable candidate batches between TPE batches (requires LLM/TPE).")
     parser.add_argument(
         "--controller-mode",
         choices=["fixed", "rule", "llm"],
@@ -263,6 +267,20 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
         "primary_metric": args.primary_metric,
         "metric_mode": args.metric_mode,
     }
+    if args.cross_stage_probes:
+        if args.hypothesis_probes:
+            raise SystemExit("select either --cross-stage-probes or --hypothesis-probes")
+        if not args.enable_llm_advisor or args.controller_mode not in {None, "llm"}:
+            raise SystemExit("--cross-stage-probes requires --enable-llm-advisor and an LLM controller")
+        if not args.resume_experiment_id and (args.sampler or args.strategy) != "tpe":
+            raise SystemExit("--cross-stage-probes requires starting with TPE")
+        context["cross_stage_probes"] = True
+    if args.hypothesis_probes:
+        if not args.enable_llm_advisor or args.controller_mode not in {None, "llm"}:
+            raise SystemExit("--hypothesis-probes requires --enable-llm-advisor and an LLM controller")
+        if not args.resume_experiment_id and (args.sampler or args.strategy) != "tpe":
+            raise SystemExit("--hypothesis-probes requires starting with --sampler tpe or --strategy tpe")
+        context["hypothesis_probes"] = True
     if args.controller_mode is not None:
         context["controller_mode"] = args.controller_mode
     if args.sampler is not None:

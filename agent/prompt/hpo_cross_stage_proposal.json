@@ -1,0 +1,90 @@
+{
+  "schema": {
+    "action": "keep_search",
+    "hypothesis": null,
+    "anchor_trial_id": null,
+    "challenger_trial_id": null,
+    "evidence_trial_ids": [],
+    "minimum_late_advantage": null,
+    "region": null,
+    "reason": "insufficient_evidence",
+    "confidence": 0.0
+  },
+  "task": "Choose a bounded cross-budget experiment or one temporary TPE search region.",
+  "response_contract": {
+    "kind": "cross_stage",
+    "required_keys": [
+      "action",
+      "hypothesis",
+      "anchor_trial_id",
+      "challenger_trial_id",
+      "evidence_trial_ids",
+      "minimum_late_advantage",
+      "region",
+      "reason",
+      "confidence"
+    ],
+    "field_types": {
+      "action": "allowed action string",
+      "hypothesis": "nonempty string or null",
+      "anchor_trial_id": "exact observed ID or null",
+      "challenger_trial_id": "exact observed ID or null",
+      "evidence_trial_ids": "array of exact observed IDs",
+      "minimum_late_advantage": "positive finite number or null",
+      "region": "object mapping one or two parameter names to {low:number,high:number}, or null",
+      "reason": "nonempty concise string",
+      "confidence": "finite number in [0,1]"
+    }
+  },
+  "rules": [
+    "Return raw JSON only. Emit exactly the schema keys, no wrapper, markdown, prose, comments, NaN or Infinity. A keep_search response leaves every decision field null and evidence_trial_ids=[].",
+    "Use only supplied same-Study observations. Missing higher-budget metrics or checkpoint/scheduler metadata means unknown. Never infer a cycle phase from the epoch count alone.",
+    "The goal is better confirmed quality per total GPU and wall time. Keep the sampler TPE, global search bounds and training allocations fixed. Do not add trials, new parameter dimensions, or change a learning-rate schedule.",
+    "Treat hypotheses as predictions. A ranking reversal between two complete configurations cannot isolate a single parameter when other parameters also differ. Cycle-phase causality is unverified; this experiment does not intervene on the scheduler.",
+    "Promotions restart training. Compare configuration rankings at each recorded budget separately, not as one continuous learning curve. Validation ErrorRate used for checkpoint selection is not verification EER.",
+    "Use confidence >=0.65 only for a justified intervention; do not increase confidence to pass validation. Otherwise keep_search. No tools are needed because eligible pairs and their observations are supplied."
+  ],
+  "stage_profiles": {
+    "paired_promotion": {
+      "allowed_actions": [
+        "keep_search",
+        "paired_promotion"
+      ],
+      "rules": [
+        "Select exactly two IDs from context.cross_stage.opportunity.eligible_trial_ids. The anchor must be the current initial-budget winner and the challenger must have worse initial-budget performance. Cite both in evidence_trial_ids.",
+        "State a falsifiable configuration-ranking hypothesis: after the destination budget, the initially worse challenger will beat the anchor by at least minimum_late_advantage in context.primary_metric units, with direction defined by metric_mode. If it does not, the hypothesis is not supported.",
+        "Prefer a challenger whose parameter differences and observed training behavior justify testing early-selection bias. Describe all relevant differences; do not invent learning curves or claim controlled single-factor causality.",
+        "Two existing promotion slots are used early, leaving at least one merit-selected slot for later candidates. All initial candidate slots remain. region must be null. If evidence is too weak for this cost, keep_search.",
+        "One epoch provides only one epoch-level loss point, not a learning-curve trend. Parameter differences can motivate a probe, but do not invent a slope or treat expected late improvement as an observation."
+      ]
+    },
+    "region_review": {
+      "allowed_actions": [
+        "keep_search",
+        "focus_region"
+      ],
+      "rules": [
+        "Use the completed paired comparison. Cite both source IDs and both child IDs in evidence_trial_ids. Leave hypothesis, anchor_trial_id, challenger_trial_id and minimum_late_advantage null.",
+        "Prefer keep_search when the proposed region is not justified by the comparison, including when the pair is noisy. Not supporting a reversal does not prove that other configurations or schedules are inferior.",
+        "For focus_region propose bounds for at most two unconditional numeric parameters that differed in the pair. Every interval must stay inside the original domain, include the destination-budget winner, and retain at least half the original width (log width for log-scaled parameters).",
+        "The region is used for one TPE batch only, capped by opportunity.maximum_candidates and one third of the initial candidate quota. Global boundaries are never overwritten; global search resumes afterward. The higher-budget comparison is still not full-budget proof unless both arms reached the frozen final budget."
+      ]
+    }
+  },
+  "examples": [
+    {
+      "name": "no_justified_intervention",
+      "output": {
+        "action": "keep_search",
+        "hypothesis": null,
+        "anchor_trial_id": null,
+        "challenger_trial_id": null,
+        "evidence_trial_ids": [],
+        "minimum_late_advantage": null,
+        "region": null,
+        "reason": "insufficient_evidence",
+        "confidence": 0.0
+      }
+    }
+  ]
+}

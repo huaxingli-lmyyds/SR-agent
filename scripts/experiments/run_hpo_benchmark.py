@@ -162,6 +162,12 @@ def positive_int(value, name):
 
 
 def validate_config(config):
+    if type(config.get("cross_stage_probes", False)) is not bool:
+        raise ValueError("cross_stage_probes must be a boolean")
+    if config.get("cross_stage_probes") and config.get("hypothesis_probes"):
+        raise ValueError("select either same-budget hypothesis probes or cross-stage probes")
+    if type(config.get("hypothesis_probes", False)) is not bool:
+        raise ValueError("hypothesis_probes must be a boolean")
     from agent.hpo.resources import positive_limit
     for name in ("max_gpu_hours", "max_wall_seconds"):
         positive_limit(config.get(name), name)
@@ -200,6 +206,11 @@ def validate_config(config):
     budgets, limits = config["budgets"], config["promotion_limits"]
     if len(budgets) < 2 or len(limits) != len(budgets) - 1:
         raise ValueError("promotion_limits must have one entry per transition")
+    if config.get("cross_stage_probes"):
+        if config["sh_initial_trials"] < 6 or not 3 <= config["candidate_batch_size"] <= config["sh_initial_trials"] // 2 or limits[0] < 3:
+            raise ValueError("cross-stage probes need >=6 initial trials, a 3..half-quota batch, and >=3 first-stage promotion slots")
+        if budgets[0].get("data_fraction", 1.0) != budgets[1].get("data_fraction", 1.0):
+            raise ValueError("cross-stage probes require an unchanged data fraction")
     previous_count = config["sh_initial_trials"]
     for count in limits:
         positive_int(count, "promotion limit")
@@ -847,6 +858,8 @@ def run_variant(plan, item, output):
             "primary_metric": "eer",
             "metric_mode": "min",
             "controller_mode": "llm" if item["variant"] == "system" else "fixed",
+            "hypothesis_probes": config.get("hypothesis_probes", False) and item["variant"] == "system",
+            "cross_stage_probes": config.get("cross_stage_probes", False) and item["variant"] == "system",
             "sampler_config": {
                 "n_startup_trials": config["n_startup_trials"],
                 "multivariate": False,
@@ -898,6 +911,7 @@ def run_variant(plan, item, output):
         ]
     agent = BenchmarkHPOAgent(
         variant=item["variant"],
+        hypothesis_probes=config.get("hypothesis_probes", False),
         envelope=config["search_space"],
         event_sink=lambda name, event: append_event(run_dir, name, event),
         model_name=config.get("model_name", "GLM-4.7"),
@@ -948,6 +962,10 @@ def run_variant(plan, item, output):
         )
         summary["strategy_reviews"] = len(study.strategy_reviews)
         summary["search_phases"] = study.search_phases
+        from agent.hpo.hypothesis_probes import performance_summary
+        summary["hypothesis_probes"] = performance_summary(study, trials)
+        from agent.hpo.cross_stage import summary as cross_stage_summary
+        summary["cross_stage"] = cross_stage_summary(study, trials)
         if (
             [b.to_dict() for b in study.budgets]
             != [{"max_duration_seconds": None, **b} for b in spec["budgets"]]
@@ -1058,6 +1076,14 @@ def run_variant(plan, item, output):
         or any("attempt_cost" not in e for e in attempts)
         or any(run_dir.glob("*.partial"))
     )
+    if summary.get("hypothesis_probes"):
+        probe_ids = {t.trial_id for t in trials if t.rung == 0 and t.candidate_source == "sampler:agent_proposal"}
+        # Include every attempt, not just the latest cost persisted on each Trial.
+        summary["hypothesis_probes"]["agent_candidate_gpu_seconds"] = sum(
+            (event.get("attempt_cost", {}).get("attempt_training_gpu_seconds") or 0)
+            + (event.get("attempt_cost", {}).get("attempt_evaluation_gpu_seconds") or 0)
+            for event in attempts if event.get("trial_id") in probe_ids)
+        summary["hypothesis_probes"]["agent_candidate_cost_may_be_incomplete"] = summary["cost_may_be_incomplete"]
     advisor = read_events(run_dir / "advisor.jsonl")
     proposals = read_events(run_dir / "proposals.jsonl")
     summary.update(advisor_outcome(advisor, proposals, uses_advisor=item["variant"] == "system"))
@@ -1068,9 +1094,14 @@ def run_variant(plan, item, output):
 def advisor_outcome(advisor, proposals, *, uses_advisor):
     from agent.agents.hpo_agent import HPOAgent
 
+    proposals = [event for event in proposals if event.get("origin", "llm") == "llm"]
     failures = sum(event.get("status") != "success" for event in advisor)
-    invalid = sum((event.get("raw") or {}).get("action") == "invalid_proposal" for event in proposals)
-    valid = sum((event.get("raw") or {}).get("action") in HPOAgent.proposal_actions for event in proposals)
+    invalid = sum((event.get("raw") or {}).get("action") == "invalid_proposal"
+                  or event.get("kind") == "cross_stage" and bool((event.get("raw") or {}).get("advice_error"))
+                  for event in proposals)
+    valid = sum((event.get("raw") or {}).get("action") in (
+        {"keep_search", "paired_promotion", "focus_region"} if event.get("kind") == "cross_stage" else HPOAgent.proposal_actions
+    ) for event in proposals)
     return {
         "advisor_requests": len(advisor),
         "advisor_seconds": sum(event.get("duration_seconds", 0) for event in advisor),
@@ -1079,6 +1110,23 @@ def advisor_outcome(advisor, proposals, *, uses_advisor):
         "llm_valid_proposals": valid,
         "controller_degraded": bool(uses_advisor and (not valid or failures or invalid)),
     }
+
+
+def paired_efficiency(system, baseline):
+    """Keep quality and cost separate; missing cost is never treated as free."""
+    complete = not any(r.get("cost_may_be_incomplete") or r.get("controller_degraded")
+                       for r in (system, baseline))
+    ratios = {}
+    for metric in ("gpu_hours", "wall_seconds"):
+        ours, theirs = system.get(metric), baseline.get(metric)
+        ratios[metric] = ours / theirs if complete and finite(ours) and finite(theirs) and ours > 0 and theirs > 0 else None
+    eligible = all(value is not None for value in ratios.values())
+    delta = system["validation_eer"] - baseline["validation_eer"]
+    return {"seed": baseline["seed"], "system_minus_baseline_eer": delta,
+            "system_over_baseline_gpu_hours": ratios["gpu_hours"],
+            "system_over_baseline_wall_seconds": ratios["wall_seconds"],
+            "eligible_for_efficiency_claim": eligible,
+            "better_and_faster": (delta < 0 and ratios["gpu_hours"] < 1 and ratios["wall_seconds"] < 1) if eligible else None}
 
 
 def summarize(results):
@@ -1113,6 +1161,7 @@ def summarize(results):
             ),
         }
     paired = {}
+    efficiency = {}
     ours = {
         r["seed"]: r
         for r in results
@@ -1138,9 +1187,14 @@ def summarize(results):
             and finite(r.get("validation_eer"))
         ]
         paired[name] = differences
+        efficiency[name] = [paired_efficiency(ours[r["seed"]], r) for r in results
+                            if r["variant"] == name and r["seed"] in ours
+                            and r["status"] == "success" and r.get("confirmation_satisfied")
+                            and finite(r.get("validation_eer"))]
     return {
         "by_variant": grouped,
         "paired_validation_differences": paired,
+        "paired_efficiency": efficiency,
         "note": "Validation-only, complete-pair analysis; failures and incomplete costs remain in by_variant. Not an equal-GPU-time comparison.",
     }
 

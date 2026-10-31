@@ -56,10 +56,13 @@ class SpeechBrainRunnerAdapter:
         metrics = {"valid_error_rate": result.get("valid_error_rate")}
         metrics.update(result.get("metrics") or {})
         metrics.update(final_metrics)
+        model_paths = _find_model_paths(resolved_output, experiment_dir)
+        from .training_observation import selected_checkpoint_observation
+        result["selected_checkpoint"] = selected_checkpoint_observation(model_paths[0]) if model_paths else {}
         result.update({
             "output_folder": str(resolved_output) if resolved_output else None,
             "metrics": metrics,
-            "model_paths": _find_model_paths(resolved_output, experiment_dir),
+            "model_paths": model_paths,
             "train_log_path": str(train_log) if train_log else None,
             "epoch_data": epoch_data,
             "final_metrics": final_metrics,
@@ -85,6 +88,7 @@ class SpeechBrainRunnerAdapter:
                 "output_folder": raw.get("output_folder"),
                 "epoch_data": raw.get("epoch_data") or [],
                 "final_metrics": raw.get("final_metrics") or {},
+                "selected_checkpoint": raw.get("selected_checkpoint") or {},
                 "timeout_seconds": raw.get("timeout_seconds"),
                 "terminated_by_budget": bool(raw.get("terminated_by_budget", False)),
                 "process_exitcode": raw.get("process_exitcode"),

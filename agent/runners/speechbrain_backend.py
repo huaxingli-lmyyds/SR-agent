@@ -869,6 +869,8 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             if distributed_runtime["rank"] == 0 else None
         )
 
+        from .training_observation import scheduler_snapshot
+
         return {
             "status": "success",
             "valid_error_rate": valid_error_rate,
@@ -879,6 +881,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 "global_batch_size": hparams.get("global_batch_size"),
                 "batch_size_per_device": hparams.get("batch_size_per_device"),
                 "training_speaker_count": actual_speaker_count,
+                "final_learning_rate_schedule": scheduler_snapshot(hparams["lr_annealing"]),
             },
         }
     except Exception as exc:

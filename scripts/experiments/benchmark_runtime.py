@@ -8,6 +8,7 @@ from time import perf_counter
 from typing import Any
 
 from agent.agents.hpo_agent import HPOAgent
+from agent.prompt import render_prompt
 from agent.agents.advisory_response import exception_diagnostics
 from agent.hpo import StrategyProposal
 
@@ -70,7 +71,7 @@ def within_envelope(proposed: dict, envelope: dict) -> bool:
 
 
 def constrain_proposal(
-    proposal: StrategyProposal | None, envelope: dict
+    proposal: StrategyProposal | None, envelope: dict, *, allow_hypothesis_probes: bool = False
 ) -> StrategyProposal:
     """An explicit keep response avoids the service's implicit rule controller."""
     if proposal is None:
@@ -83,13 +84,15 @@ def constrain_proposal(
         if value.get(name) is not None:
             blocked.append(name)
             value[name] = None
+    allowed = ALLOWED_SAMPLERS | ({"agent_proposal"} if allow_hypothesis_probes else set())
     for name in ("requested_sampler", "requested_strategy"):
-        if value.get(name) is not None and value[name] not in ALLOWED_SAMPLERS:
+        if value.get(name) is not None and value[name] not in allowed:
             blocked.append(name)
             value[name] = None
-    if value.get("candidate_proposals"):
-        blocked.append("candidate_proposals")
-    value["candidate_proposals"] = []
+    if not allow_hypothesis_probes:
+        if value.get("candidate_proposals"):
+            blocked.append("candidate_proposals")
+        value["candidate_proposals"] = []
     if value.get("search_space") is not None and not within_envelope(
         value["search_space"], envelope
     ):
@@ -111,16 +114,18 @@ class BenchmarkHPOAgent(HPOAgent):
         variant: str,
         envelope: dict,
         event_sink,
+        hypothesis_probes: bool = False,
         **kwargs,
     ):
         super().__init__(enable_llm_advisor=variant == "system", **kwargs)
         self.variant = variant
         self.envelope = envelope
         self.event_sink = event_sink
+        self.hypothesis_probes = hypothesis_probes and variant == "system"
 
     def _planning_proposal(self, *args, **kwargs):
         raw = super()._planning_proposal(*args, **kwargs)
-        restricted = constrain_proposal(raw, self.envelope)
+        restricted = constrain_proposal(raw, self.envelope, allow_hypothesis_probes=self.hypothesis_probes)
         self.event_sink(
             "proposals",
             {
@@ -128,6 +133,7 @@ class BenchmarkHPOAgent(HPOAgent):
                 "raw": raw.to_dict(),
                 "restricted": restricted.to_dict(),
                 "format_attempts": list(getattr(self, "_advisor_format_events", [])),
+                "origin": getattr(self, "_last_strategy_advice_source", "llm"),
             },
         )
         return restricted
@@ -142,7 +148,7 @@ class BenchmarkHPOAgent(HPOAgent):
 
         def review(study, feedback):
             raw = reviewer(study, feedback)
-            restricted = constrain_proposal(raw, self.envelope)
+            restricted = constrain_proposal(raw, self.envelope, allow_hypothesis_probes=self.hypothesis_probes)
             self.event_sink(
                 "proposals",
                 {
@@ -151,11 +157,35 @@ class BenchmarkHPOAgent(HPOAgent):
                     "raw": raw.to_dict() if raw else None,
                     "restricted": restricted.to_dict(),
                     "format_attempts": list(getattr(self, "_advisor_format_events", [])),
+                    "origin": getattr(self, "_last_strategy_advice_source", "llm"),
                 },
             )
             return restricted
 
         return review
+
+    def _request_cross_stage_proposal(self, prompt):
+        with self._advisory_session():
+            started = perf_counter()
+            phase = json.loads(prompt)["context"]["phase"]
+            event = {"prompt": prompt, "kind": "cross_stage", "phase": phase}
+            result = None
+            try:
+                result = super()._request_cross_stage_proposal(prompt)
+                event["status"] = "failed" if result.get("advice_error") else "success"
+                if result.get("advice_error"):
+                    event["error"] = result["advice_error"]
+                return result
+            except Exception as exc:
+                event.update(status="failed", **exception_diagnostics(exc))
+                raise
+            finally:
+                event["duration_seconds"] = perf_counter() - started
+                event["transport_attempts"] = list(getattr(self, "_advisor_transport_events", []))
+                self.event_sink("advisor", event)
+                self.event_sink("proposals", {"kind": "cross_stage", "origin": "llm", "phase": phase,
+                    "raw": result or {"advice_error": event.get("error", "failed")},
+                    "format_attempts": list(getattr(self, "_advisor_format_events", []))})
 
     def _invoke_strategy_model(self, prompt: str, **objective: Any) -> Any:
         started = perf_counter()
@@ -163,18 +193,20 @@ class BenchmarkHPOAgent(HPOAgent):
         payload = json.loads(prompt)
         context = dict(payload.get("context") or {})
         context["execution_constraints"] = {
-            "allowed_samplers": sorted(ALLOWED_SAMPLERS),
-            "agent_proposal_allowed": False,
+            "allowed_samplers": sorted(ALLOWED_SAMPLERS | ({"agent_proposal"} if self.hypothesis_probes else set())),
+            "agent_proposal_allowed": self.hypothesis_probes,
             "locked_fields": list(LOCKED_FIELDS),
             "search_space_must_stay_within_original_envelope": True,
         }
         payload["context"] = context
-        restricted_prompt = json.dumps(
-            payload, ensure_ascii=False, separators=(",", ":")
+        restricted_prompt = render_prompt(
+            "hpo_strategy_proposal", context=context,
+            **({"response_correction": payload["response_correction"]}
+               if "response_correction" in payload else {}),
         )
         event = {
             "prompt": restricted_prompt,
-            "allowed_samplers": sorted(ALLOWED_SAMPLERS),
+            "allowed_samplers": sorted(ALLOWED_SAMPLERS | ({"agent_proposal"} if self.hypothesis_probes else set())),
         }
         try:
             response = super()._invoke_strategy_model(

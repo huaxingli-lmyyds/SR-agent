@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from agent.agents.base_agent import LangGraphAgent
 from agent.agents.hpo_execution import TrialExecutor
 from agent.hpo import reporting, resource_analysis
-from agent.agents.advisory_response import decode_json_response, response_diagnostics, trial_ids_from_evidence
+from agent.agents.advisory_response import correction_prompt, decode_json_response, response_diagnostics, trial_ids_from_evidence
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.hpo.effects import summarize_decision_effect
 from agent.hpo.history import budget_key
@@ -618,6 +618,8 @@ class HPOAgent(LangGraphAgent):
                 ),
                 planning_decision_id=decision.decision_id,
                 controller_mode=controller_mode,
+                hypothesis_probes_enabled=request.context.get("hypothesis_probes", False),
+                cross_stage_probes_enabled=request.context.get("cross_stage_probes", False),
                 random_seed=int(request.context.get("hpo_seed", config.get("seed", 0)) or 0) + study_index,
             )
             confirmation_signature = study_confirmation_signature(study)
@@ -701,6 +703,7 @@ class HPOAgent(LangGraphAgent):
                 resource_budget=self._resource_budget,
                 retry_policy=RetryPolicy(int(request.budget.get("max_retries", 1))),
                 strategy_reviewer=self._runtime_strategy_reviewer(request, campaign),
+                cross_stage_reviewer=self._cross_stage_reviewer(request),
                 review_interval_trials=int(request.budget.get("strategy_review_interval_trials", 3)),
             ).run(study)
             if scheduled.study.status != "completed":
@@ -983,6 +986,14 @@ class HPOAgent(LangGraphAgent):
         study = service.load_study(experiment_id)
         if study.experiment_id != experiment_id:
             raise ValueError("persisted Study does not belong to the resume experiment")
+        persisted_probes = bool(study.scheduler_state.get("hypothesis_probe_policy"))
+        if "hypothesis_probes" in request.context and request.context["hypothesis_probes"] != persisted_probes:
+            raise ValueError("resume hypothesis_probes conflicts with the persisted Study")
+        request.context["hypothesis_probes"] = persisted_probes
+        persisted_cross_stage = bool(study.scheduler_state.get("cross_stage_policy"))
+        if "cross_stage_probes" in request.context and request.context["cross_stage_probes"] != persisted_cross_stage:
+            raise ValueError("resume cross_stage_probes conflicts with the persisted Study")
+        request.context["cross_stage_probes"] = persisted_cross_stage
         requested_controller = request.context.get("controller_mode")
         if study.controller_mode == "auto":
             study.controller_mode = str(
@@ -1071,6 +1082,7 @@ class HPOAgent(LangGraphAgent):
             resource_budget=self._resource_budget,
             retry_policy=RetryPolicy(int(request.budget.get("max_retries", 1))),
             strategy_reviewer=self._runtime_strategy_reviewer(request, campaign),
+            cross_stage_reviewer=self._cross_stage_reviewer(request),
             review_interval_trials=int(
                 request.budget.get("strategy_review_interval_trials", 3)
             ),
@@ -1306,6 +1318,12 @@ class HPOAgent(LangGraphAgent):
         campaign: Optional[Dict[str, Any]] = None,
         confirmation_signature: Optional[Dict[str, Any]] = None,
     ) -> StrategyProposal:
+        if request.context.get("hypothesis_probes") or request.context.get("cross_stage_probes"):
+            self._advisor_format_events = []
+            self._last_strategy_advice_source = "policy"
+            return StrategyProposal(action="keep_strategy", reason_codes=[
+                "cross_stage_tpe_warmup" if request.context.get("cross_stage_probes") else "hypothesis_probe_tpe_warmup"
+            ])
         memory_context = self.memory_service.format_context(MemoryQuery(
             agent_type="hpo_agent",
             task_type=self.task_type,
@@ -1376,6 +1394,15 @@ class HPOAgent(LangGraphAgent):
             return None
 
         def review(study: Any, feedback: Dict[str, Any]) -> StrategyProposal:
+            if study.scheduler_state.get("cross_stage_policy"):
+                self._advisor_format_events = []
+                self._last_strategy_advice_source = "policy"
+                return StrategyProposal(action="keep_strategy", reason_codes=["cross_stage_dedicated_review"])
+            probe = feedback.get("hypothesis_probe") or {}
+            if probe.get("enabled") and not probe.get("eligible"):
+                self._advisor_format_events = []
+                self._last_strategy_advice_source = "policy"
+                return StrategyProposal(action="keep_strategy", reason_codes=[probe["reason"]])
             memory_context = self.memory_service.format_context(MemoryQuery(
                 agent_type="hpo_agent",
                 task_type=self.task_type,
@@ -1435,7 +1462,29 @@ class HPOAgent(LangGraphAgent):
             )
         return review
 
+    def _cross_stage_reviewer(self, request):
+        if not self.enable_llm_advisor:
+            return None
+        def review(study, feedback):
+            prompt = render_prompt("hpo_cross_stage_proposal", context={
+                "phase": feedback["opportunity"]["phase"], "objective": request.objective,
+                "model_family": self.model_family, "task_type": self.task_type,
+                "metric_protocol": study.history_context.get("metric_protocol", METRIC_PROTOCOL_ID),
+                "metric_units": study.history_context.get("metric_units", dict(METRIC_UNITS)),
+                "primary_metric": study.objectives[0].metric, "metric_mode": study.objectives[0].mode,
+                "study": self._compact_study(study), "cross_stage": feedback,
+            })
+            return self._request_cross_stage_proposal(prompt)
+        return review
+
+    def _request_cross_stage_proposal(self, prompt):
+        from agent.hpo.cross_stage import validate_response
+        phase = json.loads(prompt)["context"]["phase"]
+        self._last_strategy_advice_source = "llm"
+        return self._request_json_advice(prompt, validator=lambda value: validate_response(value, phase))
+
     def _request_strategy_proposal(self, prompt: str, *, error_code: str, **options: Any) -> StrategyProposal:
+        self._last_strategy_advice_source = "llm"
         with self._advisory_session():
             failures = []
             original_prompt = prompt
@@ -1474,21 +1523,10 @@ class HPOAgent(LangGraphAgent):
                             action="invalid_proposal", reason_codes=[error_code],
                             evidence={**diagnostics, "response_attempts": failures},
                         )
-                    correction = {
-                        "instruction": "Regenerate one complete raw JSON object matching the original schema. "
-                            "No prose, fences, comments or extra punctuation. Use only original evidence and exact Trial IDs. "
-                            "Do not change budgets or invent missing evidence. This is the final format retry.",
-                        "failure_stage": stage,
-                        "validation_error": diagnostics["error"],
-                    }
-                    try:
-                        payload = json.loads(original_prompt)
-                    except (TypeError, ValueError):
-                        payload = {"original_request": original_prompt}
-                    if not isinstance(payload, dict):
-                        payload = {"original_request": payload}
-                    payload["response_correction"] = correction
-                    prompt = json.dumps(payload, ensure_ascii=False)
+                    prompt = correction_prompt(
+                        original_prompt, diagnostics,
+                        observed_trial_ids=self._advisor_evidence_trial_ids,
+                    )
 
     def _invoke_strategy_model(
         self,

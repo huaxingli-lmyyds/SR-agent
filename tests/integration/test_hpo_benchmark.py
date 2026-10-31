@@ -501,3 +501,287 @@ def test_evaluate_on_another_gpu_records_assignment_without_changing_training(se
     audit = benchmark.read_events(env.output / "evaluation_assignments.jsonl")
     assert audit[0]["evaluation_gpu_uuid"] == second
     assert len(env.runner.training) == 1
+
+
+def test_hypothesis_batches_keep_budget_and_feed_tpe(
+    setup_benchmark, monkeypatch
+):
+    """Exercise real agent parsing, gates, scheduler, promotions and reporting."""
+    from agent.hpo.strategies import STRATEGIES
+
+    env = setup_benchmark
+    config = benchmark.read_json(env.config)
+    config.update(
+        hypothesis_probes=True,
+        sh_initial_trials=9,
+        candidate_batch_size=3,
+        promotion_limits=[3, 1],
+        full_epochs=6,
+        budgets=[
+            {"stage": "screen", "epochs": 1, "data_fraction": 1.0},
+            {"stage": "promote", "epochs": 3, "data_fraction": 1.0},
+            {"stage": "full", "epochs": 6, "data_fraction": 1.0},
+        ],
+    )
+    benchmark.write_json(env.config, config)
+    calls, history_seen = [], []
+    tpe = STRATEGIES.get("tpe")
+    original_suggest = tpe.suggest
+
+    def record_history(*args, **kwargs):
+        history_seen.append(list(kwargs.get("history") or []))
+        return original_suggest(*args, **kwargs)
+
+    monkeypatch.setattr(tpe, "suggest", record_history)
+
+    class ProbeModel:
+        def invoke(self, prompt):
+            payload = json.loads(prompt)
+            calls.append(payload)
+            status = payload["context"]["feedback"]["hypothesis_probe"]
+            assert status["eligible"] and status["maximum_candidates"] == 3
+            anchor = status["observed_trials"][0]
+            base = anchor["parameters"]
+            lr, margin = (base["lr"] + 0.0005) / 2, (base["margin"] + 0.15) / 2
+            proposal = payload["schema"]
+            proposal.update(
+                action="switch_strategy",
+                requested_sampler="agent_proposal",
+                confidence=0.9,
+                hypotheses=[
+                    {
+                        "id": "lr_margin",
+                        "claim": "LR and margin changes interact locally.",
+                        "anchor_trial_id": anchor["trial_id"],
+                        "evidence_trial_ids": [anchor["trial_id"]],
+                        "probe_design": "interaction",
+                        "tested_parameters": ["lr", "margin"],
+                        "expected_signal": {"eer": "lower"},
+                        "falsification_criterion": {
+                            "metric": "eer",
+                            "comparison": "interaction_gain",
+                            "minimum_improvement": 0.001,
+                        },
+                    }
+                ],
+                candidate_proposals=[
+                    {
+                        "parameters": {**base, **change},
+                        "hypothesis_id": "lr_margin",
+                        "role": "joint"
+                        if len(change) == 2
+                        else "single_factor_control",
+                        "rationale": "Compare with the observed anchor and the other controls.",
+                        "expected_signal": {"eer": "lower"},
+                        "confidence": 0.9,
+                    }
+                    for change in [
+                        {"lr": lr},
+                        {"margin": margin},
+                        {"lr": lr, "margin": margin},
+                    ]
+                ],
+            )
+            return SimpleNamespace(
+                content=json.dumps(proposal),
+                usage_metadata={"input_tokens": 10, "output_tokens": 5},
+            )
+
+    monkeypatch.setattr(
+        AdvisoryAgentBase, "llm", property(lambda self: ProbeModel())
+    )
+    assert (
+        benchmark.main(env.args + ["--only", "tpe_successive_halving,system"])
+        == 0
+    )
+    rows = benchmark.read_json(env.output / "results.json")
+    assert len(rows) == 2 and all(row["status"] == "success" for row in rows)
+    assert len(env.runner.training) == 26
+    row = next(row for row in rows if row["variant"] == "system")
+    service = HPOService(ExperimentTracker(Path(row["run_dir"]) / "hpo"))
+    study = service.load_study(row["experiment_id"])
+    trials = service.list_trials(row["experiment_id"])
+    by_id = {t.trial_id: t for t in trials}
+    initial = [by_id[tid] for tid in study.trial_ids if by_id[tid].rung == 0]
+    assert [t.candidate_source for t in initial] == ["sampler:tpe"] * 3 + [
+        "sampler:agent_proposal"
+    ] * 3 + ["sampler:tpe"] * 3
+    assert [sum(t.rung == rung for t in trials) for rung in range(3)] == [
+        9,
+        3,
+        1,
+    ]
+    from agent.hpo.records import search_space_from_dict
+
+    assert (
+        study.search_space.to_dict()
+        == search_space_from_dict(config["search_space"]).to_dict()
+    )
+    assert (
+        len(calls) == row["advisor_requests"] == row["llm_valid_proposals"] == 1
+    )
+    assert not row["controller_degraded"]
+    assert row["hypothesis_probes"]["agent_candidate_count"] == 3
+    assert (
+        row["hypothesis_probes"]["confirmed_best_metric"]
+        == row["validation_eer"]
+    )
+    assert len(row["hypothesis_probes"]["outcomes"]) == 1
+    assert any(
+        sum(t.candidate_source == "sampler:agent_proposal" for t in history)
+        == 3
+        for history in history_seen
+    )
+    # A completed resume consumes neither additional LLM calls nor training runs.
+    assert benchmark.main(["--resume", "--output-dir", str(env.output)]) == 0
+    assert len(calls) == 1 and len(env.runner.training) == 26
+
+
+def test_hypothesis_llm_format_failure_preserves_tpe_budget(
+    setup_benchmark, monkeypatch
+):
+    env = setup_benchmark
+    config = benchmark.read_json(env.config)
+    config["hypothesis_probes"] = True
+    benchmark.write_json(env.config, config)
+    calls = []
+
+    class MalformedModel:
+        def invoke(self, prompt):
+            calls.append(prompt)
+            return SimpleNamespace(
+                content="not a JSON proposal", usage_metadata={}
+            )
+
+    monkeypatch.setattr(
+        AdvisoryAgentBase, "llm", property(lambda self: MalformedModel())
+    )
+    assert benchmark.main(env.args + ["--only", "system"]) == 0
+    row = benchmark.read_json(env.output / "results.json")[0]
+    assert row["status"] == "success" and row["controller_degraded"]
+    assert row["hypothesis_probes"]["agent_candidate_count"] == 0
+    assert len(env.runner.training) == 8
+    assert (
+        len(calls) == 2
+    )  # one eligible consultation plus one format regeneration
+    service = HPOService(ExperimentTracker(Path(row["run_dir"]) / "hpo"))
+    assert all(
+        t.candidate_source == "sampler:tpe"
+        for t in service.list_trials(row["experiment_id"])
+        if t.rung == 0
+    )
+
+
+def test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews(
+    setup_benchmark, monkeypatch
+):
+    env = setup_benchmark
+    cfg = benchmark.read_json(env.config)
+    cfg.update(
+        cross_stage_probes=True,
+        hypothesis_probes=False,
+        sh_initial_trials=9,
+        candidate_batch_size=3,
+        promotion_limits=[3, 1],
+        full_epochs=6,
+        budgets=[
+            {"stage": "screen", "epochs": 1, "data_fraction": 1.0},
+            {"stage": "promote", "epochs": 3, "data_fraction": 1.0},
+            {"stage": "full", "epochs": 6, "data_fraction": 1.0},
+        ],
+    )
+    benchmark.write_json(env.config, cfg)
+    calls = []
+
+    class Model:
+        def invoke(self, prompt):
+            payload = json.loads(prompt)
+            calls.append(payload)
+            ctx = payload["context"]
+            info = ctx["cross_stage"]
+            status = info["opportunity"]
+            result = payload["schema"]
+            result.update(
+                confidence=0.8,
+                reason="Compare observed configurations across the two budgets.",
+            )
+            observations = {
+                o["trial_id"]: {**o, "parameters": line["parameters"]}
+                for line in info["evidence"]["lineages"]
+                for o in line["observations"]
+            }
+            if ctx["phase"] == "paired_promotion":
+                ranked = sorted(
+                    (observations[tid] for tid in status["eligible_trial_ids"]),
+                    key=lambda t: t["metric"],
+                )
+                a, b = ranked[0], ranked[-1]
+                result.update(
+                    action="paired_promotion",
+                    hypothesis="The initial ranking may reverse at three epochs.",
+                    anchor_trial_id=a["trial_id"],
+                    challenger_trial_id=b["trial_id"],
+                    evidence_trial_ids=[a["trial_id"], b["trial_id"]],
+                    minimum_late_advantage=0.0001,
+                )
+            else:
+                outcome = status["pair_outcome"]
+                winner = observations[outcome["target_winner_trial_id"]]
+                p = next(
+                    p
+                    for p in ctx["study"]["search_space"]["parameters"]
+                    if p["name"] == "margin"
+                )
+                quarter = (p["high"] - p["low"]) / 4
+                region = (
+                    {"low": p["low"] + quarter, "high": p["high"]}
+                    if winner["parameters"]["margin"] >= p["low"] + quarter
+                    else {"low": p["low"], "high": p["high"] - quarter}
+                )
+                result.update(
+                    action="focus_region",
+                    region={"margin": region},
+                    evidence_trial_ids=outcome["source_trial_ids"]
+                    + outcome["child_trial_ids"],
+                )
+            return SimpleNamespace(
+                content=json.dumps(result),
+                usage_metadata={"input_tokens": 10, "output_tokens": 5},
+            )
+
+    monkeypatch.setattr(
+        AdvisoryAgentBase, "llm", property(lambda self: Model())
+    )
+    assert (
+        benchmark.main(env.args + ["--only", "tpe_successive_halving,system"])
+        == 0
+    )
+    rows = benchmark.read_json(env.output / "results.json")
+    assert all(row["status"] == "success" for row in rows)
+    assert len(env.runner.training) == 26
+    row = next(r for r in rows if r["variant"] == "system")
+    assert row["advisor_requests"] == row["llm_valid_proposals"] == 2
+    assert not row["controller_degraded"]
+    assert row["cross_stage"]["focused_candidate_count"] == 3
+    assert len(calls) == 2 and [p["context"]["phase"] for p in calls] == [
+        "paired_promotion",
+        "region_review",
+    ]
+    assert row["cross_stage"]["pair_outcome"]["status"] in {
+        "supported_observation",
+        "not_supported",
+    }
+    service = HPOService(ExperimentTracker(Path(row["run_dir"]) / "hpo"))
+    study = service.load_study(row["experiment_id"])
+    trials = [
+        service.load_trial(row["experiment_id"], tid) for tid in study.trial_ids
+    ]
+    assert [t.rung for t in trials] == [0] * 3 + [1] * 2 + [0] * 6 + [1, 2]
+    from agent.hpo.records import search_space_from_dict
+
+    assert (
+        study.search_space.to_dict()
+        == search_space_from_dict(cfg["search_space"]).to_dict()
+    )
+    assert benchmark.main(["--resume", "--output-dir", str(env.output)]) == 0
+    assert len(calls) == 2 and len(env.runner.training) == 26

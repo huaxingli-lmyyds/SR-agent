@@ -22,9 +22,86 @@ SH 和系统组分别有 13 次训练额度。晋级子 Trial 使用独立输出
 
 默认组的 lr、batch_size、margin、weight_decay 来自实际 YAML，不使用另一套写死的默认值。为了统一最终保真度，所有组的完整训练 epochs 使用实验配置中的 `full_epochs`，因此默认组并非原 YAML 训练轮数完全不变。
 
-固定基线显式返回 keep 决策，不触发默认规则控制器。系统组允许在 `random_search/tpe/adaptive_search` 之间选择和调整配置；可以在初始硬边界内调整空间，但不能增加参数、扩大到原边界之外、改变预算/晋级规则，也不能使用 `agent_proposal`。
+固定基线显式返回 keep 决策，不触发默认规则控制器。未开启假设候选模式时，系统组允许在 `random_search/tpe/adaptive_search` 之间选择和调整配置；可以在初始硬边界内调整空间，但不能增加参数、扩大到原边界之外、改变预算/晋级规则，也不能使用 `agent_proposal`。
 
 **默认是固定搜索配额实验，不是等 GPU 时间实验。** 单保真搜索约为 `9×24=216` 个全数据 epoch；SH 约为 `42.75` 个全数据 epoch，不含评估/控制开销。不能把两者称为相同计算预算。可对比质量与实际成本，系统与 TPE+SH 的预算安排则相同。配置可显式设置 `max_gpu_hours`、`max_wall_seconds`，作为每个组/种子的 Campaign 硬上限；提前耗尽且没有完整确认的运行会保留为失败。设置相同上限也不保证各组实际耗时相等。
+
+### 假设候选模式
+
+新配置 [five_group_ecapa_vox1_hypothesis.json](../../configs/experiments/five_group_ecapa_vox1_hypothesis.json)
+设置 `hypothesis_probes: true`，只对 `system` 生效；其他组保持固定控制器。
+沿用完整 VoxCeleb1 的 1/3/6 轮、9→3→1 配额、三个种子和相同搜索边界。
+已有冻结结果不能改配置后恢复为新实验，必须使用新输出目录。
+
+- 初始至少完成三个相同预算的 TPE 观测，然后允许假设候选批次；每批一个采样器。
+- 智能体候选替换原始候选名额，每批最多三个，整个 Study 最多占初始候选配额的三分之一（9 个名额中最多 3 个）。失败候选也计入配额。
+- 批次结束恢复 TPE，TPE 吸收已完成候选的同预算观测。空间、晋级规则和完整确认预算固定；不能凭少量结果缩小空间。
+- 只在有证据、有候选容量时咨询 LLM，每个 Study 最多两次符合条件的咨询；网络重试和格式重新生成仍受单次咨询的既有时限控制。初始规划和仅剩晋级时跳过咨询。
+- 每批一个假设，引用真实观测、指定锚点及测试参数，并预先给出 `falsification_criterion`：目标指标、比较方式和正数 `minimum_improvement`。EER 的 0.001 表示绝对下降 0.1 个百分点。
+- `single_factor` 固定其他参数；`interaction` 必须包含 A 单变、B 单变、A+B 联变三个新配置，使用已观测锚点作第四个对照，各变化量一致；`boundary` 包含边界端点和内部点。空间外、重复、缺失对照或无效证据的设计整批拒绝。
+- 单因素按相对锚点的最好改进判定；交互按“联合改进 − A 单独改进 − B 单独改进”判定。结果写入 Study 的假设记录；执行失败或观测不齐记为 `inconclusive`。这些是探索性观测，不是统计显著或因果结论。
+
+先查看计划：
+
+```bash
+python scripts/experiments/run_hpo_benchmark.py \
+  --config configs/experiments/five_group_ecapa_vox1_hypothesis.json \
+  --only tpe_successive_halving,system --dry-run
+```
+
+正式运行沿用下文数据与 pairs 参数；此配置开启独立单 GPU 并行模式，需设置单张卡完整
+`CUDA_VISIBLE_DEVICES=GPU-...` UUID。建议先比较 `tpe_successive_halving,system` 的三个种子，
+降低验证本改动所需的训练开销，再扩展五组实验。
+
+`results.json` 新增 `hypothesis_probes`，记录初始假设候选数量、GPU 秒、假设结果和完整预算最优指标。
+`summary.json` 新增 `paired_efficiency`，按相同种子同时报告 EER 差值、GPU 小时比和墙钟时间比。
+只有成本完整、控制器无降级、两组均完成完整预算确认时，才给出 `better_and_faster`：
+EER 更低且 GPU、墙钟成本都更少。零或缺失耗时不视为免费；不满足可比条件时返回 `null`。
+这一字段描述本次观测，不等于多种子统计证明。最终仍须结合失败率、独立测试结果和波动判断是否保留该策略。
+
+### 跨阶段配对晋级与临时区域搜索
+
+配置 [five_group_ecapa_vox1_cross_stage.json](../../configs/experiments/five_group_ecapa_vox1_cross_stage.json)
+设置 `cross_stage_probes: true`，只对系统组生效；与 `hypothesis_probes` 同预算候选模式按 Study 二选一，
+便于分开比较两种干预的收益。新模式保持 TPE 和原 9→3→1 配额，不扩大参数维度或训练预算。
+
+默认路径为：**3 个初始 TPE → 2 个提前晋级对照 → 最多 3 个局部 TPE → 剩余全局 TPE → 1 个按成绩晋级 → 1 个完整确认**。
+智能体也可以保留全局策略。提前晋级占用原有三个中间阶段名额中的两个：一个为当前初始赢家，
+另一个为暂时较差但值得验证的配置。保留至少一个名额，用于后续候选的成绩晋级。
+这改变了晋级名额的分配时机，可能帮助发现慢收敛配置，也可能提前分配给较差配置；效果必须实测。
+
+每个配对提案必须引用两个真实初始观测，预先声明 `minimum_late_advantage`。
+到目标预算后，原 challenger 必须按目标优化方向优于 anchor 且达到阈值，才记录为
+`supported_observation`；否则为 `not_supported`，执行失败/缺失/谱系不匹配为 `inconclusive`。
+这里比较完整配置的排序；多个参数同时不同不能证明单参数因果关系。
+默认只验证 1→3 轮，最终只有一个 6 轮配置，不能把配对结论写成完整训练排序证明。
+
+配对结束后有一次区域决策机会。候选仍由 TPE 生成，每批只用一个采样器：
+
+- 只聚焦配对中实际不同的至多两个无条件数值参数，并引用两组预算下的四个观测 ID。
+- 区域包含目标预算赢家，位于原始边界内，每个参数至少保留原线性/对数宽度的一半。
+- 局部批次最多占初始候选配额的三分之一，之后恢复全局域；不会根据两条观测永久剪掉区域。
+- 无效提案、格式错误或不完整配对继续全局 TPE；局部采样无法产生有效配置时有全局回退。
+- 晋级意图先持久化，子 Trial ID 确定生成。部分写入后恢复补齐同一配对，不重复晋级。
+- 咨询开始前持久化阶段占用；咨询中断后按失败回退，不在续跑时重复咨询。每阶段至多一次咨询，内部仍允许既有网络重试和一次格式重生成。
+
+新 SpeechBrain checkpoint 元数据记录实际轮次、调度器累计步数、半周期步数、周期相位和选择指标，
+并把被评估 checkpoint 的观测带入 Trial。最后训练轮次与被选择 checkpoint 的轮次分别保存。
+旧 checkpoint 缺失信息时保持未知，不按“一轮/六轮”猜测周期相位。
+当前 `lr` 是 CLR 峰值 `max_lr`；分类验证 `ErrorRate` 负责 checkpoint 选择，验证 EER 负责 HPO 排序。
+
+先查看计划，不调用 LLM 或训练：
+
+```bash
+python scripts/experiments/run_hpo_benchmark.py \
+  --config configs/experiments/five_group_ecapa_vox1_cross_stage.json \
+  --only tpe_successive_halving,system --dry-run
+```
+
+正式运行沿用下文数据与 pairs 参数，使用新的输出目录和单张 GPU 完整 UUID。
+`results.json.cross_stage` 提供配对结论、两阶段提案审查、局部候选数和相对聚焦前观测的同预算改进。
+总预算质量、GPU 时间、墙钟时间仍用 `summary.json.paired_efficiency` 按种子配对比较。
+训练调度器类型、warmup、增强强度和 margin 调度暂未加入搜索空间。
 
 ## 2. 准备验证集与最终测试集
 
@@ -102,6 +179,13 @@ LLM 咨询使用独立 HTTP 客户端，SDK 隐式重试关闭；每次请求遇
 不能靠删除非法字符修复模型内容。工具声明使用 strict 模式以兼容 SDK 的 JSON 自动解析。
 服务接受 JSON 模式并不保证所有回复都符合格式；实际探针已验证说明文字导致的失败能通过一次重新生成恢复。
 只有服务明确报告不支持 JSON 模式/工具时才降级对应能力。
+
+提示词按初始规划、运行中复盘、假设候选三个阶段分别渲染，只保留该阶段规则、
+明确的字段类型与兼容示例。基准实验注入预算和采样器限制后，会重新渲染允许动作和锁定字段。
+真实请求不携带虚构锚点配置或固定训练轮数的示例；返回 JSON 不得套 `schema`/`data` 包装。
+格式纠错保留原阶段权限，规划阶段允许的预算建议不会被通用纠错指令误禁；
+截断回复会要求缩短说明并重新返回完整对象。数据处理与协调建议也执行结构校验和一次有时限的纠错，
+协调阶段仅作执行前诊断，不生成虚构的完成报告。提示词改动仍需真实服务观测才能评估格式失败率。
 
 默认尊重环境代理。服务器能直连服务时，可在项目 `.env` 设置 `SR_AGENT_LLM_PROXY_MODE=direct`，
 只让 LLM 客户端直连；`environment` 恢复环境代理。不会在失败时暗中切换网络出口。

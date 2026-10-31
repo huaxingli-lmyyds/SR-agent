@@ -244,3 +244,32 @@ def test_cli_builds_independent_sampler_pruner_controls() -> None:
     assert context["sampler"] == "tpe"
     assert context["pruner"] == "successive_halving"
     assert budget["reduction_factor"] == 4
+
+
+def test_hypothesis_probe_cli_validates_controller_and_sampler():
+    with pytest.raises(SystemExit, match="enable-llm-advisor"):
+        build_context(parse_args("--hypothesis-probes", "--strategy", "tpe"))
+    with pytest.raises(SystemExit, match="starting with"):
+        build_context(parse_args("--hypothesis-probes", "--enable-llm-advisor"))
+    args = parse_args(
+        "--hypothesis-probes", "--enable-llm-advisor", "--strategy", "tpe"
+    )
+    assert build_context(args)["hypothesis_probes"] is True
+
+
+def test_cross_stage_cli_requires_dedicated_llm_mode():
+    with pytest.raises(SystemExit, match="either"):
+        build_context(parse_args("--cross-stage-probes", "--hypothesis-probes"))
+    with pytest.raises(SystemExit, match="enable-llm-advisor"):
+        build_context(parse_args("--cross-stage-probes"))
+    context = build_context(
+        parse_args(
+            "--cross-stage-probes",
+            "--enable-llm-advisor",
+            "--strategy",
+            "tpe",
+            "--pruner",
+            "successive_halving",
+        )
+    )
+    assert context["cross_stage_probes"] is True

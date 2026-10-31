@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from agent.core.metrics import InvalidMetricError, is_finite_metric
+from . import cross_stage
 from .contracts import HPOStudy, StrategyProposal, Trial
 from .feedback import HPOFeedbackAnalyzer
 from .policies import FailureDecision, FailurePolicy, RetryPolicy
@@ -19,6 +20,7 @@ from .resources import CampaignResourceBudget, ResourceBudgetExhausted
 
 TrialExecutor = Callable[[Trial, int], Dict[str, Any]]
 StrategyAdvisor = Callable[[HPOStudy], Dict[str, Any]]
+CrossStageReviewer = Callable[[HPOStudy, Dict[str, Any]], Dict[str, Any]]
 StrategyReviewer = Callable[[HPOStudy, Dict[str, Any]], Optional[StrategyProposal]]
 
 
@@ -97,6 +99,7 @@ class HPOScheduler:
         retry_policy: Optional[RetryPolicy] = None,
         strategy_advisor: Optional[StrategyAdvisor] = None,
         strategy_reviewer: Optional[StrategyReviewer] = None,
+        cross_stage_reviewer: Optional[CrossStageReviewer] = None,
         review_interval_trials: int = 3,
         resource_budget: Optional[CampaignResourceBudget] = None,
     ) -> None:
@@ -106,6 +109,7 @@ class HPOScheduler:
         self.failure_policy = failure_policy or FailurePolicy()
         self.retry_policy = retry_policy or RetryPolicy()
         self.strategy_advisor = strategy_advisor
+        self.cross_stage_reviewer = cross_stage_reviewer
         self.strategy_reviewer = strategy_reviewer
         self.review_interval_trials = max(int(review_interval_trials), 1)
         self.resource_budget = resource_budget
@@ -589,6 +593,34 @@ class HPOScheduler:
         return {"route": "review", "errors": errors, "completed_since_review": completed}
 
     def _review_strategy(self, state: HPOGraphState) -> Dict[str, Any]:
+        if cross_stage.enabled(self.study):
+            # Finish a durable pair intent before threshold checks, including on resume.
+            cross_stage.ensure_pair_trials(self.service, self.study)
+            if self.study.scheduler_state.get("cross_stage_pending_review"):
+                # An interrupted consultation is not silently paid for again on resume.
+                cross_stage.review(self.service, self.study, {"advice_error": "interrupted cross-stage consultation; keep the original policy"})
+            trials = self.service.list_trials(self.study.experiment_id)
+            if any(t.status in {"suggested", "running"} for t in trials):
+                return {}
+            status = cross_stage.opportunity(self.study, trials)
+            if status["eligible"]:
+                feedback = {"opportunity": status, "evidence": cross_stage.evidence(self.study, trials)}
+                if self.resource_budget:
+                    feedback["resource_budget"] = self.resource_budget.check()
+                self.service.update_scheduler_state(self.study, cross_stage_pending_review={
+                    "phase": status["phase"], "started_at": datetime.now().isoformat(),
+                })
+                try:
+                    proposal = self.cross_stage_reviewer(self.study, feedback) if self.cross_stage_reviewer else {"advice_error": "no cross-stage reviewer"}
+                except ResourceBudgetExhausted:
+                    raise
+                except Exception as exc:
+                    proposal = {"advice_error": f"{type(exc).__name__}: {exc}"}
+                cross_stage.review(self.service, self.study, proposal)
+            trials = self.service.list_trials(self.study.experiment_id)
+            self.service.update_scheduler_state(self.study, current_trial_id=None, completed_since_review=0,
+                reviewed_trial_ids=sorted(t.trial_id for t in trials if t.status in {"completed", "promoted", "failed", "stopped"}))
+            return {"completed_since_review": 0}
         completed = self.service.unreviewed_trial_count(self.study)
         if completed == 0:
             return {"completed_since_review": 0}

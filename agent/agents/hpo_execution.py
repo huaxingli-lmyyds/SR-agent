@@ -217,6 +217,12 @@ class TrialExecutor:
             "cost": {
                 "attempt": attempt,
                 "evaluated_checkpoint": current_checkpoint,
+                "training_observation": {
+                    "selected_checkpoint": ((train_result.get("extensions") or {}).get("speechbrain") or {}).get("selected_checkpoint") or {},
+                    "epoch_data": (((train_result.get("extensions") or {}).get("speechbrain") or {}).get("epoch_data") or [])[-12:],
+                    "final_metrics": ((train_result.get("extensions") or {}).get("speechbrain") or {}).get("final_metrics") or {},
+                    "final_learning_rate_schedule": training_runtime.get("final_learning_rate_schedule") or {},
+                } if not trial.cost.get("evaluation_only") else trial.cost.get("training_observation", {}),
                 "attempt_training_seconds": training_seconds,
                 "attempt_training_gpu_seconds": (
                     training_seconds * training_gpu_count

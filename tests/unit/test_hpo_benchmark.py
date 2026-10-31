@@ -534,3 +534,113 @@ def test_executor_binds_current_checkpoint_and_validation_protocol(
             and "missing checkpoint" in result["error"]
         )
         assert not captured
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [None, "gpu_hours", "wall_seconds", "incomplete", "degraded", "zero"],
+)
+def test_paired_efficiency_requires_complete_cost_and_confirmation(missing):
+    system = {
+        "variant": "system",
+        "seed": 7,
+        "status": "success",
+        "confirmation_satisfied": True,
+        "validation_eer": 0.04,
+        "gpu_hours": 2,
+        "wall_seconds": 8000,
+    }
+    baseline = {
+        **system,
+        "variant": "tpe_successive_halving",
+        "validation_eer": 0.05,
+        "gpu_hours": 3,
+        "wall_seconds": 12000,
+    }
+    if missing in {"gpu_hours", "wall_seconds"}:
+        system.pop(missing)
+    elif missing == "incomplete":
+        system["cost_may_be_incomplete"] = True
+    elif missing == "degraded":
+        system["controller_degraded"] = True
+    elif missing == "zero":
+        baseline["gpu_hours"] = 0
+    paired = benchmark.summarize([system, baseline])["paired_efficiency"][
+        "tpe_successive_halving"
+    ][0]
+    assert paired["system_minus_baseline_eer"] == pytest.approx(-0.01)
+    if missing is None:
+        assert paired["better_and_faster"] is True
+        assert paired["system_over_baseline_gpu_hours"] == pytest.approx(2 / 3)
+    else:
+        assert paired["better_and_faster"] is None
+        assert not paired["eligible_for_efficiency_claim"]
+
+
+def test_policy_keeps_are_not_reported_as_llm_successes():
+    result = benchmark.advisor_outcome(
+        [],
+        [{"origin": "policy", "raw": {"action": "keep_strategy"}}],
+        uses_advisor=True,
+    )
+    assert result["llm_valid_proposals"] == result["advisor_requests"] == 0
+
+
+def test_hypothesis_benchmark_configuration_preserves_baseline_allocation():
+    cfg = benchmark.read_json(
+        benchmark.ROOT
+        / "configs/experiments/five_group_ecapa_vox1_hypothesis.json"
+    )
+    benchmark.validate_config(cfg)
+    for variant in ("system", "tpe_successive_halving"):
+        assert benchmark.variant_spec(cfg, variant)["max_training_runs"] == 13
+    assert cfg["hypothesis_probes"] is True
+
+
+def test_cross_stage_configuration_preserves_baseline_run_allocation():
+    cfg = benchmark.read_json(
+        benchmark.ROOT
+        / "configs/experiments/five_group_ecapa_vox1_cross_stage.json"
+    )
+    benchmark.validate_config(cfg)
+    assert benchmark.variant_spec(cfg, "system")["max_training_runs"] == 13
+    assert (
+        benchmark.variant_spec(cfg, "system")["budgets"]
+        == benchmark.variant_spec(cfg, "tpe_successive_halving")["budgets"]
+    )
+    cfg["hypothesis_probes"] = True
+    with pytest.raises(ValueError, match="either"):
+        benchmark.validate_config(cfg)
+
+
+def test_cross_stage_advice_is_counted_separately_from_policy_keeps():
+    result = benchmark.advisor_outcome(
+        [{"status": "success"}],
+        [
+            {
+                "kind": "cross_stage",
+                "origin": "llm",
+                "raw": {"action": "paired_promotion"},
+            },
+            {"origin": "policy", "raw": {"action": "keep_strategy"}},
+        ],
+        uses_advisor=True,
+    )
+    assert (
+        result["llm_valid_proposals"] == 1 and not result["controller_degraded"]
+    )
+    failed = benchmark.advisor_outcome(
+        [{"status": "failed"}],
+        [
+            {
+                "kind": "cross_stage",
+                "origin": "llm",
+                "raw": {"advice_error": "schema error"},
+            }
+        ],
+        uses_advisor=True,
+    )
+    assert (
+        failed["invalid_advisor_proposals"] == 1
+        and failed["controller_degraded"]
+    )
