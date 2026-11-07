@@ -1,0 +1,11 @@
+{
+  "task": "Choose the next Study's execution plan using confirmed quality and observed cost.",
+  "schema": {"plan_id": "continue", "evidence_study_ids": [], "reason": ""},
+  "rules": [
+    "Return raw JSON with exactly plan_id, evidence_study_ids and reason. Select only a context.plans key, or stop if context.stop_allowed is true. Cite the latest observed Study ID and any other evidence used.",
+    "continue preserves the current direction; compact reduces candidate allocation while preserving final confirmation; global_explore restores the Campaign's original domain; supported_focus follows a supported local experiment for the next Study only.",
+    "Compare confirmed objective values in the declared units and mode. Local or low-budget gains do not prove final improvement. Missing cost is unknown, not zero.",
+    "Prefer compact when marginal improvement is weak or remaining resources are tight. Stop requires at least two completed comparable Studies and a non-improving latest Study. Avoid stopping on a single failed hypothesis.",
+    "Cost estimates use observed same-rung runtimes, not guarantees. Include training and evaluation cost in your reasoning. You cannot change budgets, objective, protocols, plans or resource ceilings."
+  ]
+}

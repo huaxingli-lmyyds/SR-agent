@@ -97,6 +97,7 @@ class TrialExecutor:
                     "experiment_id": experiment_id,
                     "trial_id": trial.trial_id,
                     "data_folder": data_folder,
+                    "checkpoint_selection": runtime_options.get("checkpoint_selection", "legacy"),
                     "parameters_json": json.dumps(
                         parameters, ensure_ascii=False
                     ),
@@ -158,7 +159,7 @@ class TrialExecutor:
             (
                 item.get("path")
                 for item in train_result.get("artifacts") or []
-                if item.get("type") == "checkpoint" and item.get("path")
+                if item.get("type") in {"checkpoint", "checkpoint_candidate"} and item.get("path")
             ),
             None,
         )
@@ -177,6 +178,9 @@ class TrialExecutor:
                     "attempt_evaluation_gpu_seconds": 0.0,
                 },
             }
+        if runtime_options.get("checkpoint_selection") == "validation_topk":
+            return self._evaluate_candidates(trial, attempt, train_result, training_seconds,
+                training_gpu_count, evaluation_gpu_count, training_world_size, training_runtime)
         evaluation_started = perf_counter()
         evaluation = self._invoke_stage(
             trial,
@@ -233,3 +237,75 @@ class TrialExecutor:
                 * evaluation_gpu_count,
             },
         }
+
+
+    def _evaluate_candidates(self, trial, attempt, train_result, training_seconds,
+                             training_gpu_count, evaluation_gpu_count, world_size, training_runtime):
+        from hashlib import sha256
+        from agent.hpo.service import HPOService
+        from agent.utils import ExperimentTracker
+        from agent.tools.evaluation_tools import RunEvaluation
+        from agent.runners.checkpoint_selection import choose
+        from agent.core.metrics import is_finite_metric
+        service = HPOService(ExperimentTracker(self.experiments_dir))
+        study = service.load_study(self.experiment_id)
+        objective = study.objectives[0]
+        observation = (train_result.get("extensions") or {}).get("speechbrain") or {}
+        persisted = service.load_trial(self.experiment_id, trial.trial_id)
+        rows = persisted.cost.get("checkpoint_evaluations") if trial.cost.get("evaluation_only") else None
+        rows = [dict(r) for r in (rows or observation.get("checkpoint_candidates") or [])]
+        cost = {"checkpoint_evaluations": rows, "checkpoint_selection": "validation_topk",
+                "attempt_training_seconds": training_seconds,
+                "attempt_training_gpu_seconds": training_seconds * training_gpu_count,
+                "training_world_size": world_size,
+                "attempt_evaluation_seconds": 0.0, "attempt_evaluation_gpu_seconds": 0.0,
+                "training_observation": persisted.cost.get("training_observation", {}) if trial.cost.get("evaluation_only") else {
+                    "epoch_data": observation.get("epoch_data", []),
+                    "final_metrics": observation.get("final_metrics", {}),
+                    "final_learning_rate_schedule": training_runtime.get("final_learning_rate_schedule", {})}}
+        if not rows:
+            return {"status": "failed", "stage": "evaluation", "error": "missing checkpoint candidates", "cost": cost}
+        cost["evaluated_checkpoint"] = rows[0]["path"]
+        # Persist the candidate manifest before evaluation so recovery never retrains.
+        cost["evaluation"] = {"status": "failed", "selection_complete": False}
+        service.record_trial(study, trial.trial_id, status="running", cost=cost)
+        for row in rows:
+            if row.get("status") == "success" and is_finite_metric(row.get("metrics", {}).get(objective.metric)):
+                continue
+            key = sha256(row["path"].encode()).hexdigest()[:20]
+            started = perf_counter()
+            result = self._invoke_stage(trial, attempt, RunEvaluation, {
+                "model_path": row["path"], "checkpoint_id": key, "defer_commit": True,
+                "verification_config": self.runtime_options.get("verification_config"),
+                "verification_pairs": self.runtime_options.get("validation_pairs"),
+                "evaluation_split": "validation", "experiment_id": self.experiment_id,
+                "trial_id": trial.trial_id, "data_folder": self.data_folder,
+                "experiments_dir": str(self.experiments_dir), "runner": self.runner,
+                "task_type": self.task_type, "model_family": self.model_family,
+                "implementation": self.implementation, "device": self.runtime_options.get("device"),
+                "precision": self.runtime_options.get("precision"),
+                "eval_precision": self.runtime_options.get("eval_precision"),
+            }, "evaluation", evaluation_gpu_count)
+            duration = perf_counter() - started
+            cost["attempt_evaluation_seconds"] += duration
+            cost["attempt_evaluation_gpu_seconds"] += duration * evaluation_gpu_count
+            metrics = {k:v for group in (result.get("metrics") or {}).values() for k,v in (group or {}).items()}
+            status = result.get("status", "failed")
+            error = result.get("error")
+            if status == "success" and not is_finite_metric(metrics.get(objective.metric)):
+                status, error = "failed", "invalid primary metric in checkpoint evaluation"
+            row.update(status=status, metrics=metrics, error=error, artifacts=result.get("artifacts") or [],
+                       seconds=duration, attempts=int(row.get("attempts", 0))+1)
+            service.record_trial(study, trial.trial_id, status="running", cost=cost)
+            if status != "success":
+                return {"status": "failed", "stage": "evaluation", "error": error, "cost": cost}
+        best = choose(rows, objective.metric, objective.mode)
+        cost["evaluated_checkpoint"] = best["path"]
+        cost["evaluation"] = {"status": "success", "selection_complete": True}
+        cost["training_observation"]["selected_checkpoint"] = best.get("observation", {})
+        cost["selection_reason"] = f"best_validation_{objective.metric};earliest_epoch_tiebreak"
+        return {"status": "success", "stage": "evaluation", "metrics": best["metrics"],
+                "artifacts": [{"type": "checkpoint", "name": Path(best["path"]).name,
+                    "path": best["path"], "metadata": {"trial_id": trial.trial_id,
+                    "checkpoint_selection": "validation_topk", "epoch": best["epoch"]}},
+                    *best.get("artifacts", [])], "cost": cost}

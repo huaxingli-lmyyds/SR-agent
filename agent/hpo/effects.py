@@ -30,14 +30,17 @@ def summarize_decision_effect(
     ]
     completed = _valid_trials(affected, objective)
     values = [float(trial.metrics[objective.metric]) for trial in completed]
+    from .costs import observed_cost
+    costs = observed_cost(affected)
     outcome = {
         "affected_trial_count": len(affected),
         "completed_trial_count": len(completed),
+        "cost": costs,
         "highest_completed_rung": max((trial.rung for trial in completed), default=None),
         "best_primary_metric": _best(values, objective.mode),
         "average_primary_metric": round(sum(values) / len(values), 8) if values else None,
-        "training_seconds": round(sum(_duration(item, "training") for item in affected), 3),
-        "evaluation_seconds": round(sum(_duration(item, "evaluation") for item in affected), 3),
+        "training_seconds": round(costs["training_seconds"], 3),
+        "evaluation_seconds": round(costs["evaluation_seconds"], 3),
     }
     return {
         "affected_trial_ids": [trial.trial_id for trial in affected],

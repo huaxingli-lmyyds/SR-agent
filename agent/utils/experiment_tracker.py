@@ -96,7 +96,7 @@ ExperimentRecordDict = Dict[str, Any]
 
 class ExperimentTracker:
     """实验跟踪器类"""
-    
+
     def __init__(self, experiments_dir: Optional[Union[str, Path]] = None):
         """
         初始化实验跟踪器
@@ -119,7 +119,7 @@ class ExperimentTracker:
         
         # 计数器，用于在同一秒内创建多个实验时保证 ID 唯一
         self._counter = 0
-    
+
     def create_experiment(self, config_path: str,
                          data_folder: str,
                          output_folder: Optional[str] = None,
@@ -130,7 +130,8 @@ class ExperimentTracker:
                          actor: Optional[Dict[str, Any]] = None,
                          task: Optional[Dict[str, Any]] = None,
                          model: Optional[Dict[str, Any]] = None,
-                         execution: Optional[Dict[str, Any]] = None) -> str:
+                         execution: Optional[Dict[str, Any]] = None,
+                         requested_id: Optional[str] = None) -> str:
         """
         创建新实验
         
@@ -153,12 +154,22 @@ class ExperimentTracker:
 
         # 生成实验 ID（使用计数器避免同一秒内的冲突）
         experiments_dir = self._record_dir(experiment_type)
-        base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        while True:
-            experiment_id = f"{base_id}_{self._counter}"
-            self._counter += 1
-            if not (experiments_dir / experiment_id).exists():
-                break
+        if requested_id is not None:
+            if not requested_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in requested_id):
+                raise ValueError("invalid requested experiment ID")
+            experiment_id = requested_id
+            existing = self.get_experiment(experiment_id)
+            if existing is not None:
+                if str(existing.get("task", {}).get("dataset")) != data_folder:
+                    raise ValueError("requested experiment ID is already bound to another dataset")
+                return experiment_id
+        else:
+            base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            while True:
+                experiment_id = f"{base_id}_{self._counter}"
+                self._counter += 1
+                if not (experiments_dir / experiment_id).exists():
+                    break
 
         # 创建实验目录
         exp_dir = ensure_dir(experiments_dir / experiment_id)
@@ -241,7 +252,7 @@ class ExperimentTracker:
             extra_fields=extra_fields,
             **metadata,
         )
-    
+
     def update_experiment(self, experiment_id: str, 
                          status: Optional[str] = None,
                          error: Optional[str] = None,
@@ -371,7 +382,7 @@ class ExperimentTracker:
             experiment_type="orchestration",
             **kwargs,
         )
-    
+
     def get_experiment(self, experiment_id: str) -> Optional[Dict]:
         """
         获取实验记录
@@ -409,7 +420,7 @@ class ExperimentTracker:
             f"config snapshot missing for experiment {experiment_id}; "
             "restore its config.yaml before resuming"
         )
-    
+
     def list_experiments(self, 
                        status: Optional[str] = None,
                        limit: Optional[int] = None,
@@ -447,7 +458,7 @@ class ExperimentTracker:
             history = history[:limit]
         
         return history
-    
+
     def find_best_experiment(self, 
                            metric: str = "eer",
                            minimize: bool = True,
@@ -522,7 +533,7 @@ class ExperimentTracker:
             (runner, execution.get("runner")),
         )
         return all(not wanted or str(actual) == str(wanted) for wanted, actual in expected)
-    
+
     def compare_experiments(self, experiment_ids: List[str]) -> Dict[str, Any]:
         """
         比较多个实验
@@ -620,7 +631,7 @@ class ExperimentTracker:
         normalized = metric.lower()
         maximize = ("accuracy", "precision", "recall", "f1", "auc", "map", "reward")
         return "max" if any(token in normalized for token in maximize) else "min"
-    
+
     def get_statistics(self) -> Dict[str, Any]:
         """
         获取实验统计信息
@@ -666,7 +677,7 @@ class ExperimentTracker:
             "total_duration_hours": total_duration / 3600,
             "time_range": time_range
         }
-    
+
     def delete_experiment(self, experiment_id: str) -> bool:
         """
         删除实验记录
@@ -688,7 +699,7 @@ class ExperimentTracker:
         self._remove_from_history(experiment_id)
         
         return True
-    
+
     def cleanup_old_experiments(self, keep_n: int = 10, 
                                status_filter: Optional[str] = None) -> int:
         """
@@ -713,7 +724,7 @@ class ExperimentTracker:
                 deleted_count += 1
         
         return deleted_count
-    
+
     def export_experiments(self, output_path: Union[str, Path], 
                          experiment_ids: Optional[List[str]] = None) -> Path:
         """
@@ -738,7 +749,7 @@ class ExperimentTracker:
             json.dump(experiments, f, indent=2, ensure_ascii=False)
         
         return output_path
-    
+
     def _load_history(self, experiment_type: Optional[str] = None) -> List[Dict]:
         """加载历史记录"""
         history_file = self._get_history_file(experiment_type)
@@ -754,7 +765,7 @@ class ExperimentTracker:
         except (json.JSONDecodeError, Exception):
             # 文件损坏或格式错误，返回空列表
             return []
-    
+
     def _update_history(self, experiment: Dict):
         """更新历史记录"""
         history = self._load_history(experiment.get("experiment_type"))
@@ -851,7 +862,7 @@ class ExperimentTracker:
                     record[key] = value
 
         return record
-    
+
     def _remove_from_history(self, experiment_id: str):
         """从历史记录中移除实验"""
         if self._custom_experiments_dir:

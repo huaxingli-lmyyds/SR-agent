@@ -1,0 +1,13 @@
+{
+  "runtime_options": {
+    "decision_opportunities": true,
+    "checkpoint_selection": "validation_topk",
+    "managed_execution": true,
+    "max_concurrent_trials": 2,
+    "gpu_pool": [
+      0,
+      1
+    ],
+    "gpus_per_trial": 1
+  }
+}

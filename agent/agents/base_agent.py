@@ -224,6 +224,9 @@ class AdvisoryAgentBase:
                 try:
                     response = current.invoke(prompt)
                 except Exception as exc:
+                    from agent.hpo.resources import ResourceBudgetExhausted
+                    if isinstance(exc, ResourceBudgetExhausted):
+                        raise
                     self._advisor_transport_events.append({
                         "attempt": attempt + 1, "status": "failed",
                         "duration_seconds": time.monotonic() - started,

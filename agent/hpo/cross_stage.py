@@ -22,7 +22,6 @@ FIELDS = {
     "reason",
     "confidence",
 }
-ACTIONS = {"keep_search", "paired_promotion", "focus_region"}
 
 
 def enabled(study):
@@ -92,13 +91,17 @@ def pair_outcome(study, trials):
         return None
     result = {
         "pair_id": pair["pair_id"],
+        "hypothesis": pair["hypothesis"],
         "status": "inconclusive",
+        "reason": "missing_or_invalid_observations",
         "causal_claim": False,
         "claim_scope": "configuration ranking between the two recorded budgets",
         "source_trial_ids": pair["source_trial_ids"],
         "child_trial_ids": pair["child_trial_ids"],
         "varying_parameters": pair["varying_parameters"],
         "full_budget_comparison": len(study.budgets) == 2,
+        "source_budget": study.budgets[0].to_dict(),
+        "destination_budget": study.budgets[1].to_dict(),
         "cycle_phase_explanation": "unverified; this experiment does not intervene on the scheduler",
     }
     by_id = {t.trial_id: t for t in trials}
@@ -134,7 +137,16 @@ def pair_outcome(study, trials):
         status="supported_observation"
         if early_advantage > 0 and late_advantage >= threshold
         else "not_supported",
+        reason="ranking_reversal_meets_threshold"
+        if early_advantage > 0 and late_advantage >= threshold
+        else "ranking_reversal_below_threshold",
         metric=metric,
+        metric_mode=study.objectives[0].mode,
+        source_metrics=[anchor.metrics[metric], challenger.metrics[metric]],
+        destination_metrics=[
+            anchor_late.metrics[metric],
+            challenger_late.metrics[metric],
+        ],
         early_anchor_advantage=early_advantage,
         late_challenger_advantage=late_advantage,
         minimum_late_advantage=threshold,
@@ -145,8 +157,14 @@ def pair_outcome(study, trials):
     return result
 
 
+def observed_cost(trials):
+    from .costs import observed_cost as aggregate
+    return aggregate(trials)
+
+
 def evidence(study, trials):
     """Keep linked budgets separate; never pool short and full-budget metrics."""
+    from .feedback import cross_budget_diagnostics
     by_id = {t.trial_id: t for t in trials}
     lineages = {}
     invalid_links = []
@@ -185,14 +203,17 @@ def evidence(study, trials):
                 "metric": trial.metrics.get(study.objectives[0].metric),
                 "training_observation": trial.cost.get("training_observation")
                 or {},
+                "cost": observed_cost([trial]),
             }
         )
     return {
         "metric": study.objectives[0].metric,
         "mode": study.objectives[0].mode,
         "lineages": list(lineages.values()),
+        "cross_budget_diagnostics": cross_budget_diagnostics(trials, study.objectives[0].metric),
         "invalid_lineage_trial_ids": invalid_links,
         "pair_outcome": pair_outcome(study, trials),
+        "observed_cost": observed_cost(trials),
         "limitations": [
             "Promoted observations are selection-biased; missing higher-budget results are unknown.",
             "Promotions restart training; they are not one continuous learning curve.",
@@ -215,6 +236,9 @@ def opportunity(study, trials):
         return result
     initial = [t for t in trials if t.rung == 0]
     observed = [t for t in initial if _observed(study, t, 0)]
+    metric = study.objectives[0].metric
+    sign = 1 if study.objectives[0].mode == "min" else -1
+    observed.sort(key=lambda t: (sign * t.metrics[metric], t.trial_id))
     remaining = (study.initial_trial_count or study.max_trials) - len(initial)
     reviews = study.scheduler_state.get("cross_stage_reviews") or []
     reviewed = {r["phase"] for r in reviews}
@@ -223,6 +247,8 @@ def opportunity(study, trials):
         and len(observed) >= max(3, study.min_completed_per_rung)
         and remaining > 0
     ):
+        if observed[0].metrics[metric] == observed[-1].metrics[metric]:
+            return {**result, "reason": "no_observed_ranking_contrast"}
         if (
             not any(t.rung > 0 for t in trials)
             and study.promotion_limits[0] >= 3
@@ -234,10 +260,26 @@ def opportunity(study, trials):
                 eligible_trial_ids=[t.trial_id for t in observed],
                 destination_budget=study.budgets[1].to_dict(),
                 remaining_merit_slots=study.promotion_limits[0] - 2,
+                ranked_candidates=[
+                    {
+                        "trial_id": t.trial_id,
+                        "rank": index + 1,
+                        "metric": t.metrics[metric],
+                        "gap_to_best": sign
+                        * (t.metrics[metric] - observed[0].metrics[metric]),
+                    }
+                    for index, t in enumerate(observed)
+                ],
             )
     elif "region_review" not in reviewed and remaining > 0:
         outcome = pair_outcome(study, trials)
-        if outcome and outcome["status"] != "inconclusive":
+        if outcome and outcome["status"] == "not_supported":
+            return {
+                **result,
+                "reason": "hypothesis_not_supported",
+                "pair_outcome": outcome,
+            }
+        if outcome and outcome["status"] == "supported_observation":
             result.update(
                 eligible=True,
                 phase="region_review",
@@ -255,6 +297,8 @@ def opportunity(study, trials):
 
 
 def validate_response(value, phase):
+    if phase not in {"paired_promotion", "region_review"}:
+        raise ValueError("unknown cross-stage decision phase")
     if not isinstance(value, dict) or set(value) != FIELDS:
         raise ValueError(
             f"cross-stage response requires exactly {sorted(FIELDS)}"
@@ -340,6 +384,10 @@ def validate_response(value, phase):
 
 def _validate_region(study, trials, proposal, status):
     outcome = status["pair_outcome"]
+    if outcome["status"] != "supported_observation":
+        raise ValueError(
+            "region focus requires the preregistered ranking hypothesis to be supported"
+        )
     required = set(outcome["source_trial_ids"] + outcome["child_trial_ids"])
     if not required <= set(proposal["evidence_trial_ids"]):
         raise ValueError(
@@ -404,6 +452,10 @@ def review(service, study, proposal):
         "accepted": False,
         "created_at": now,
         "reason": "keep_search",
+        "decision_scope": "existing_rung_1_slots"
+        if status["phase"] == "paired_promotion"
+        else "next_initial_tpe_batch",
+        "opportunity": status,
     }
     try:
         validate_response(proposal, status["phase"])
@@ -473,6 +525,9 @@ def review(service, study, proposal):
                 ],
                 "created_at": now,
                 "promotion_training_mode": "restart",
+                "evidence_trial_ids": list(proposal["evidence_trial_ids"]),
+                "initial_ranking": status["ranked_candidates"],
+                "reserved_promotion_slots": 2,
             }
             record.update(accepted=True, reason="paired_promotion_reserved")
         elif proposal["action"] == "focus_region":
@@ -484,6 +539,7 @@ def review(service, study, proposal):
                 "reason": proposal["reason"],
                 "consumed": False,
                 "source_pair_id": status["pair_outcome"]["pair_id"],
+                "created_at": now,
                 "reference_trial_ids": [
                     t.trial_id for t in trials if _observed(study, t, 0)
                 ],
@@ -492,7 +548,10 @@ def review(service, study, proposal):
     except (ValueError, TypeError, KeyError) as exc:
         record["reason"] = str(exc)
     study.scheduler_state.setdefault("cross_stage_reviews", []).append(record)
-    study.scheduler_state.pop("cross_stage_pending_review", None)
+    consultation = study.scheduler_state.pop("cross_stage_pending_review", None)
+    if consultation:
+        consultation.update(status="applied" if record.get("accepted") else "rejected")
+        record["consultation"] = consultation
     # Commit intent before creating children. Resume finishes this exact pair without another consultation.
     service._save_study(study)
     ensure_pair_trials(service, study)
@@ -505,8 +564,6 @@ def ensure_pair_trials(service, study):
         return
     by_id = {t.trial_id: t for t in service.list_trials(study.experiment_id)}
     missing = [tid for tid in pair["child_trial_ids"] if tid not in by_id]
-    if not missing:
-        return
     if service.remaining_training_runs(study) < len(missing):
         raise ValueError(
             "insufficient reserved training capacity to recover paired promotion"
@@ -516,12 +573,36 @@ def ensure_pair_trials(service, study):
         raise ValueError(
             "paired promotion would exceed the frozen promotion allocation"
         )
+    changed = False
     for source_id, child_id in zip(
         pair["source_trial_ids"], pair["child_trial_ids"], strict=True
     ):
-        if child_id in by_id:
-            continue
         parent = by_id[source_id]
+        existing = by_id.get(child_id)
+        if existing is not None:
+            if (
+                existing.parent_trial_id != source_id
+                or existing.rung != 1
+                or existing.parameters != parent.parameters
+                or existing.budget.to_dict() != study.budgets[1].to_dict()
+            ):
+                raise ValueError(
+                    "persisted paired promotion conflicts with its committed intent"
+                )
+            # A crash can occur after the child commit but before either of these writes.
+            if parent.status == "completed":
+                parent.status = "promoted"
+                parent.updated_at = datetime.now().isoformat()
+                service.save_trial(study.experiment_id, parent)
+                changed = True
+            if child_id not in study.trial_ids:
+                study.trial_ids.append(child_id)
+                changed = True
+            continue
+        if not _observed(study, parent, 0):
+            raise ValueError(
+                "paired promotion requires a valid completed source"
+            )
         now = datetime.now().isoformat()
         child = Trial(
             trial_id=child_id,
@@ -544,12 +625,14 @@ def ensure_pair_trials(service, study):
             updated_at=now,
         )
         service.save_trial(study.experiment_id, child)
+        changed = True
         parent.status = "promoted"
         parent.updated_at = now
         service.save_trial(study.experiment_id, parent)
         if child_id not in study.trial_ids:
             study.trial_ids.append(child_id)
-    service._save_study(study)
+    if changed:
+        service._save_study(study)
 
 
 def sampling_region(study, trials):
@@ -586,23 +669,35 @@ def focus_outcome(study, trials):
         for t in trials
         if t.trial_id in focus["reference_trial_ids"] and _observed(study, t, 0)
     ]
+    affected_ids = {
+        t.trial_id
+        for t in trials
+        if t.provenance.get("region_id") == focus["region_id"]
+    }
     result = {
         "region_id": focus["region_id"],
         "bounds": focus["bounds"],
         "candidate_count": len(focused),
         "completed_count": len(completed),
+        "failed_or_stopped_count": sum(
+            t.status in {"failed", "stopped"} for t in focused
+        ),
         "status": "inconclusive",
         "causal_claim": False,
         "fallback_reason": focus.get("fallback_reason"),
         "global_domain_restored_for_next_batch": focus["consumed"],
+        "affected_trial_ids": sorted(affected_ids),
+        "outcomes_by_rung": _rung_outcomes(study, trials, affected_ids),
     }
-    if completed and len(completed) == len(focused) and references:
+    if completed and references:
         metric = study.objectives[0].metric
         sign = 1 if study.objectives[0].mode == "min" else -1
         reference_best = min(sign * t.metrics[metric] for t in references)
         focused_best = min(sign * t.metrics[metric] for t in completed)
         result.update(
-            status="evaluated",
+            status="evaluated"
+            if len(completed) == len(focused)
+            else "partially_observed",
             metric=metric,
             initial_budget_improvement_over_reference=reference_best
             - focused_best,
@@ -611,16 +706,82 @@ def focus_outcome(study, trials):
     return result
 
 
+def _rung_outcomes(study, trials, affected_ids):
+    """Report quality at each budget separately, including absent final controls."""
+    metric = study.objectives[0].metric
+    sign = 1 if study.objectives[0].mode == "min" else -1
+    results = []
+    for rung, budget in enumerate(study.budgets):
+        valid = [t for t in trials if _observed(study, t, rung)]
+        affected = [t for t in valid if t.trial_id in affected_ids]
+        reference = [t for t in valid if t.trial_id not in affected_ids]
+        best = min(
+            affected, key=lambda t: sign * t.metrics[metric], default=None
+        )
+        other = min(
+            reference, key=lambda t: sign * t.metrics[metric], default=None
+        )
+        results.append(
+            {
+                "rung": rung,
+                "budget": budget.to_dict(),
+                "is_final_budget": rung == len(study.budgets) - 1,
+                "affected_trial_ids": [t.trial_id for t in affected],
+                "reference_trial_ids": [t.trial_id for t in reference],
+                "best_trial_id": best.trial_id if best else None,
+                "best_metric": best.metrics[metric] if best else None,
+                "reference_best_metric": other.metrics[metric]
+                if other
+                else None,
+                "objective_aligned_improvement": sign
+                * (other.metrics[metric] - best.metrics[metric])
+                if best and other
+                else None,
+                "comparison_status": "observational"
+                if best and other
+                else "insufficient_comparison",
+            }
+        )
+    return results
+
+
 def summary(study, trials):
     if not enabled(study):
         return {"enabled": False}
     focused = [
         t for t in trials if t.rung == 0 and t.provenance.get("region_id")
     ]
+    pair = study.scheduler_state.get("cross_stage_pair") or {}
+    focus = study.scheduler_state.get("cross_stage_focus") or {}
+    paired = [
+        t
+        for t in trials
+        if pair and t.provenance.get("cross_stage_pair_id") == pair["pair_id"]
+    ]
+    regional = [
+        t
+        for t in trials
+        if focus and t.provenance.get("region_id") == focus["region_id"]
+    ]
+    affected_ids = {t.trial_id for t in paired + regional}
+    reviews = []
+    for record in study.scheduler_state.get("cross_stage_reviews") or []:
+        applied = paired if record["phase"] == "paired_promotion" else focused
+        applied = [
+            t.trial_id
+            for t in applied
+            if t.rung == (1 if record["phase"] == "paired_promotion" else 0)
+        ]
+        reviews.append(
+            {
+                **record,
+                "applied_trial_ids": applied if record["accepted"] else [],
+            }
+        )
     return {
         "enabled": True,
         "pair_outcome": pair_outcome(study, trials),
-        "reviews": study.scheduler_state.get("cross_stage_reviews") or [],
+        "reviews": reviews,
         "focused_candidate_count": len(focused),
         "focused_trial_ids": [t.trial_id for t in focused],
         "global_search_space_preserved": study.search_space.to_dict()
@@ -628,5 +789,13 @@ def summary(study, trials):
             "original_search_space"
         ),
         "focus_outcome": focus_outcome(study, trials),
+        "objective": study.objectives[0].to_dict(),
+        "affected_trial_ids": sorted(affected_ids),
+        "cost": observed_cost([t for t in trials if t.trial_id in affected_ids]),
+        "pair_lineage_cost": observed_cost(paired),
+        "focus_lineage_cost": observed_cost(regional),
+        "outcomes_by_rung": _rung_outcomes(study, trials, affected_ids),
+        "causal_claim": False,
+        "comparison_limitations": "Non-intervention Trials are observational controls with unequal selection and counts, not randomized counterfactuals. Missing final-budget controls leave improvement unknown.",
         "interpretation": "A two-configuration comparison is exploratory, not causal or full-budget proof unless both reach that budget.",
     }

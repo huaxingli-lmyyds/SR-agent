@@ -53,7 +53,10 @@ def _checkpoint_path(record: dict, trial_id: Optional[str] = None) -> Optional[s
     return None
 
 
+from agent.runners.stages import StageExecution, stage_operation
+
 @tool
+@stage_operation
 def RunEvaluation(
     model_path: Optional[str] = None,
     verification_config: Optional[str] = None,
@@ -71,6 +74,8 @@ def RunEvaluation(
     precision: Optional[str] = None,
     eval_precision: Optional[str] = None,
     runtime_deadline_epoch: Optional[float] = None,
+    checkpoint_id: Optional[str] = None,
+    defer_commit: bool = False,
 ) -> str:
     """Evaluate a recorded model and return a structured operation result."""
     try:
@@ -120,6 +125,11 @@ def RunEvaluation(
             )
         if trial_id:
             output_folder = output_folder / trial_id
+            output_folder.mkdir(parents=True, exist_ok=True)
+        if checkpoint_id is not None:
+            if not checkpoint_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in checkpoint_id):
+                raise ValueError("invalid checkpoint_id")
+            output_folder = output_folder / checkpoint_id
             output_folder.mkdir(parents=True, exist_ok=True)
         task = record.get("task") or {}
         execution = record.get("execution") or {}
@@ -223,8 +233,8 @@ def RunEvaluation(
         if run_opts:
             overrides["_run_opts"] = run_opts
         apply_runtime_deadline(overrides, runtime_deadline_epoch, "evaluation")
-        raw = runner_adapter.run_evaluation(
-            config_path,
+        raw = yield StageExecution.prepare_execution(
+            "evaluation", runner_name, config_path,
             model_path=model_path,
             data_path=data_folder,
             overrides=overrides,
@@ -288,6 +298,8 @@ def RunEvaluation(
             "verification_config": config_path,
             "verification_pairs": pairs_path,
         }
+        if defer_commit:
+            return result.to_json()
         ExperimentService(tracker).record_result(
             experiment_id,
             result,

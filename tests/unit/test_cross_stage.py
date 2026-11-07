@@ -174,6 +174,16 @@ def test_scheduler_pairs_early_then_focuses_one_batch_and_preserves_allocation(
     assert outcome["status"] == "supported_observation"
     assert outcome["late_challenger_advantage"] == pytest.approx(0.02)
     assert not outcome["causal_claim"] and not outcome["full_budget_comparison"]
+    recorded = service.load_study(study.experiment_id).scheduler_state[
+        "cross_stage_outcome"
+    ]
+    assert recorded == cross_stage.summary(study, result.trials)
+    assert recorded["outcomes_by_rung"][-1]["best_metric"] == 0.065
+    assert (
+        recorded["outcomes_by_rung"][-1]["objective_aligned_improvement"]
+        is None
+    )
+    assert recorded["cost"]["cost_may_be_incomplete"]
 
 
 @pytest.mark.parametrize(
@@ -343,7 +353,7 @@ def test_bad_advice_falls_back_to_the_original_tpe_and_promotion_budget(
         cross_stage_reviewer=review,
     ).run(study)
     assert result.study.status == "completed", result.errors
-    assert calls == ["paired_promotion"]
+    assert calls == ["paired_promotion"] * 3
     assert len(result.trials) == 13
     assert [sum(t.rung == r for t in result.trials) for r in range(3)] == [
         9,
@@ -424,7 +434,7 @@ def test_rejected_region_samples_fall_back_to_global_tpe(
     assert study.scheduler_state["cross_stage_focus"]["consumed"]
 
 
-def test_interrupted_consultation_is_not_repeated_on_resume(setup_cross_stage):
+def test_interrupted_consultation_retries_on_resume(setup_cross_stage):
     service, study = setup_cross_stage
     calls = []
 
@@ -445,12 +455,228 @@ def test_interrupted_consultation_is_not_repeated_on_resume(setup_cross_stage):
         == "paired_promotion"
     )
     result = HPOScheduler(
-        service, executor, cross_stage_reviewer=interrupt
+        service, executor, cross_stage_reviewer=lambda *args: calls.append(1) or {}
     ).run(restored, resume=True)
     assert result.study.status == "completed", result.errors
-    assert len(calls) == 1 and len(result.trials) == 13
+    assert len(calls) == 2 and len(result.trials) == 13
     assert not restored.scheduler_state.get("cross_stage_pair")
     persisted = service.load_study(study.experiment_id)
     assert not persisted.scheduler_state.get("cross_stage_pending_review")
     assert len(persisted.scheduler_state["cross_stage_reviews"]) == 1
     assert not persisted.scheduler_state["cross_stage_reviews"][0]["accepted"]
+
+
+@pytest.mark.parametrize("advantage", [-0.01, 0.0, 0.0005])
+def test_unsupported_hypothesis_never_calls_region_reviewer(
+    setup_cross_stage, advantage
+):
+    service, study = setup_cross_stage
+    calls = []
+    initial_count = 0
+
+    def review(current, feedback):
+        calls.append(feedback["opportunity"]["phase"])
+        assert calls == ["paired_promotion"]
+        return pair_proposal(
+            sorted(
+                service.list_trials(current.experiment_id),
+                key=lambda t: t.metrics["eer"],
+            )
+        )
+
+    def execute(trial, attempt):
+        nonlocal initial_count
+        pair = study.scheduler_state.get("cross_stage_pair") or {}
+        if trial.rung == 0:
+            initial_count += 1
+            value = 0.1 + initial_count * 0.01
+        elif trial.trial_id in pair.get("child_trial_ids", []):
+            value = (
+                0.09
+                if trial.trial_id == pair["child_trial_ids"][0]
+                else 0.09 - advantage
+            )
+        else:
+            value = 0.08
+        return {"status": "success", "metrics": {"eer": value}}
+
+    result = HPOScheduler(service, execute, cross_stage_reviewer=review).run(
+        study
+    )
+    assert result.study.status == "completed", result.errors
+    assert len(result.trials) == 13
+    assert calls == ["paired_promotion"]
+    assert not study.scheduler_state.get("cross_stage_focus")
+    assert (
+        cross_stage.pair_outcome(study, result.trials)["status"]
+        == "not_supported"
+    )
+
+
+def test_resume_repairs_child_commit_before_parent_and_index(
+    setup_cross_stage, monkeypatch
+):
+    service, study = setup_cross_stage
+    ts = initial_trials(service, study)
+    original = service.save_trial
+
+    def crash_after_child(eid, trial):
+        original(eid, trial)
+        if trial.rung == 1:
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(service, "save_trial", crash_after_child)
+    with pytest.raises(KeyboardInterrupt):
+        cross_stage.review(service, study, pair_proposal(ts))
+    monkeypatch.setattr(service, "save_trial", original)
+    restored = service.load_study(study.experiment_id)
+    cross_stage.ensure_pair_trials(service, restored)
+    cross_stage.ensure_pair_trials(service, restored)
+    pair = restored.scheduler_state["cross_stage_pair"]
+    assert set(pair["child_trial_ids"]) <= set(restored.trial_ids)
+    assert all(
+        service.load_trial(study.experiment_id, tid).status == "promoted"
+        for tid in pair["source_trial_ids"]
+    )
+    assert len(service.list_trials(study.experiment_id)) == 5
+    assert len(restored.trial_ids) == len(set(restored.trial_ids)) == 5
+
+
+def complete_pair(service, study):
+    ts = initial_trials(service, study)
+    assert cross_stage.review(service, study, pair_proposal(ts))["accepted"]
+    for i, tid in enumerate(
+        study.scheduler_state["cross_stage_pair"]["child_trial_ids"]
+    ):
+        finish(
+            service,
+            study,
+            service.load_trial(study.experiment_id, tid),
+            0.09 - 0.02 * i,
+        )
+    return service.list_trials(study.experiment_id)
+
+
+def test_global_valid_but_outside_focus_candidate_falls_back(
+    setup_cross_stage, monkeypatch
+):
+    from agent.hpo.strategies import STRATEGIES
+
+    service, study = setup_cross_stage
+    trials = complete_pair(service, study)
+    proposal = region_proposal(study, trials)
+    assert cross_stage.review(service, study, proposal)["accepted"]
+    bounds = proposal["region"]["lr"]
+    domain = study.search_space.parameters[0]
+    outside = domain.low if bounds["low"] > domain.low else domain.high
+    strategy = STRATEGIES.get("tpe")
+    original = strategy.suggest
+    calls = []
+
+    def suggest(space, count, **kwargs):
+        calls.append(space)
+        if len(calls) == 1:
+            return [{"lr": outside, "margin": 0.2}]
+        return original(space, count, **kwargs)
+
+    monkeypatch.setattr(strategy, "suggest", suggest)
+    candidates = service.suggest_trials(study, 3)
+    assert len(calls) == 2 and len(candidates) == 3
+    assert not any(t.provenance.get("region_id") for t in candidates)
+    assert (
+        study.scheduler_state["cross_stage_focus"]["fallback_reason"]
+        == "region_candidates_rejected_by_validator"
+    )
+
+
+def test_cost_and_partial_focus_are_recorded_without_false_final_gain(
+    setup_cross_stage,
+):
+    service, study = setup_cross_stage
+    trials = complete_pair(service, study)
+    assert cross_stage.review(service, study, region_proposal(study, trials))[
+        "accepted"
+    ]
+    candidates = service.suggest_trials(study, 3)
+    finish(service, study, candidates[0], 0.06)
+    for trial in candidates[1:]:
+        service.record_trial(
+            study, trial.trial_id, status="failed", stop_reason="test failure"
+        )
+    trials = service.list_trials(study.experiment_id)
+    for trial in trials:
+        trial.cost.update(
+            attempt_training_seconds=10,
+            attempt_evaluation_seconds=2,
+            attempt_training_gpu_seconds=30,
+            attempt_evaluation_gpu_seconds=2,
+        )
+    result = cross_stage.summary(study, trials)
+    assert result["cost"]["gpu_hours"] == pytest.approx(5 * 32 / 3600)
+    assert result["cost"]["cost_may_be_incomplete"]  # Legacy attempt fields are not a full journal.
+    focused = result["focus_outcome"]
+    assert focused["status"] == "partially_observed"
+    assert focused["failed_or_stopped_count"] == 2
+    assert focused[
+        "initial_budget_improvement_over_reference"
+    ] == pytest.approx(0.04)
+    assert focused["outcomes_by_rung"][-1]["best_metric"] is None
+    assert (
+        focused["outcomes_by_rung"][-1]["objective_aligned_improvement"] is None
+    )
+    next(t for t in trials if t.trial_id == candidates[0].trial_id).cost.update(
+        retry_count=1, attempt_training_gpu_seconds=float("nan")
+    )
+    result = cross_stage.summary(study, trials)
+    assert result["cost"]["cost_may_be_incomplete"]
+    import json
+
+    json.dumps(result, allow_nan=False)
+
+
+def test_pair_reservation_cannot_spend_merit_or_confirmation_allowance(
+    setup_cross_stage,
+):
+    service, study = setup_cross_stage
+    trials = initial_trials(service, study)
+    study.max_training_runs = 12  # frozen 9+3+1 allocation needs 13
+    decision = cross_stage.review(service, study, pair_proposal(trials))
+    assert not decision["accepted"]
+    assert "original allocation" in decision["reason"]
+    assert len(service.list_trials(study.experiment_id)) == 3
+
+
+def test_unknown_cross_stage_phase_is_rejected():
+    with pytest.raises(ValueError, match="unknown cross-stage"):
+        cross_stage.validate_response(keep(), "invented")
+
+
+@pytest.mark.parametrize("mode,expected", [("min", 0.2), ("max", -0.2)])
+def test_final_outcome_obeys_objective_and_exact_budget(
+    setup_cross_stage, mode, expected
+):
+    service, study = setup_cross_stage
+    trials = complete_pair(service, study)
+    pair = study.scheduler_state["cross_stage_pair"]
+    affected = deepcopy(
+        next(t for t in trials if t.trial_id == pair["child_trial_ids"][1])
+    )
+    reference = deepcopy(next(t for t in trials if t.rung == 0))
+    study.objectives = [Objective("min_dcf", mode)]
+    for trial, value in [(affected, 0.4), (reference, 0.6)]:
+        trial.trial_id += "_final"
+        trial.rung = 2
+        trial.budget = deepcopy(study.budgets[2])
+        trial.status = "completed"
+        trial.metrics = {"min_dcf": value, "eer": 0.99}
+    report = cross_stage.summary(study, trials + [affected, reference])[
+        "outcomes_by_rung"
+    ][-1]
+    assert report["best_metric"] == 0.4
+    assert report["objective_aligned_improvement"] == pytest.approx(expected)
+    reference.budget.epochs -= 1
+    report = cross_stage.summary(study, trials + [affected, reference])[
+        "outcomes_by_rung"
+    ][-1]
+    assert report["reference_trial_ids"] == []
+    assert report["objective_aligned_improvement"] is None

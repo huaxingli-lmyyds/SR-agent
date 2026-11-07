@@ -5,6 +5,7 @@
 # unless explicitly force-added by maintainers.
 # -----------------------------------------------------------------------------
 *.md
+!HPO_OPTIMIZATION_STATUS.md
 !/README.md
 !/SYSTEM_OPTIMIZATION_RESEARCH_PLAN.md
 !/scripts/experiments/FIVE_GROUP_BENCHMARK.md
@@ -182,3 +183,8 @@ profile_default/
 ipython_config.py
 .DS_Store
 Thumbs.db
+
+# Local optimization test environment
+.venv-hpo/
+
+/tmp/

@@ -88,6 +88,10 @@ class CampaignPolicy:
         return campaign
 
     def should_continue(self, campaign: OptimizationCampaign) -> bool:
+        if campaign.status == "completed" and campaign.stop_reason in {
+            "controller_stop", "no_feasible_next_study",
+        }:
+            return False
         if self._target_reached(campaign):
             return self._stop(campaign, "target_reached")
         if len(campaign.study_summaries) >= campaign.max_studies:
@@ -105,7 +109,10 @@ class CampaignPolicy:
         if campaign.max_total_training_runs is None:
             return None
         used = sum(item["training_runs"] for item in campaign.study_summaries)
-        return max(campaign.max_total_training_runs - used, 0)
+        confirmation = campaign.control_state.get("confirmation") or {}
+        used += int(confirmation.get("training_runs", 0))
+        reserved = max(0, int(confirmation.get("reserved_runs", 0)) - int(confirmation.get("training_runs", 0)))
+        return max(campaign.max_total_training_runs - used - reserved, 0)
 
     @staticmethod
     def _target_reached(campaign: OptimizationCampaign) -> bool:

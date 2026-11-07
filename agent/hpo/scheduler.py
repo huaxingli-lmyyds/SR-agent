@@ -115,6 +115,7 @@ class HPOScheduler:
         self.resource_budget = resource_budget
         self._study: Optional[HPOStudy] = None
         self._resume_record: Dict[str, Any] = {}
+        self._batch_results = {}
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -461,6 +462,10 @@ class HPOScheduler:
         return {"route": "complete"}
 
     def _select_trial(self, state: HPOGraphState) -> Dict[str, Any]:
+        if self._batch_results:
+            trial_id = next(iter(self._batch_results))
+            trial = self.service.load_trial(self.study.experiment_id, trial_id)
+            return {"current_trial_id": trial_id, "attempt": max(1, int(trial.cost.get("retry_count", 0))+1), "route": "run"}
         trial = self.decision_policy.next_trial(self.study, self.service)
         if trial is not None:
             attempt = max(1, int(trial.cost.get("retry_count", 0)) + 1)
@@ -478,6 +483,20 @@ class HPOScheduler:
 
     def _run_trial(self, state: HPOGraphState) -> Dict[str, Any]:
         trial_id = str(state["current_trial_id"])
+        if trial_id in self._batch_results:
+            result = self._batch_results.pop(trial_id)
+            return {"last_result": result, "last_error": result.get("error")}
+        if getattr(self.executor, "managed", False):
+            from agent.runners.stage_pool import StagePool
+            trials = [t for t in self.service.list_trials(self.study.experiment_id)
+                      if t.status == "suggested" or t.trial_id == trial_id]
+            trials.sort(key=lambda t: (t.trial_id != trial_id, t.created_at, t.trial_id))
+            jobs = [(t, int(state.get("attempt", 1)) if t.trial_id == trial_id else max(1, int(t.cost.get("retry_count", 0))+1)) for t in trials]
+            outcomes = StagePool(self.service, self.resource_budget, self.executor.runtime_options).run(self.executor, jobs)
+            self._study = self.service.load_study(self.study.experiment_id)
+            self._batch_results.update({t.trial_id: outcomes[t.trial_id] for t in trials})
+            result = self._batch_results.pop(trial_id)
+            return {"last_result": result, "last_error": result.get("error")}
         trial = self.service.load_trial(self.study.experiment_id, trial_id)
         if trial.status == "suggested":
             self.service.record_trial(self.study, trial_id, status="running")
@@ -533,6 +552,10 @@ class HPOScheduler:
         # Evaluation-only recovery is explicitly requested by the caller and
         # must never consume a training retry or restart training implicitly.
         can_retry = retry_requested and not current.cost.get("evaluation_only") and self.service.retry_budget_available(self.study)
+        checkpoint_retry = (stage == "evaluation" and (result.get("cost") or {}).get("checkpoint_selection") == "validation_topk")
+        if checkpoint_retry:
+            can_retry = retry_requested
+
         self.service.record_trial(
             self.study,
             trial_id,
@@ -567,7 +590,13 @@ class HPOScheduler:
         if self.resource_budget:
             self.resource_budget.check()
         if can_retry:
-            self.service.retry_trial(self.study, trial_id, error)
+            if checkpoint_retry:
+                current = self.service.load_trial(self.study.experiment_id, trial_id)
+                current.status = "suggested"
+                current.cost["evaluation_only"] = True
+                self.service.save_trial(self.study.experiment_id, current)
+            else:
+                self.service.retry_trial(self.study, trial_id, error)
             self.service.record_trial(self.study, trial_id, status="running")
             self.service.update_scheduler_state(
                 self.study,
@@ -596,9 +625,6 @@ class HPOScheduler:
         if cross_stage.enabled(self.study):
             # Finish a durable pair intent before threshold checks, including on resume.
             cross_stage.ensure_pair_trials(self.service, self.study)
-            if self.study.scheduler_state.get("cross_stage_pending_review"):
-                # An interrupted consultation is not silently paid for again on resume.
-                cross_stage.review(self.service, self.study, {"advice_error": "interrupted cross-stage consultation; keep the original policy"})
             trials = self.service.list_trials(self.study.experiment_id)
             if any(t.status in {"suggested", "running"} for t in trials):
                 return {}
@@ -607,15 +633,17 @@ class HPOScheduler:
                 feedback = {"opportunity": status, "evidence": cross_stage.evidence(self.study, trials)}
                 if self.resource_budget:
                     feedback["resource_budget"] = self.resource_budget.check()
-                self.service.update_scheduler_state(self.study, cross_stage_pending_review={
-                    "phase": status["phase"], "started_at": datetime.now().isoformat(),
-                })
-                try:
-                    proposal = self.cross_stage_reviewer(self.study, feedback) if self.cross_stage_reviewer else {"advice_error": "no cross-stage reviewer"}
-                except ResourceBudgetExhausted:
-                    raise
-                except Exception as exc:
-                    proposal = {"advice_error": f"{type(exc).__name__}: {exc}"}
+                from .consultations import request_response
+                pending = self.study.scheduler_state.get("cross_stage_pending_review") or {
+                    "phase": status["phase"], "feedback": feedback, "status": "eligible"}
+                pending.setdefault("feedback", feedback)
+                def persist():
+                    self.service.update_scheduler_state(self.study, cross_stage_pending_review=pending)
+                def request():
+                    if self.resource_budget:
+                        self.resource_budget.check()
+                    return self.cross_stage_reviewer(self.study, pending["feedback"]) if self.cross_stage_reviewer else {"advice_error": "no cross-stage reviewer"}
+                proposal = request_response(pending, persist, request) or {"advice_error": "consultation attempts exhausted"}
                 cross_stage.review(self.service, self.study, proposal)
             trials = self.service.list_trials(self.study.experiment_id)
             self.service.update_scheduler_state(self.study, current_trial_id=None, completed_since_review=0,
@@ -672,19 +700,49 @@ class HPOScheduler:
             self.study,
             self.service.list_trials(self.study.experiment_id),
         )
-        feedback["review_trigger"] = trigger
-        if self.resource_budget:
-            feedback["resource_budget"] = self.resource_budget.check()
-        try:
-            return self.strategy_reviewer(self.study, feedback)
-        except ResourceBudgetExhausted:
-            raise
-        except Exception as exc:
-            return StrategyProposal(
-                action="invalid_proposal",
-                reason_codes=["runtime_review_error"],
-                evidence={"error": f"{type(exc).__name__}: {exc}", "review_trigger": trigger},
-            )
+        from .opportunities import enabled, analyze
+        from .consultations import request_response
+        from hashlib import sha256
+        import json
+        opportunity = analyze(self.study, self.service.list_trials(self.study.experiment_id),
+            minimum=self.service.evidence_gate.min_same_fidelity_trials,
+            remaining_runs=self.service.remaining_training_runs(self.study))
+        record = opportunity.to_dict()
+        if not enabled(self.study):
+            record["eligible"] = True
+            record["opportunity_id"] = sha256(json.dumps([self.study.study_id, trigger,
+                sorted(t.trial_id for t in self.service.list_trials(self.study.experiment_id)
+                       if t.status in {"completed", "promoted", "failed", "stopped"})]).encode()).hexdigest()[:24]
+        events = self.study.scheduler_state.setdefault("decision_opportunities", {})
+        previous = events.get(record["opportunity_id"])
+        if previous and previous.get("status") in {"consumed", "applied", "rejected", "skipped", "exhausted"}:
+            return StrategyProposal(action="keep_strategy", reason_codes=["opportunity_consumed"])
+        if not record["eligible"]:
+            events[record["opportunity_id"]] = {**record, "status": "skipped"}
+            self.service.update_scheduler_state(self.study, decision_opportunities=events)
+            return StrategyProposal(action="keep_strategy", reason_codes=[opportunity.reason])
+        if previous:
+            record = previous
+        else:
+            feedback["decision_opportunity"] = record.copy()
+            feedback["review_trigger"] = trigger
+            if self.resource_budget:
+                feedback["resource_budget"] = self.resource_budget.check()
+            record = {**record, "status": "eligible", "feedback": feedback}
+            events[record["opportunity_id"]] = record
+        def persist():
+            self.service.update_scheduler_state(self.study, decision_opportunities=events)
+        def request():
+            if self.resource_budget:
+                self.resource_budget.check()
+            result = self.strategy_reviewer(self.study, record["feedback"])
+            if result is None or result.action == "invalid_proposal":
+                raise ValueError("reviewer did not return a valid strategy proposal")
+            return result.to_dict()
+        response = request_response(record, persist, request)
+        if response is None:
+            return StrategyProposal(action="keep_strategy", reason_codes=["consultation_attempts_exhausted"])
+        return StrategyProposal.from_dict(response, preserve_audit_fields=True)
 
     def _next_promotable_rung(self) -> Optional[int]:
         if self.service._active_pruner(self.study) != "successive_halving":

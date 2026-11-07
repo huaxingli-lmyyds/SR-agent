@@ -1,0 +1,34 @@
+{
+  "runtime_options": {
+    "decision_opportunities": true,
+    "checkpoint_selection": "validation_topk",
+    "managed_execution": true,
+    "promotion_training": "resume_if_compatible",
+    "max_concurrent_trials": 2,
+    "gpu_pool": [
+      0,
+      1
+    ],
+    "gpus_per_trial": 1,
+    "confirmation_enabled": true,
+    "confirmation_top_k": 2,
+    "confirmation_seeds": 3
+  },
+  "budgets": [
+    {
+      "stage": "screening",
+      "epochs": 3,
+      "data_fraction": 1.0
+    },
+    {
+      "stage": "promotion",
+      "epochs": 8,
+      "data_fraction": 1.0
+    },
+    {
+      "stage": "confirmation",
+      "epochs": 20,
+      "data_fraction": 1.0
+    }
+  ]
+}

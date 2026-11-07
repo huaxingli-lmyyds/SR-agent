@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from math import log, sqrt
+from .opportunities import enabled as opportunities_enabled
 from typing import Any, Dict, List, Optional
 
 from agent.core.metrics import is_finite_metric
@@ -25,7 +27,7 @@ class HPOFeedbackAnalyzer:
             "successive_halving" if study.strategy == "successive_halving" else "none"
         )
         if comparable and active_pruner == "successive_halving":
-            comparable_rung = max(trial.rung for trial in comparable)
+            comparable_rung = 0 if opportunities_enabled(study) else max(trial.rung for trial in comparable)
             comparable = [trial for trial in comparable if trial.rung == comparable_rung]
         failures = Counter(
             str(trial.cost.get("failure_category") or "unknown")
@@ -39,10 +41,15 @@ class HPOFeedbackAnalyzer:
                 value = best.parameters.get(parameter.name)
                 if not isinstance(value, (int, float)) or parameter.low is None or parameter.high is None:
                     continue
-                span = float(parameter.high) - float(parameter.low)
+                low, high, observed = float(parameter.low), float(parameter.high), float(value)
+                if parameter.scale == "log":
+                    if min(low, high, observed) <= 0:
+                        continue
+                    low, high, observed = log(low), log(high), log(observed)
+                span = high - low
                 if span <= 0:
                     continue
-                ratio = (float(value) - float(parameter.low)) / span
+                ratio = (observed - low) / span
                 if ratio <= 0.05:
                     boundary_hits.append({"parameter": parameter.name, "edge": "low", "value": value})
                 elif ratio >= 0.95:
@@ -93,6 +100,7 @@ class HPOFeedbackAnalyzer:
             "parameter_observations": self._parameter_observations(comparable, objective.metric, objective.mode),
             "failed_trial_examples": self._failed_trial_examples(trials),
             "cost_summary": self._cost_summary(trials),
+            "cross_budget_diagnostics": cross_budget_diagnostics(trials, objective.metric),
         }
 
     def propose(
@@ -162,6 +170,8 @@ class HPOFeedbackAnalyzer:
                 if key in trial.metrics
             },
             "curve": HPOFeedbackAnalyzer._curve_summary(trial.intermediate_metrics),
+            "training_observation": trial.cost.get("training_observation", {}),
+            "checkpoint_evaluations": trial.cost.get("checkpoint_evaluations", []),
         }
 
     @staticmethod
@@ -318,34 +328,41 @@ class HPOFeedbackAnalyzer:
                     "delta": values[-1] - values[0],
                     "trend": "down" if values[-1] < values[0] else "up" if values[-1] > values[0] else "flat",
                 }
+            if values:
+                window = values[-5:]
+                n = len(window)
+                mean = sum(window) / n
+                center = (n - 1) / 2
+                denominator = sum((i - center) ** 2 for i in range(n))
+                summary.setdefault(key, {}).update({
+                    "recent_points": n,
+                    "recent_slope": sum((i-center)*(v-mean) for i,v in enumerate(window)) / denominator if denominator else None,
+                    "recent_std": sqrt(sum((v-mean)**2 for v in window) / n),
+                    "best_value": min(values),
+                    "best_point_index": values.index(min(values)),
+                })
+        paired = [item for item in history if is_finite_metric(item.get("train_loss")) and is_finite_metric(item.get("valid_loss"))]
+        if paired:
+            summary["final_loss_gap"] = paired[-1]["valid_loss"] - paired[-1]["train_loss"]
         return summary
 
     @staticmethod
     def _cost_summary(trials: List[Trial]) -> Dict[str, Any]:
-        durations: Dict[str, List[float]] = {
-            "training": [],
-            "evaluation": [],
-        }
-        for trial in trials:
-            for stage in durations:
-                stage_cost = trial.cost.get(stage) or {}
-                value = stage_cost.get("duration_seconds")
-                if isinstance(value, (int, float)) and value >= 0:
-                    durations[stage].append(float(value))
-        summary: Dict[str, Any] = {
-            "observed_trial_count": len(trials),
-            "stages": {},
-        }
-        for stage, values in durations.items():
-            summary["stages"][stage] = {
-                "observations": len(values),
-                "average_duration_seconds": (
-                    round(sum(values) / len(values), 3) if values else None
-                ),
-                "max_duration_seconds": round(max(values), 3) if values else None,
-                "total_duration_seconds": round(sum(values), 3),
-            }
-        return summary
+        from .costs import observed_cost
+        result = observed_cost(trials)
+        result["observed_trial_count"] = len(trials)
+        result["stages"] = {}
+        for stage in ("training", "evaluation"):
+            values = [observed_cost([t])[f"{stage}_seconds"] for t in trials
+                      if ((t.cost.get("ledger_cost") or {}).get("stage_count", 0) > 0
+                          or ("ledger_cost" not in t.cost and (
+                              is_finite_metric((t.cost.get(stage) or {}).get("duration_seconds"))
+                              or is_finite_metric(t.cost.get(f"attempt_{stage}_seconds")))))]
+            result["stages"][stage] = {"observations": len(values),
+                "total_duration_seconds": sum(values),
+                "average_duration_seconds": sum(values) / len(values) if values else None,
+                "max_duration_seconds": max(values) if values else None}
+        return result
     @staticmethod
     def _failed_trial_examples(trials: List[Trial]) -> List[Dict[str, Any]]:
         examples: List[Dict[str, Any]] = []
@@ -363,3 +380,31 @@ class HPOFeedbackAnalyzer:
             if len(examples) >= 3:
                 break
         return examples
+
+
+def cross_budget_diagnostics(trials, metric):
+    """Paired observations only; selection-biased correlations are not causal."""
+    by_id = {t.trial_id: t for t in trials}
+    groups = defaultdict(list)
+    for child in trials:
+        parent = by_id.get(child.parent_trial_id)
+        if (parent is None or child.rung != parent.rung + 1 or child.parameters != parent.parameters
+            or child.status not in {"completed", "promoted"} or parent.status not in {"completed", "promoted"}
+            or not all(is_finite_metric(t.metrics.get(metric)) for t in (parent, child))):
+            continue
+        groups[(parent.rung, child.rung)].append({"parent_trial_id": parent.trial_id,
+            "child_trial_id": child.trial_id, "early": parent.metrics[metric], "late": child.metrics[metric]})
+    def ranks(values):
+        ordered = sorted(values)
+        return [sum(i+1 for i,x in enumerate(ordered) if x == v) / ordered.count(v) for v in values]
+    result = []
+    for (early, late), pairs in sorted(groups.items()):
+        x, y = ranks([p["early"] for p in pairs]), ranks([p["late"] for p in pairs])
+        n = len(pairs); mx, my = sum(x)/n, sum(y)/n
+        denom = sqrt(sum((v-mx)**2 for v in x) * sum((v-my)**2 for v in y))
+        correlation = sum((a-mx)*(b-my) for a,b in zip(x,y))/denom if n >= 3 and denom else None
+        reversals = sum((x[i]-x[j])*(y[i]-y[j]) < 0 for i in range(n) for j in range(i))
+        result.append({"from_rung": early, "to_rung": late, "pair_count": n, "pairs": pairs,
+            "spearman": correlation, "rank_reversals": reversals,
+            "selection_bias": "promoted_candidates_only", "causal_claim": False})
+    return result

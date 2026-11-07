@@ -131,8 +131,10 @@ initially worse challenger early, using two existing promotion slots. At least
 one slot remains for merit selection after the remaining initial candidates.
 The hypothesis predicts a ranking reversal by a declared minimum objective gain.
 A failed or missing arm remains inconclusive. Both promotions restart training.
-After the paired result, the agent may allocate one TPE batch to a broad numeric
-region around the higher-budget winner, or keep global search. This batch uses
+Only when the preregistered ranking reversal meets its minimum objective gain
+does the agent get a region review. An unsupported or inconclusive hypothesis
+keeps global TPE without a second LLM call. The agent may allocate one TPE batch
+to a broad numeric region around the higher-budget winner, or keep global search. This batch uses
 at most one third of initial candidate slots and retains at least half each
 focused parameter's original linear/log interval. Global bounds are never
 replaced; subsequent sampling returns to the full domain. These two committed
@@ -145,8 +147,58 @@ The selection criterion is classification validation ErrorRate, distinct from
 verification EER. A pair evaluated at 1 and 3 epochs does not establish a ranking
 at the 6-epoch final budget or causality for cycle phase. `results.json.cross_stage`
 records pair outcomes, accepted/rejected decisions and the local batch's
-same-budget improvement; overall quality/cost comparison remains in
+same-budget improvement. The same summary is persisted in
+`study.json.scheduler_state.cross_stage_outcome` for ordinary HPO and resume.
+`outcomes_by_rung` separates each training budget, traces affected descendants,
+and leaves final improvement null when no comparable final-budget control exists.
+`focus_outcome.outcomes_by_rung` separately reports the regional candidates and
+their promotions. These references are observational and subject to selection
+bias, not proof that the LLM caused an improvement. Failed regional candidates
+remain in counts and cost reports. Cost fields sum recorded latest attempts;
+missing/invalid costs or retries set `cost_may_be_incomplete`, and the Campaign
+resource ledger remains authoritative for total expenditure.
+Regional candidates pass both global and local boundary checks; an entirely
+invalid local batch falls back to global TPE. Paired child commits repair their
+parent status and Study index on resume without duplicate training slots.
+Overall quality/cost comparison remains in
 `summary.json.paired_efficiency`.
+
+With `--max-studies` greater than one, `controller_mode=llm` also makes a bounded
+Campaign decision after each completed Study. The model selects a validated plan
+ID: `continue`, `compact`, `global_explore`, or (when supported by the preceding
+paired experiment and a successful local batch) `supported_focus`. `stop` is
+available only after at least two comparable completed Studies and a latest
+Study without meaningful improvement. Missing evidence never becomes a positive
+effect claim. The same decision is not sent again after an interrupted consultation.
+
+`compact` reduces initial candidates and retains every confirmation rung;
+cross-stage mode keeps two paired slots and a merit slot. `global_explore`
+restores the Campaign's original search domain, using random search in ordinary
+HPO and TPE in the dedicated probe modes. `continue` retains deterministic
+inheritance of a deferred next-Study proposal. Other plans explicitly replace
+that deferred direction. Selected boundary plans are not overwritten by a
+second planning LLM call. Within a cross-stage Study the sampler remains TPE;
+ordinary HPO retains its existing sampler-switching mechanism.
+
+Candidate plans respect remaining training-run limits. When complete measured
+costs exist, plans whose estimated full bracket exceeds remaining GPU hours or
+wall time are removed before selection. Estimates use same-budget observations,
+exclude unknown costs, and are not runtime guarantees; the resource ledger still
+enforces hard stage deadlines. When no complete plan fits, the Campaign ends
+with `no_feasible_next_study` rather than launching an incomplete bracket.
+`fixed` performs no boundary consultation; `rule` chooses deterministically;
+malformed LLM responses fall back to that rule.
+
+Inspect `extensions.optimization.campaign.study_summaries[].continuation_decision`
+for offered plans, measured evidence, the model response, fallback reason, and
+`applied_experiment_id` / `actual_plan`. `control_state` preserves the original
+search domain and allocation ceilings. A normal multi-Study run applies the
+decision automatically. The existing resume entry point still resumes one Study;
+it preserves any pending next-Study decision and reports
+`campaign_continuation_pending`, rather than automatically starting later Studies.
+The five-group benchmark currently uses one Study per group/seed, so this
+Campaign-level decision is exercised by multi-Study HPO, not by those single-Study
+benchmark runs.
 
 Both validation arguments are mandatory for a new HPO run. The validation-pair
 speakers are excluded from training and every Trial is evaluated only on that

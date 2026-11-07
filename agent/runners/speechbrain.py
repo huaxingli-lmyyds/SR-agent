@@ -57,6 +57,15 @@ class SpeechBrainRunnerAdapter:
         metrics.update(result.get("metrics") or {})
         metrics.update(final_metrics)
         model_paths = _find_model_paths(resolved_output, experiment_dir)
+        from .checkpoint_selection import candidates
+        result["checkpoint_candidates"] = candidates(resolved_output / "save") if resolved_output else []
+        continuation = (raw.get("runtime") or {}).get("continuation") or {}
+        if continuation.get("enabled"):
+            rows = [*continuation.get("parent_candidates", []), *result["checkpoint_candidates"]]
+            rows = list({r["path"]: r for r in rows}.values())
+            best = sorted(rows, key=lambda r: (r.get("error_rate", float("inf")), r["epoch"]))[:2]
+            latest = max(rows, key=lambda r: r["epoch"]) if rows else None
+            result["checkpoint_candidates"] = list({r["path"]: r for r in [*best, *([latest] if latest else [])]}.values())
         from .training_observation import selected_checkpoint_observation
         result["selected_checkpoint"] = selected_checkpoint_observation(model_paths[0]) if model_paths else {}
         result.update({
@@ -74,6 +83,12 @@ class SpeechBrainRunnerAdapter:
             Artifact("checkpoint", Path(path).name, str(path))
             for path in raw.get("model_paths") or []
         ]
+        if (raw.get("runtime") or {}).get("checkpoint_selection") == "validation_topk":
+            artifacts = [Artifact("checkpoint_candidate", Path(r["path"]).name, r["path"])
+                         for r in raw.get("checkpoint_candidates") or []]
+        manifest = (raw.get("runtime") or {}).get("resume_manifest")
+        if manifest:
+            artifacts.append(Artifact("continuation_state", "last_complete_state", manifest))
         if raw.get("train_log_path"):
             artifacts.append(Artifact("log", "training_log", str(raw["train_log_path"])))
         launcher_log = (raw.get("runtime") or {}).get("launcher_log")
@@ -89,6 +104,7 @@ class SpeechBrainRunnerAdapter:
                 "epoch_data": raw.get("epoch_data") or [],
                 "final_metrics": raw.get("final_metrics") or {},
                 "selected_checkpoint": raw.get("selected_checkpoint") or {},
+                "checkpoint_candidates": raw.get("checkpoint_candidates") or [],
                 "timeout_seconds": raw.get("timeout_seconds"),
                 "terminated_by_budget": bool(raw.get("terminated_by_budget", False)),
                 "process_exitcode": raw.get("process_exitcode"),

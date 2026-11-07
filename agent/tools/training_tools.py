@@ -32,7 +32,10 @@ from agent.tasks.contracts import task_metric_metadata
 from agent.tools.runtime import apply_runtime_deadline, build_run_options
 from agent.tools.evaluation_tools import EvaluateModel as EvaluateModel
 
+from agent.runners.stages import StageExecution, stage_operation
+
 @tool
+@stage_operation
 def TrainModel(config_path: Optional[str] = None,
                data_folder: Optional[str] = None,
                description: Optional[str] = None,
@@ -52,7 +55,11 @@ def TrainModel(config_path: Optional[str] = None,
                batch_size_semantics: Optional[str] = None,
                precision: Optional[str] = None,
                eval_precision: Optional[str] = None,
-               runtime_deadline_epoch: Optional[float] = None) -> str:
+               runtime_deadline_epoch: Optional[float] = None,
+               checkpoint_selection: str = "legacy",
+               attempt_id: Optional[str] = None,
+               continuation_json: Optional[str] = None,
+               frozen_data_json: Optional[str] = None) -> str:
     """
     通过注册的模型、任务和 Runner 适配器执行训练。
     训练完成后会自动保存实验记录，包括配置、指标和产物。
@@ -167,6 +174,10 @@ def TrainModel(config_path: Optional[str] = None,
         output_folder_path = resolve_optional_project_path(output_folder)
         if trial_id:
             output_folder_path = exp_dir / "trials" / trial_id / "output"
+            if attempt_id:
+                if not attempt_id.replace("_", "").isalnum():
+                    raise ValueError("invalid attempt_id")
+                output_folder_path = output_folder_path.parent / attempt_id / "output"
             output_folder = str(output_folder_path)
         elif output_folder_path is None or exp_dir not in output_folder_path.parents:
             output_folder_path = exp_dir / "output"
@@ -215,7 +226,11 @@ def TrainModel(config_path: Optional[str] = None,
             raise ValueError(
                 "budget max_duration_seconds must be a finite positive number"
             )
+        if checkpoint_selection not in {"legacy", "validation_topk"}:
+            raise ValueError("unknown checkpoint selection protocol")
         overrides.update(trial_parameters)
+        if checkpoint_selection != "legacy":
+            overrides["_hpo_checkpoint_selection"] = checkpoint_selection
         if trial_budget.get("epochs") is not None:
             overrides["number_of_epochs"] = trial_budget["epochs"]
         if data_fraction is not None:
@@ -230,9 +245,20 @@ def TrainModel(config_path: Optional[str] = None,
         if run_opts:
             overrides["_run_opts"] = run_opts
         apply_runtime_deadline(overrides, runtime_deadline_epoch, "training")
-        train_result = validate_runner_result(
-            runner_adapter.run_training(config_path_str, overrides), "training"
-        )
+        if continuation_json:
+            overrides["_hpo_continuation"] = json.loads(continuation_json)
+        if frozen_data_json:
+            from agent.hpo.protocol import file_sha256
+            frozen = json.loads(frozen_data_json)
+            for key in ("train_annotation", "valid_annotation"):
+                item = frozen[key]
+                if file_sha256(Path(item["path"])) != item["sha256"]:
+                    raise ValueError("frozen training data manifest changed")
+                overrides[key] = item["path"]
+            overrides["skip_prep"] = True
+        train_result = yield StageExecution.prepare_execution(
+            "training", runner_name, config_path_str, overrides=overrides)
+        train_result = validate_runner_result(train_result, "training")
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()

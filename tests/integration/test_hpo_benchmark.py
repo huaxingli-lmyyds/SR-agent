@@ -662,8 +662,8 @@ def test_hypothesis_llm_format_failure_preserves_tpe_budget(
     assert row["hypothesis_probes"]["agent_candidate_count"] == 0
     assert len(env.runner.training) == 8
     assert (
-        len(calls) == 2
-    )  # one eligible consultation plus one format regeneration
+        len(calls) == 6
+    )  # three bounded consultation attempts, each with one format regeneration
     service = HPOService(ExperimentTracker(Path(row["run_dir"]) / "hpo"))
     assert all(
         t.candidate_source == "sampler:tpe"
@@ -672,8 +672,9 @@ def test_hypothesis_llm_format_failure_preserves_tpe_budget(
     )
 
 
+@pytest.mark.parametrize("supported", [True, False])
 def test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews(
-    setup_benchmark, monkeypatch
+    setup_benchmark, monkeypatch, supported
 ):
     env = setup_benchmark
     cfg = benchmark.read_json(env.config)
@@ -692,6 +693,19 @@ def test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews(
     )
     benchmark.write_json(env.config, cfg)
     calls = []
+    pair_parameters = {}
+    evaluate = env.runner.run_evaluation
+
+    def paired_evaluation(*args, **kwargs):
+        raw = evaluate(*args, **kwargs)
+        training = env.runner.training[-1]
+        parameters = {**training["config"], **training["overrides"]}
+        for role, values in pair_parameters.items():
+            if all(parameters.get(name) == value for name, value in values.items()):
+                raw["metrics"]["eer"] = 0.09 if role == "anchor" else (0.07 if supported else 0.11)
+        return raw
+
+    monkeypatch.setattr(env.runner, "run_evaluation", paired_evaluation)
 
     class Model:
         def invoke(self, prompt):
@@ -716,6 +730,7 @@ def test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews(
                     key=lambda t: t["metric"],
                 )
                 a, b = ranked[0], ranked[-1]
+                pair_parameters.update(anchor=a["parameters"], challenger=b["parameters"])
                 result.update(
                     action="paired_promotion",
                     hypothesis="The initial ranking may reverse at three epochs.",
@@ -760,17 +775,17 @@ def test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews(
     assert all(row["status"] == "success" for row in rows)
     assert len(env.runner.training) == 26
     row = next(r for r in rows if r["variant"] == "system")
-    assert row["advisor_requests"] == row["llm_valid_proposals"] == 2
+    expected_calls = 2 if supported else 1
+    assert row["advisor_requests"] == row["llm_valid_proposals"] == expected_calls
     assert not row["controller_degraded"]
-    assert row["cross_stage"]["focused_candidate_count"] == 3
-    assert len(calls) == 2 and [p["context"]["phase"] for p in calls] == [
+    assert row["cross_stage"]["focused_candidate_count"] == (3 if supported else 0)
+    assert len(calls) == expected_calls and [p["context"]["phase"] for p in calls] == [
         "paired_promotion",
         "region_review",
-    ]
-    assert row["cross_stage"]["pair_outcome"]["status"] in {
-        "supported_observation",
-        "not_supported",
-    }
+    ][:expected_calls]
+    assert row["cross_stage"]["pair_outcome"]["status"] == (
+        "supported_observation" if supported else "not_supported"
+    )
     service = HPOService(ExperimentTracker(Path(row["run_dir"]) / "hpo"))
     study = service.load_study(row["experiment_id"])
     trials = [
@@ -784,4 +799,4 @@ def test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews(
         == search_space_from_dict(cfg["search_space"]).to_dict()
     )
     assert benchmark.main(["--resume", "--output-dir", str(env.output)]) == 0
-    assert len(calls) == 2 and len(env.runner.training) == 26
+    assert len(calls) == expected_calls and len(env.runner.training) == 26

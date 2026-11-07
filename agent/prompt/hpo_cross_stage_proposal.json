@@ -65,7 +65,7 @@
       ],
       "rules": [
         "Use the completed paired comparison. Cite both source IDs and both child IDs in evidence_trial_ids. Leave hypothesis, anchor_trial_id, challenger_trial_id and minimum_late_advantage null.",
-        "Prefer keep_search when the proposed region is not justified by the comparison, including when the pair is noisy. Not supporting a reversal does not prove that other configurations or schedules are inferior.",
+        "focus_region is permitted only when pair_outcome.status is supported_observation: the preregistered reversal met its minimum advantage. Otherwise keep_search. A supported pair is still only local evidence; do not generalize it into a proven optimal region.",
         "For focus_region propose bounds for at most two unconditional numeric parameters that differed in the pair. Every interval must stay inside the original domain, include the destination-budget winner, and retain at least half the original width (log width for log-scaled parameters).",
         "The region is used for one TPE batch only, capped by opportunity.maximum_candidates and one third of the initial candidate quota. Global boundaries are never overwritten; global search resumes afterward. The higher-budget comparison is still not full-budget proof unless both arms reached the frozen final budget."
       ]

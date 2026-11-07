@@ -169,7 +169,7 @@ def training_runtime_signature(options: Dict[str, Any]) -> Dict[str, Any]:
         or 1
     )
     enabled = bool(plan.get("enabled", world_size > 1)) and world_size > 1
-    return {
+    signature = {
         "distributed": enabled,
         "world_size": world_size if enabled else 1,
         "backend": (
@@ -183,6 +183,22 @@ def training_runtime_signature(options: Dict[str, Any]) -> Dict[str, Any]:
         "precision": options.get("precision") or "fp32",
         "eval_precision": options.get("eval_precision") or "fp32",
     }
+
+    for key in ("decision_opportunities", "checkpoint_selection"):
+        if key in options:
+            signature[key] = options[key]
+    from agent.hpo.execution_options import managed_enabled
+    if managed_enabled(options):
+        signature["execution_protocol"] = "managed_v1"
+        signature["promotion_training"] = options.get("promotion_training", "restart")
+        signature["confirmation"] = {"enabled": bool(options.get("confirmation_enabled")),
+            "top_k": options.get("confirmation_top_k", 2), "seeds": options.get("confirmation_seeds", 3)}
+        if options.get("gpu_pool"):
+            count = options.get("gpus_per_trial", 1)
+            signature.update(distributed=count > 1, world_size=count,
+                batch_size_semantics=options.get("batch_size_semantics", "global") if count > 1 else "per_device",
+                backend=options.get("distributed_backend", "nccl") if count > 1 else None)
+    return signature
 
 
 def run_distributed_training(

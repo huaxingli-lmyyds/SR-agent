@@ -1,0 +1,24 @@
+{
+  "runtime_options": {
+    "decision_opportunities": true,
+    "checkpoint_selection": "validation_topk",
+    "promotion_training": "resume_if_compatible"
+  },
+  "budgets": [
+    {
+      "stage": "screening",
+      "epochs": 3,
+      "data_fraction": 1.0
+    },
+    {
+      "stage": "promotion",
+      "epochs": 8,
+      "data_fraction": 1.0
+    },
+    {
+      "stage": "confirmation",
+      "epochs": 20,
+      "data_fraction": 1.0
+    }
+  ]
+}

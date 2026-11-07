@@ -19,10 +19,23 @@ def _json(value: Any, max_chars: int = 16000) -> str:
     text = json.dumps(value, ensure_ascii=False, default=str)
     if len(text) <= max_chars:
         return text
-    return json.dumps(
-        {"truncated": True, "preview": text[: max_chars - 100]},
-        ensure_ascii=False,
-    )
+    def compact(item, limit):
+        if isinstance(item, dict):
+            return {k: compact(v, limit) for k, v in item.items()}
+        if isinstance(item, list):
+            kept = [compact(v, limit) for v in item[:limit]]
+            if len(item) > limit:
+                kept.append({"omitted_items": len(item) - limit})
+            return kept
+        if isinstance(item, str) and len(item) > 800:
+            return item[:800] + " [truncated]"
+        return item
+    for limit in (5, 2, 1):
+        result = json.dumps({"truncated": True, "data": compact(value, limit)}, ensure_ascii=False, default=str)
+        if len(result) <= max_chars:
+            return result
+    return json.dumps({"truncated": True, "reason": "response_too_large", "request": "select specific Trial IDs"})
+
 
 
 def build_hpo_analysis_tools(

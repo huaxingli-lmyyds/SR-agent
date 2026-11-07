@@ -562,7 +562,8 @@ def test_applied_decision_is_attributed_only_to_affected_trials(
     saved_review = study.strategy_reviews[-1]
     assert saved_review["effective_from_trial_index"] == 1
     assert saved_review["affected_trial_ids"] == [after.trial_id]
-    assert saved_review["realized_outcome"] == {
+    assert saved_review["realized_outcome"]["cost"]["cost_may_be_incomplete"]
+    assert {k: v for k, v in saved_review["realized_outcome"].items() if k != "cost"} == {
         "affected_trial_count": 1,
         "completed_trial_count": 1,
         "highest_completed_rung": 0,

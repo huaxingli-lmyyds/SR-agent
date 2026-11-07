@@ -59,20 +59,34 @@ class CampaignResourceBudget:
                 for key, value in requested.items():
                     if value is not None and value != self.data["limits"].get(key):
                         raise ValueError(f"cannot change persisted resource limit on resume: {key}")
+                self.data.setdefault("active_stages", {})
                 active = self.data.get("active_stage")
-                if active:
+                if active and not self.data["active_stages"]:
+                    self.data["active_stages"]["legacy"] = active
+                self.data["schema_version"] = 2
+                for stage_id, active in list(self.data["active_stages"].items()):
+                    if active.get("worker"):
+                        from agent.runners.stage_pool import terminate_owned
+                        terminate_owned(active["worker"])
                     # Do not silently refund an uncommitted GPU attempt.
                     elapsed = max(0.0, self.clock() - active["started_at"])
                     reserved = active.get("timeout_seconds")
                     seconds = max(elapsed, reserved or 0.0)
-                    self.finish_stage(seconds=seconds, estimated=True)
+                    result_path = (active.get("worker") or {}).get("result_path")
+                    estimated = True
+                    if result_path and Path(result_path).is_file():
+                        result = json.loads(Path(result_path).read_text(encoding="utf-8"))
+                        if result.get("finished_at") is not None:
+                            seconds = max(0.0, result["finished_at"] - active["started_at"])
+                            estimated = False
+                    self.finish_stage(stage_id=stage_id, seconds=seconds, estimated=estimated)
             else:
                 if self.path.exists():
                     raise ValueError(f"resource ledger already exists: {self.path}")
                 now = self.clock()
-                self.data = {"schema_version": 1, "limits": requested,
+                self.data = {"schema_version": 2, "limits": requested,
                              "started_at": now, "gpu_seconds": 0.0,
-                             "stages": [], "active_stage": None,
+                             "stages": [], "active_stage": None, "active_stages": {},
                              "deadline_epoch": now + requested["max_wall_seconds"]
                              if requested["max_wall_seconds"] is not None else None}
             self._save()
@@ -99,8 +113,7 @@ class CampaignResourceBudget:
     def snapshot(self) -> dict:
         elapsed = max(0.0, self.clock() - self.data["started_at"])
         gpu = self.data["gpu_seconds"]
-        active = self.data.get("active_stage")
-        if active:
+        for active in self.data.get("active_stages", {}).values():
             gpu += max(0.0, self.clock() - active["started_at"]) * active["gpu_count"]
         ceiling = self.data["limits"]["max_gpu_hours"]
         deadline = self.data["deadline_epoch"]
@@ -122,33 +135,70 @@ class CampaignResourceBudget:
         return snapshot
 
     def start_stage(self, *, experiment_id: str, trial_id: str, attempt: int,
-                    stage: str, gpu_count: int, max_seconds: Optional[float] = None) -> Optional[float]:
-        snapshot = self.check()
-        if self.data.get("active_stage"):
+                    stage: str, gpu_count: int, max_seconds: Optional[float] = None,
+                    stage_id: Optional[str] = None, available_slots: int = 1) -> Optional[float]:
+        """Reserve a stage. Only the controller may call this method."""
+        if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 0:
+            raise ValueError("gpu_count must be a non-negative integer")
+        if isinstance(available_slots, bool) or not isinstance(available_slots, int) or available_slots < 1:
+            raise ValueError("available_slots must be a positive integer")
+        explicit = stage_id is not None
+        key = stage_id or "legacy"
+        if not explicit and self.data["active_stages"]:
             raise RuntimeError("a resource-budget stage is already active")
-        ceilings = [x for x in (positive_limit(max_seconds, "max_seconds"),
-                               snapshot["wall_seconds_remaining"]) if x is not None]
-        if gpu_count and snapshot["gpu_hours_remaining"] is not None:
-            ceilings.append(snapshot["gpu_hours_remaining"] * 3600 / gpu_count)
+        if key in self.data["active_stages"]:
+            active = self.data["active_stages"][key]
+            if (active["experiment_id"], active["trial_id"], active["attempt"], active["stage"], active["gpu_count"]) != (experiment_id, trial_id, attempt, stage, gpu_count):
+                raise ValueError("stage ID is already bound to another operation")
+            timeout = active["timeout_seconds"]
+            return active["started_at"] + timeout if timeout is not None else None
+        if explicit and any(r.get("stage_id") == key for r in self.data["stages"]):
+            raise ValueError("stage already settled; replay its result instead of executing again")
+        snapshot = self.check()
+        ceilings = [x for x in (positive_limit(max_seconds, "max_seconds"), snapshot["wall_seconds_remaining"]) if x is not None]
+        cap = self.data["limits"]["max_gpu_hours"]
+        if gpu_count and cap is not None:
+            reserved = sum(max(a.get("timeout_seconds") or 0, max(0, self.clock()-a["started_at"])) * a["gpu_count"]
+                           for a in self.data["active_stages"].values())
+            free = cap * 3600 - self.data["gpu_seconds"] - reserved
+            if free <= 0:
+                raise ResourceBudgetExhausted("GPU allowance is exhausted or reserved by active stages")
+            ceilings.append(free / (available_slots * gpu_count))
         timeout = min(ceilings) if ceilings else None
         now = self.clock()
-        self.data["active_stage"] = {"experiment_id": experiment_id, "trial_id": trial_id,
-                                     "attempt": attempt, "stage": stage, "gpu_count": gpu_count,
-                                     "started_at": now, "timeout_seconds": timeout}
+        active = {"experiment_id": experiment_id, "trial_id": trial_id, "attempt": attempt,
+                  "stage": stage, "stage_id": key, "gpu_count": gpu_count,
+                  "started_at": now, "timeout_seconds": timeout}
+        self.data["active_stages"][key] = active
+        self.data["active_stage"] = active if key == "legacy" else None
         self._save()
         return now + timeout if timeout is not None else None
 
-    def finish_stage(self, *, seconds: Optional[float] = None, estimated: bool = False) -> dict:
-        active = self.data.get("active_stage")
+    def attach_worker(self, stage_id, owner):
+        self.data["active_stages"][stage_id]["worker"] = dict(owner)
+        self._save()
+
+    def finish_stage(self, *, seconds: Optional[float] = None, estimated: bool = False,
+                     stage_id: Optional[str] = None) -> dict:
+        key = stage_id or "legacy"
+        active = self.data["active_stages"].get(key)
         if active is None:
+            if stage_id is not None:
+                previous = next((r for r in self.data["stages"] if r.get("stage_id") == key), None)
+                if previous is not None:
+                    return dict(previous)
             raise RuntimeError("no resource-budget stage is active")
-        duration = max(0.0, self.clock() - active["started_at"]) if seconds is None else max(0.0, seconds)
+        if seconds is not None and (isinstance(seconds, bool) or not isinstance(seconds, (float, int)) or not math.isfinite(seconds) or seconds < 0):
+            raise ValueError("seconds must be finite and non-negative")
+        duration = max(0.0, self.clock() - active["started_at"]) if seconds is None else seconds
         record = {**active, "seconds": duration, "gpu_seconds": duration * active["gpu_count"], "estimated": estimated}
         self.data["gpu_seconds"] += record["gpu_seconds"]
         self.data["stages"].append(record)
-        self.data["active_stage"] = None
+        del self.data["active_stages"][key]
+        self.data["active_stage"] = self.data["active_stages"].get("legacy")
         self._save()
-        return record
+        return dict(record)
+
 
 
 def stage_gpu_count(runtime_options: dict, runner: str, *, evaluation: bool = False) -> int:

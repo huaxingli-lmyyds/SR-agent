@@ -91,6 +91,16 @@ class SpeakerBrain(sb.core.Brain):
 
         return loss
 
+    def on_fit_start(self):
+        super().on_fit_start()
+        from agent.runners.continuation_state import restore_state
+        restore_state(self)
+
+    def _fit_valid(self, valid_set, epoch, enable):
+        super()._fit_valid(valid_set, epoch, enable)
+        from agent.runners.continuation_state import save_state
+        save_state(self, epoch)
+
     def on_stage_start(self, stage, epoch=None):
         """Gets called at the beginning of an epoch."""
         if stage != sb.Stage.TRAIN:
@@ -115,15 +125,24 @@ class SpeakerBrain(sb.core.Brain):
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
             )
-            self.checkpointer.save_and_keep_only(
-                meta={"ErrorRate": stage_stats["ErrorRate"], "training_observation": {
-                    "checkpoint_epoch": epoch,
-                    "learning_rate_schedule": scheduler_snapshot(self.hparams.lr_annealing),
-                    "optimizer_lr_at_checkpoint": float(self.optimizer.param_groups[0]["lr"]),
-                    "selection_metric": "classification_validation_ErrorRate",
-                }},
-                min_keys=["ErrorRate"],
-            )
+            metadata = {"ErrorRate": stage_stats["ErrorRate"], "training_observation": {
+                "checkpoint_epoch": epoch,
+                "learning_rate_schedule": scheduler_snapshot(self.hparams.lr_annealing),
+                "optimizer_lr_at_checkpoint": float(self.optimizer.param_groups[0]["lr"]),
+                "selection_metric": "classification_validation_ErrorRate",
+            }}
+            if getattr(self.hparams, "hpo_checkpoint_selection", "legacy") == "validation_topk":
+                self.checkpointer.save_checkpoint(meta=metadata)
+                ranked = self.checkpointer.find_checkpoints(min_key="ErrorRate", max_num_checkpoints=2)
+                latest = self.checkpointer.find_checkpoint()
+                keep = {c.path for c in ranked}
+                if latest:
+                    keep.add(latest.path)
+                self.checkpointer.delete_checkpoints(num_to_keep=0, importance_keys=[],
+                    ckpt_predicate=lambda checkpoint: checkpoint.path not in keep)
+            else:
+                self.checkpointer.save_and_keep_only(meta=metadata, min_keys=["ErrorRate"])
+
 
 
 def audio_pipeline(

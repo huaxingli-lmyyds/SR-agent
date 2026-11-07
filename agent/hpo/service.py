@@ -602,6 +602,10 @@ class HPOService:
         for index, raw in enumerate(raw_suggestions):
             try:
                 parameters = self.validate_candidate_parameters(study, dict(raw))
+                if focus:
+                    for parameter in sampling_space.parameters:
+                        if parameter.name in focus["bounds"]:
+                            _validate_candidate_value(parameter, parameters[parameter.name])
                 metadata = proposal_by_signature.get(_candidate_signature(parameters), {})
                 suggestions.append((parameters, metadata))
             except Exception as exc:
@@ -1166,6 +1170,11 @@ class HPOService:
             "search_phase": len(study.search_phases) - 1,
             "created_at": datetime.now().isoformat(),
         }
+        submitted_id = (review.get("proposal") or {}).get("proposal_id")
+        for consultation in study.scheduler_state.get("decision_opportunities", {}).values():
+            if submitted_id and (consultation.get("response") or {}).get("proposal_id") == submitted_id:
+                consultation.update(status="applied" if review.get("applied") else "rejected",
+                                    decision_id=(review.get("decision") or {}).get("decision_id"))
         study.strategy_reviews.append(review)
         study.scheduler_state.update({
             "reviewed_trial_ids": sorted(
@@ -1186,12 +1195,22 @@ class HPOService:
         trigger: str = "periodic",
     ) -> Dict[str, Any]:
         """Analyze feedback and safely update only subsequent candidate generation."""
+        if proposal is not None:
+            for previous in study.strategy_reviews:
+                if (previous.get("proposal") or {}).get("proposal_id") == proposal.proposal_id:
+                    return previous
         if not self.has_future_candidate_capacity(study):
             return self.defer_strategy_review(study, proposal, trigger=trigger)
         trials = self.list_trials(study.experiment_id)
         analyzer = HPOFeedbackAnalyzer()
         feedback = analyzer.analyze(study, trials)
         mode = self._controller_mode(study, proposal)
+        from .opportunities import enabled as opportunities_enabled, analyze as analyze_opportunity
+        if opportunities_enabled(study) and proposal is not None and mode == "llm":
+            opportunity = analyze_opportunity(study, trials, minimum=self.evidence_gate.min_same_fidelity_trials, remaining_runs=self.remaining_training_runs(study))
+            feedback["decision_opportunity"] = opportunity.to_dict()
+            if not opportunity.eligible:
+                proposal = StrategyProposal(action="keep_strategy", reason_codes=[opportunity.reason])
         submitted_proposal = proposal
         probe_opportunity = hypothesis_probes.opportunity(study, trials)
         controller_rejections: List[Dict[str, Any]] = []
@@ -1444,6 +1463,11 @@ class HPOService:
             "search_phase": len(study.search_phases) - 1,
             "created_at": datetime.now().isoformat(),
         }
+        submitted_id = (review.get("proposal") or {}).get("proposal_id")
+        for consultation in study.scheduler_state.get("decision_opportunities", {}).values():
+            if submitted_id and (consultation.get("response") or {}).get("proposal_id") == submitted_id:
+                consultation.update(status="applied" if review.get("applied") else "rejected",
+                                    decision_id=(review.get("decision") or {}).get("decision_id"))
         study.strategy_reviews.append(review)
         study.scheduler_state.update({
             "reviewed_trial_ids": sorted(
@@ -1573,6 +1597,11 @@ class HPOService:
         recovered_trial_ids: List[str] = []
         for trial in persisted_trials:
             evaluation_checkpoint = evaluation_retries.get(trial.trial_id)
+            if (trial.status == "running" and trial.cost.get("checkpoint_selection") == "validation_topk"
+                and trial.cost.get("checkpoint_evaluations")):
+                evaluation_checkpoint = trial.cost.get("evaluated_checkpoint")
+                if not evaluation_checkpoint or not Path(evaluation_checkpoint).exists():
+                    raise ValueError(f"missing checkpoint for evaluation recovery: {trial.trial_id}")
             if trial.status != "running" and evaluation_checkpoint is None:
                 continue
             if evaluation_checkpoint is not None:
@@ -1901,22 +1930,26 @@ class HPOService:
         trial_dir = self._trial_dir(experiment_id)
         if not trial_dir.exists():
             return []
-        return [
+        from .costs import attach_ledger_costs
+        return attach_ledger_costs(self.tracker, experiment_id, [
             trial_from_dict(json.loads(path.read_text(encoding="utf-8")))
             for path in sorted(trial_dir.glob("trial_*.json"))
-        ]
+        ])
 
     def load_trial(self, experiment_id: str, trial_id: str) -> Trial:
         self._validate_record_id(experiment_id, "experiment_id")
         self._validate_record_id(trial_id, "trial_id")
         path = self._trial_dir(experiment_id) / f"{trial_id}.json"
-        return trial_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        from .costs import attach_ledger_costs
+        return attach_ledger_costs(self.tracker, experiment_id, [trial_from_dict(json.loads(path.read_text(encoding="utf-8")))])[0]
 
     def save_trial(self, experiment_id: str, trial: Trial) -> None:
         self._validate_record_id(experiment_id, "experiment_id")
         self._validate_record_id(trial.trial_id, "trial_id")
         path = self._trial_dir(experiment_id, create=True) / f"{trial.trial_id}.json"
-        _write_json_atomic(path, trial.to_dict())
+        value = trial.to_dict()
+        value["cost"].pop("ledger_cost", None)  # Derived from the authoritative ledger on every read.
+        _write_json_atomic(path, value)
 
     def best_metric_value(self, study: HPOStudy, exclude_trial_id: Optional[str] = None) -> Optional[float]:
         objective = study.objectives[0]
@@ -2020,8 +2053,10 @@ class HPOService:
 
     def _save_study(self, study: HPOStudy) -> None:
         path = self._study_path(study.experiment_id, create=True)
-        _write_json_atomic(path, study.to_dict())
         trials = self.list_trials(study.experiment_id)
+        if cross_stage.enabled(study):
+            study.scheduler_state["cross_stage_outcome"] = cross_stage.summary(study, trials)
+        _write_json_atomic(path, study.to_dict())
         objective = study.objectives[0] if study.objectives else None
         best_trial = (
             self.load_trial(study.experiment_id, study.best_trial_id)

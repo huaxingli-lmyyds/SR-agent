@@ -351,6 +351,15 @@ class EvidenceGate:
             blocked.add(field_name)
             rejected.append({"field": field_name, "reason": reason})
 
+        opportunity = feedback.get("decision_opportunity")
+        if opportunity is not None:
+            allowed = opportunity.get("allowed_actions", ())
+            for name in self.PERFORMANCE_FIELDS:
+                if getattr(proposal, name) not in (None, {}, []) and name not in allowed:
+                    reject(name, "action is unavailable at this decision opportunity")
+            if opportunity.get("reason") == "bounded_probe_only" and not targeted_probe:
+                reject("requested_sampler", "only bounded agent_proposal is eligible")
+
         has_mutation = any(
             getattr(proposal, name) not in (None, {}, [])
             for name in self.PERFORMANCE_FIELDS

@@ -111,6 +111,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-studies", type=int, default=1)
     parser.add_argument("--max-total-training-runs", type=int, default=None)
+    parser.add_argument("--managed-execution", action="store_true", default=None)
+    parser.add_argument("--max-concurrent-trials", type=int, default=None)
+    parser.add_argument("--gpu-pool", default=None)
+    parser.add_argument("--gpus-per-trial", type=int, default=None)
+    parser.add_argument("--promotion-training", choices=["restart", "resume_if_compatible"], default=None)
+    parser.add_argument("--confirmation-enabled", action="store_true", default=None)
+    parser.add_argument("--confirmation-top-k", type=int, default=None)
+    parser.add_argument("--confirmation-seeds", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--decision-opportunities", action="store_true", default=None,
+                        help="Consult only when a runtime action can affect remaining candidates.")
+    parser.add_argument("--checkpoint-selection", choices=["legacy", "validation_topk"], default=None)
     parser.add_argument("--max-gpu-hours", type=float, default=None,
                         help="Campaign GPU-hour ceiling, including DDP, evaluation and retries.")
     parser.add_argument("--max-wall-seconds", type=float, default=None,
@@ -311,6 +323,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if args.target_value is not None:
         context["target_value"] = args.target_value
     runtime_options: dict[str, Any] = {}
+    from agent.hpo.execution_options import KEYS
+    for key in ("decision_opportunities", "checkpoint_selection", *KEYS):
+        if getattr(args, key, None) is not None:
+            runtime_options[key] = getattr(args, key)
     if args.device:
         runtime_options["device"] = args.device
     if args.ddp_devices is not None:
@@ -328,7 +344,8 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if args.training_exclusion_pairs is not None:
         runtime_options["training_exclusion_pairs"] = args.training_exclusion_pairs
     if runtime_options:
-        context["runtime_options"] = runtime_options
+        from agent.hpo.execution_options import normalize_options
+        context["runtime_options"] = normalize_options(runtime_options)
 
     if args.budgets_json is not None:
         if not isinstance(args.budgets_json, list):
@@ -393,6 +410,10 @@ def main() -> None:
 
     from agent.agents.orchestrator import CoordinatorAgent
 
+    if args.dry_run:
+        from agent.agents.hpo_preview import preview_plan
+        print(json.dumps(preview_plan(build_context(args), build_budget(args)), indent=2, ensure_ascii=False))
+        return
     pipeline = CoordinatorAgent(
         model_name=args.model_name,
         temperature=args.temperature,

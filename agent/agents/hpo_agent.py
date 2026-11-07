@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.agents.base_agent import LangGraphAgent
 from agent.agents.hpo_execution import TrialExecutor
-from agent.hpo import reporting, resource_analysis
+from agent.hpo import campaign_control, reporting, resource_analysis
 from agent.agents.advisory_response import correction_prompt, decode_json_response, response_diagnostics, trial_ids_from_evidence
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.hpo.effects import summarize_decision_effect
@@ -179,7 +179,8 @@ class HPOAgent(LangGraphAgent):
             values += [positive_limit(profile.get(alias), alias) for alias in aliases]
             limits[key] = min((value for value in values if value is not None), default=None)
         persisted = campaign.resource_budget
-        if not persisted and not any(value is not None for value in limits.values()):
+        from agent.hpo.execution_options import managed_enabled
+        if resume and not persisted and not any(value is not None for value in limits.values()) and not managed_enabled(request.context.get("runtime_options") or {}):
             return
         if resume and not persisted:
             raise ValueError("cannot add resource limits when resuming a legacy Campaign with unaccounted costs")
@@ -246,6 +247,8 @@ class HPOAgent(LangGraphAgent):
             )
 
             runtime_options = freeze_ddp_runtime_options(runtime_options)
+        from agent.hpo.execution_options import normalize_options
+        runtime_options = normalize_options(runtime_options)
         request.context["runtime_options"] = runtime_options
         controller_mode = str(
             request.context.get("controller_mode")
@@ -297,7 +300,11 @@ class HPOAgent(LangGraphAgent):
             patience=max(int(request.budget.get("campaign_patience", max_studies)), 1),
             min_improvement=float(request.budget.get("campaign_min_improvement", 0.0)),
             max_total_training_runs=int(request.budget.get("max_total_training_runs") or per_study_limit * max_studies),
+            control_state={"original_search_space": search_space.to_dict(), "per_study_limit": per_study_limit},
         )
+        from agent.hpo.confirmation import reserve
+        reserve(campaign, runtime_options, request.budget, budgets, seed=int(config.get("seed", 0)),
+                special_probes=bool(request.context.get("cross_stage_probes") or request.context.get("hypothesis_probes")))
         self._bind_resource_budget(request, campaign)
         confirmation_budget = budgets[-1]
         history_comparison_signature = self._confirmation_signature_from_inputs(
@@ -349,9 +356,19 @@ class HPOAgent(LangGraphAgent):
                 if pruner == "successive_halving"
                 else []
             )
+            boundary = (campaign.study_summaries[-1].get("continuation_decision")
+                        if campaign.study_summaries else None)
+            boundary_plan = boundary.get("plan") if boundary else None
+            if boundary_plan:
+                sampler = boundary_plan["sampler"]
+                sampler_config_state = dict(boundary_plan["sampler_config"])
+                search_space = self._resolve_search_space(boundary_plan["search_space"])
+                run_limit = min(run_limit, boundary_plan["max_training_runs"])
+                base_initial_count = boundary_plan["initial_trial_count"]
+                base_promotions = list(boundary_plan["promotion_limits"])
             inherited_proposal = self._next_study_proposal(
                 campaign.to_dict(), controller_mode
-            )
+            ) if not boundary_plan or boundary.get("plan_id") == "continue" else None
             inheritance_decision = None
             if inherited_proposal is not None:
                 inheritance_decision = self.decision_policy.review(
@@ -447,7 +464,7 @@ class HPOAgent(LangGraphAgent):
                     campaign.to_dict(),
                     history_comparison_signature,
                 )
-                if controller_mode == "llm" else None
+                if controller_mode == "llm" and not boundary_plan else None
             )
             proposal = (
                 submitted_proposal
@@ -569,6 +586,7 @@ class HPOAgent(LangGraphAgent):
                     inheritance_decision.to_dict()
                     if inheritance_decision is not None else None
                 ),
+                "campaign_decision": boundary,
                 "planning_proposal_error": (
                     submitted_proposal.to_dict()
                     if submitted_proposal is not None
@@ -622,6 +640,14 @@ class HPOAgent(LangGraphAgent):
                 cross_stage_probes_enabled=request.context.get("cross_stage_probes", False),
                 random_seed=int(request.context.get("hpo_seed", config.get("seed", 0)) or 0) + study_index,
             )
+            campaign.control_state.setdefault("initial_trial_count", initial_count)
+            campaign.control_state.setdefault("promotion_limits", promotion_limits)
+            if boundary_plan:
+                boundary.update(applied=True, applied_experiment_id=experiment_id,
+                                actual_plan={key: adopted_plan[key] for key in (
+                                    "sampler", "pruner", "search_space", "budgets", "max_training_runs",
+                                    "initial_trial_count", "promotion_limits",
+                                )})
             confirmation_signature = study_confirmation_signature(study)
             if not campaign.confirmation_signature:
                 campaign.confirmation_signature = confirmation_signature
@@ -783,6 +809,7 @@ class HPOAgent(LangGraphAgent):
                     },
                 }},
             )
+            self._review_campaign_boundary(tracker, service, scheduled.study, campaign)
             if not campaign_policy.should_continue(campaign):
                 break
             self._check_resource_budget()
@@ -797,6 +824,9 @@ class HPOAgent(LangGraphAgent):
 
         if best_trial is None or best_experiment_id is None:
             raise RuntimeError("optimization campaign produced no valid completed Study")
+        from agent.hpo.confirmation import run_confirmation
+        best_trial, best_experiment_id = run_confirmation(self, tracker, service, campaign,
+            best_trial, best_experiment_id, runtime_options, data_folder)
         duration = (datetime.now() - started_at).total_seconds()
         for item in study_results:
             tracker.update_hpo_experiment(
@@ -838,6 +868,7 @@ class HPOAgent(LangGraphAgent):
                 "best_trial_id": best_trial.trial_id,
                 "best_parameters": best_trial.parameters,
                 "campaign": campaign_record,
+                "confirmation": campaign.control_state.get("confirmation", {"status": "disabled"}),
                 "studies": study_results,
                 "data_handoff": data_handoff,
                 "pending_next_study_proposal": pending_next_study,
@@ -970,11 +1001,18 @@ class HPOAgent(LangGraphAgent):
                     "resume DDP options conflict with the persisted Study "
                     "training runtime"
                 )
+        for key, default in (("decision_opportunities", False), ("checkpoint_selection", "legacy")):
+            if key in runtime_options and runtime_options[key] != persisted_training_runtime.get(key, default):
+                raise ValueError(f"resume {key} conflicts with the persisted Study")
+        from agent.hpo.execution_options import resume_options
+        runtime_options = resume_options(runtime_options, persisted_training_runtime)
         runtime_options.update(persisted_training_runtime)
         if runner == "speechbrain":
             from agent.runners.speechbrain_validation import validate_verification_config
 
             validate_verification_config(runtime_options["verification_config"])
+        from agent.hpo.execution_options import normalize_options
+        runtime_options = normalize_options(runtime_options)
         request.context["runtime_options"] = runtime_options
 
         model_adapter = get_model_adapter(model_family)
@@ -1140,6 +1178,11 @@ class HPOAgent(LangGraphAgent):
             ),
             "next_study_proposal": scheduled.study.next_study_proposal,
         })
+        summary["resource_summary"] = {
+            key: value for key, value in HPOFeedbackAnalyzer().analyze(scheduled.study, scheduled.trials).items()
+            if key in {"failure_rate", "failure_clusters", "cost_summary", "rung_summaries"}
+        }
+        self._review_campaign_boundary(tracker, service, scheduled.study, campaign)
         continuation_pending = CampaignPolicy().should_continue(campaign)
         if continuation_pending:
             campaign.status = "running"
@@ -1163,6 +1206,10 @@ class HPOAgent(LangGraphAgent):
                 result_best_experiment_id,
                 str(best_study.best_trial_id),
             )
+        if not continuation_pending:
+            from agent.hpo.confirmation import run_confirmation
+            result_best_trial, result_best_experiment_id = run_confirmation(self, tracker, service, campaign,
+                result_best_trial, result_best_experiment_id, runtime_options, data_folder)
         duration = (datetime.now() - started_at).total_seconds()
         tracker.update_hpo_experiment(
             experiment_id,
@@ -1217,6 +1264,7 @@ class HPOAgent(LangGraphAgent):
                 "pruner": summary.get("pruner"),
                 "campaign": campaign.to_dict(),
                 "campaign_continuation_pending": continuation_pending,
+                "confirmation": campaign.control_state.get("confirmation", {"status": "disabled"}),
                 "resume_record": scheduled.advice.get("resume") or {},
                 "data_handoff": resumed_handoff,
             },
@@ -1291,7 +1339,10 @@ class HPOAgent(LangGraphAgent):
         execution_context: Optional[Dict[str, Any]] = None,
     ) -> TrialExecutor:
         context = dict(execution_context or {})
-        return TrialExecutor(
+        from agent.agents.managed_execution import ManagedTrialExecutor
+        from agent.hpo.execution_options import managed_enabled
+        factory = ManagedTrialExecutor if managed_enabled(runtime_options or {}) else TrialExecutor
+        return factory(
             experiment_id=experiment_id,
             data_folder=data_folder,
             experiments_dir=self.experiments_dir,
@@ -1302,6 +1353,68 @@ class HPOAgent(LangGraphAgent):
             runner=str(context.get("runner") or self.runner),
             resource_budget=getattr(self, "_resource_budget", None),
         )
+
+    def _review_campaign_boundary(self, tracker, service, study, campaign):
+        """Commit one bounded decision per completed Study before the next launch."""
+        policy = CampaignPolicy()
+        if not policy.should_continue(campaign) or study.controller_mode == "fixed":
+            return
+        state = campaign.control_state
+        state.setdefault("original_search_space", study.search_space.to_dict())
+        state.setdefault("per_study_limit", study.max_training_runs)
+        state.setdefault("initial_trial_count", study.initial_trial_count or study.max_trials)
+        state.setdefault("promotion_limits", list(study.promotion_limits))
+        latest = campaign.study_summaries[-1]
+        # Resuming an earlier completed Study must not re-decide a later boundary.
+        if latest["study_id"] != study.study_id:
+            return
+        existing = latest.get("continuation_decision")
+        if existing and existing.get("status") == "decided":
+            return
+        plans = campaign_control.options(service, study, campaign)
+        resources = getattr(self, "_resource_budget", None)
+        evidence = campaign_control.context(service, study, campaign, plans, resources.check() if resources else {})
+        record = existing or {"status": "pending", "scope": "next_study", "controller_mode": study.controller_mode,
+                  "source_study_id": study.study_id, "evidence": evidence,
+                  "applied_experiment_id": None, "created_at": datetime.now().isoformat()}
+        latest["continuation_decision"] = record
+
+        def persist():
+            tracker.update_hpo_experiment(study.experiment_id, extensions={"optimization": {"campaign": campaign.to_dict()}})
+
+        persist()
+        choice = campaign_control.rule_choice(evidence) if plans else "stop"
+        source, error = "rule", None
+        if plans and study.controller_mode == "llm":
+            from agent.hpo.consultations import request_response
+            consultation = record.setdefault("consultation", {"status": "eligible", "evidence": evidence})
+            def request():
+                if resources:
+                    resources.check()
+                response = self._request_campaign_decision(render_prompt("hpo_campaign_decision", context=consultation["evidence"]))
+                campaign_control.validate_response(response, consultation["evidence"])
+                return response
+            response = request_response(consultation, persist, request)
+            if response is not None:
+                try:
+                    campaign_control.validate_response(response, evidence)
+                    choice, source = response["plan_id"], "llm"
+                    record["proposal"] = response
+                    consultation["status"] = "applied"
+                except (ValueError, KeyError, TypeError) as exc:
+                    consultation["status"] = "rejected"
+                    error = str(exc)
+            else:
+                error = "consultation attempts exhausted; deterministic fallback"
+        record.update(status="decided", plan_id=choice, source=source, error=error,
+                      plan=plans.get(choice), applied=(choice == "stop"))
+        if choice == "stop":
+            policy._stop(campaign, "controller_stop" if plans else "no_feasible_next_study")
+        persist()
+
+    def _request_campaign_decision(self, prompt):
+        evidence = json.loads(prompt)["context"]
+        return self._request_json_advice(prompt, validator=lambda value: campaign_control.validate_response(value, evidence))
 
     def _planning_proposal(
         self,
@@ -1656,6 +1769,10 @@ class HPOAgent(LangGraphAgent):
                 "ddp_plan",
                 "precision",
                 "eval_precision",
+                "decision_opportunities",
+                "checkpoint_selection",
+                "managed_execution", "max_concurrent_trials", "gpu_pool", "gpus_per_trial",
+                "promotion_training", "confirmation_enabled", "confirmation_top_k", "confirmation_seeds",
             )
             if runtime_options.get(key) is not None
         }
@@ -1664,7 +1781,11 @@ class HPOAgent(LangGraphAgent):
     def _training_runtime_signature(runtime_options: Dict[str, Any]) -> Dict[str, Any]:
         from agent.runners.speechbrain_distributed import training_runtime_signature
 
-        return training_runtime_signature(runtime_options)
+        signature = training_runtime_signature(runtime_options)
+        for key in ("decision_opportunities", "checkpoint_selection"):
+            if key in runtime_options:
+                signature[key] = runtime_options[key]
+        return signature
 
     @staticmethod
     def _reference_search_profile(model_family: str) -> Dict[str, Any]:

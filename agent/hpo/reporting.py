@@ -33,6 +33,7 @@ def campaign_from_dict(
         min_improvement=float(data.get("min_improvement") or 0.0),
         max_total_training_runs=data.get("max_total_training_runs"),
         resource_budget=dict(data.get("resource_budget") or {}),
+        control_state=dict(data.get("control_state") or {}),
         confirmation_signature=dict(data.get("confirmation_signature") or {}),
         campaign_id=str(
             data.get("campaign_id")

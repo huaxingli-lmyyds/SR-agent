@@ -559,7 +559,11 @@ def run_evaluation(
             verification_module.dataio_prep(params)
         )
 
-        params["pretrainer"].collect_files()
+        if os.name == "nt":
+            from speechbrain.utils.fetching import LocalStrategy
+            params["pretrainer"].collect_files(local_strategy=LocalStrategy.COPY)
+        else:
+            params["pretrainer"].collect_files()
         params["pretrainer"].load_collected()
         params["embedding_model"].eval()
         params["embedding_model"].to(run_opts["device"])
@@ -700,9 +704,13 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             }
 
         data_fraction = None
+        checkpoint_selection = "legacy"
+        continuation = {}
         if isinstance(overrides, dict):
             normalized_overrides, run_opts = _runtime_options_from_overrides(overrides)
             data_fraction = normalized_overrides.pop("_hpo_data_fraction", None)
+            checkpoint_selection = normalized_overrides.pop("_hpo_checkpoint_selection", "legacy")
+            continuation = normalized_overrides.pop("_hpo_continuation", {})
             normalized_overrides.pop("_hpo_max_duration_seconds", None)
         elif isinstance(overrides, list):
             normalized_overrides = overrides
@@ -729,6 +737,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         hparams, err = _load_hyperpyyaml_config(config_path, normalized_overrides)
         if err:
             return {"status": "failed", "valid_error_rate": None, "error": err}
+        hparams["hpo_checkpoint_selection"] = checkpoint_selection
         _apply_distributed_batch_size(hparams, distributed_runtime)
 
         data_folder = hparams.get("data_folder")
@@ -840,6 +849,11 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             overrides=normalized_overrides,
         )
 
+        if continuation:
+            from .continuation_state import semantic_signature, bind_continuation
+            signature = semantic_signature(config_path, normalized_overrides, hparams,
+                {**distributed_runtime, "precision": run_opts.get("precision", "fp32")}, data_fraction)
+            bind_continuation(hparams, continuation, signature)
         speaker_brain = recipe.SpeakerBrain(
             modules=hparams["modules"],
             opt_class=hparams["opt_class"],
@@ -882,6 +896,13 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 "batch_size_per_device": hparams.get("batch_size_per_device"),
                 "training_speaker_count": actual_speaker_count,
                 "final_learning_rate_schedule": scheduler_snapshot(hparams["lr_annealing"]),
+                "checkpoint_selection": checkpoint_selection,
+                "continuation": hparams.get("hpo_continuation", {}),
+                "training_manifests": {key: {"path": str(hparams[key]), "sha256": __import__("hashlib").sha256(Path(hparams[key]).read_bytes()).hexdigest()}
+                    for key in ("train_annotation", "valid_annotation")},
+                "resume_manifest": (
+                    json.loads((Path(hparams["output_folder"]) / "continuation_latest.json").read_text(encoding="utf-8"))["manifest"]
+                    if (Path(hparams["output_folder"]) / "continuation_latest.json").is_file() else None),
             },
         }
     except Exception as exc:

@@ -337,6 +337,7 @@ class OptimizationCampaign:
     min_improvement: float = 0.0
     max_total_training_runs: Optional[int] = None
     resource_budget: Dict[str, Any] = field(default_factory=dict)
+    control_state: Dict[str, Any] = field(default_factory=dict)
     confirmation_signature: Dict[str, Any] = field(default_factory=dict)
     campaign_id: str = field(default_factory=lambda: _record_id("campaign"))
     study_summaries: List[Dict[str, Any]] = field(default_factory=list)

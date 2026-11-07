@@ -27,6 +27,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "hyperpyyaml>=0.0.1",
     "joblib>=0.14.1",
+    "psutil>=5.9",
     "numpy>=1.17.0",
     "optuna>=3.6.0",
     "packaging",
