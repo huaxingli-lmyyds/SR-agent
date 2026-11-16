@@ -27,12 +27,14 @@ class AgentRegistration:
     actions: Sequence[str]
     factory: AgentFactory = field(repr=False, compare=False)
     description: str = ""
+    requires: Sequence[str] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "agent_type": self.agent_type,
             "actions": list(self.actions),
             "description": self.description,
+            "requires": list(self.requires),
         }
 
 
@@ -47,6 +49,10 @@ class AgentRegistry:
             raise ValueError("agent_type is required")
         if not registration.actions:
             raise ValueError(f"agent '{registration.agent_type}' must expose at least one action")
+        if isinstance(registration.requires, str) or any(
+            not isinstance(name, str) or not name for name in registration.requires
+        ):
+            raise ValueError("requires must be a sequence of nonempty agent names")
         self._registrations[registration.agent_type] = registration
 
     def get(self, agent_type: str) -> AgentRegistration:
@@ -70,6 +76,26 @@ class AgentRegistry:
             self._registrations[key].to_dict()
             for key in sorted(self._registrations)
         ]
+
+    def ordered(self, preferred: Sequence[str] = ()) -> List[str]:
+        """Stable topological order, validated before any agent executes."""
+        pending = list(dict.fromkeys([
+            *[name for name in preferred if name in self._registrations],
+            *sorted(self._registrations),
+        ]))
+        for name in pending:
+            missing = set(self.get(name).requires) - set(self._registrations)
+            if missing:
+                raise ValueError(f"agent '{name}' has missing dependencies: {sorted(missing)}")
+        ordered: List[str] = []
+        while pending:
+            ready = next((name for name in pending
+                          if set(self.get(name).requires) <= set(ordered)), None)
+            if ready is None:
+                raise ValueError(f"cyclic agent dependencies: {pending}")
+            ordered.append(ready)
+            pending.remove(ready)
+        return ordered
 
 
 @dataclass

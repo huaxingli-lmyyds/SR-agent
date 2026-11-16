@@ -59,7 +59,9 @@ def TrainModel(config_path: Optional[str] = None,
                checkpoint_selection: str = "legacy",
                attempt_id: Optional[str] = None,
                continuation_json: Optional[str] = None,
-               frozen_data_json: Optional[str] = None) -> str:
+               frozen_data_json: Optional[str] = None,
+               prepared_data_json: Optional[str] = None,
+               training_control_json: Optional[str] = None) -> str:
     """
     通过注册的模型、任务和 Runner 适配器执行训练。
     训练完成后会自动保存实验记录，包括配置、指标和产物。
@@ -247,6 +249,22 @@ def TrainModel(config_path: Optional[str] = None,
         apply_runtime_deadline(overrides, runtime_deadline_epoch, "training")
         if continuation_json:
             overrides["_hpo_continuation"] = json.loads(continuation_json)
+        if prepared_data_json:
+            from agent.data_processing.preparation import prepared_training_overrides
+
+            prepared = json.loads(prepared_data_json)
+            if Path(prepared["root"]).resolve() != Path(df).resolve():
+                raise ValueError("prepared data root differs from training data_folder")
+            overrides.update(prepared_training_overrides(prepared))
+            overrides["_prepared_data"] = prepared
+        if training_control_json:
+            from agent.hpo.training_control import EpochTrainingController
+
+            if not getattr(runner_adapter, "supports_training_control", False):
+                raise ValueError(f"runner {runner_name} does not support epoch training control")
+            specification = json.loads(training_control_json)
+            EpochTrainingController(specification)
+            overrides["_hpo_training_control"] = specification
         if frozen_data_json:
             from agent.hpo.protocol import file_sha256
             frozen = json.loads(frozen_data_json)

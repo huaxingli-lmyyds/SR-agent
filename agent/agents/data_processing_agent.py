@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Union
 from agent.agents.base_agent import LangGraphAgent
 from agent.agents.communication import AgentTaskRequest, AgentTaskResult
 from agent.data_processing.handoff import build_data_handoff
+from agent.data_processing.feedback import normalize_feedback
 from agent.data_processing.registry import PROCESSORS
 from agent.data_processing.workflow import DataProcessingWorkflow
 from agent.memory import EpisodeMemory, MemoryScope, MemoryService
@@ -124,11 +125,28 @@ class DataProcessingAgent(LangGraphAgent):
             or processing_config.get("operations")
             or []
         )
+        preparation = context_processing.get("prepare")
+        if preparation is None:
+            preparation = processing_config.get("prepare")
+        if preparation is not None and preparation is not False:
+            from agent.data_processing.preparation import PreparationOptions
+
+            settings = {} if preparation is True else preparation
+            options = PreparationOptions.from_dict(settings)
+            requested_operations = [*requested_operations, {
+                "operation": "prepare_speaker_dataset",
+                "parameters": options.__dict__,
+                "reason": "Prepare a frozen speaker-disjoint data protocol from raw audio.",
+            }]
         quality_policy = (
             context_processing.get("quality_policy")
             or processing_config.get("quality_policy")
             or {}
         )
+        if preparation is not None and preparation is not False:
+            quality_policy = dict(quality_policy)
+            quality_policy.setdefault("expected_sample_rates", [options.sample_rate])
+        feedback = normalize_feedback(request.context.get("hpo_feedback"), data_folder)
         self.tracker.update_data_processing_experiment(
             str(experiment_id),
             status="running",
@@ -136,27 +154,38 @@ class DataProcessingAgent(LangGraphAgent):
                 "data_processing": {
                     "objective": request.objective,
                     "workflow": "langgraph",
-                    "hpo_feedback": request.context.get("hpo_feedback"),
+                    "hpo_feedback": feedback,
                     "requested_operations": requested_operations,
                     "input_dataset_uri": data_folder,
                 }
             },
         )
-        state = workflow.run(
-            {
-                "dataset_uri": data_folder,
-                "dataset_type": request.context.get("dataset_type", "auto"),
-                "task_type": self.task_type,
-                "target_goal": request.context.get("target_goal")
-                or request.objective,
-                "output_path": str(version_path),
-                "requested_operations": requested_operations,
-                "quality_policy": quality_policy,
-                "training_exclusion_pairs": (
-                    request.context.get("runtime_options") or {}
-                ).get("training_exclusion_pairs"),
-            }
-        )
+        try:
+            state = workflow.run(
+                {
+                    "dataset_uri": data_folder,
+                    "dataset_type": request.context.get("dataset_type", "auto"),
+                    "task_type": self.task_type,
+                    "target_goal": request.context.get("target_goal")
+                    or request.objective,
+                    "output_path": str(version_path),
+                    "requested_operations": requested_operations,
+                    "quality_policy": quality_policy,
+                    "hpo_feedback": request.context.get("hpo_feedback"),
+                    "consultation_mode": context_processing.get(
+                        "consultation_mode", processing_config.get("consultation_mode", "always")),
+                    "training_exclusion_pairs": (
+                        request.context.get("runtime_options") or {}
+                    ).get("training_exclusion_pairs"),
+                }
+            )
+        except Exception as exc:
+            self.tracker.update_data_processing_experiment(
+                str(experiment_id), status="failed",
+                duration=(datetime.now() - started_at).total_seconds(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         if state.get("status") != "success":
             error = state.get("error") or "data processing workflow failed"
             duration = (datetime.now() - started_at).total_seconds()
@@ -170,6 +199,7 @@ class DataProcessingAgent(LangGraphAgent):
                         "profile": state.get("profile"),
                         "plan": state.get("plan"),
                         "results": state.get("results"),
+                        "decision": state.get("decision"),
                     }
                 },
             )
@@ -209,6 +239,7 @@ class DataProcessingAgent(LangGraphAgent):
                     "dataset_version_path": str(version_path),
                     "file_hash_count": len(published.get("file_hashes") or {}),
                     "llm_advice": advice,
+                    "decision": state.get("decision"),
                 }
             },
         )
@@ -242,7 +273,8 @@ class DataProcessingAgent(LangGraphAgent):
         )
         return AgentTaskResult(
             status="success",
-            summary={"data_handoff": handoff},
+            summary={"data_handoff": handoff, "data_decision": state.get("decision"),
+                     "feedback_status": feedback["status"]},
             metrics={"data_quality": published.get("quality_metrics") or {}},
             artifacts=artifacts,
             recommendations=[advice] if advice else [],
@@ -271,6 +303,11 @@ class DataProcessingAgent(LangGraphAgent):
             "task_type": state.get("task_type"),
             "target_goal": state.get("target_goal"),
             "quality_metrics": profile.get("quality_metrics") or {},
+            "profile_coverage": {
+                key: ((profile.get("extensions") or {}).get("audio") or {}).get(key)
+                for key in ("probe_limit", "probe_limited", "signal_probe_count")
+            },
+            "hpo_feedback": state.get("hpo_feedback") or {"status": "absent"},
             "distributions": profile.get("distributions") or {},
             "issues": issues,
             "requested_operations": state.get("requested_operations") or [],

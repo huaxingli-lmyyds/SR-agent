@@ -4,6 +4,28 @@
 
 SR-agent is a multi-agent hyperparameter-optimization framework for speaker-recognition experiments. The project includes LangGraph orchestration, data-processing handoff, HPO strategy selection, trial scheduling, structured experiment records, and pluggable model/runner adapters.
 
+## Raw audio, agent extensions and training decisions
+
+Pass labelled raw recordings to the data agent with `--prepare-audio`. It creates
+portable train/dev manifests, speaker-disjoint HPO validation and final-test
+protocols, and an immutable handoff consumed by the training runner. Speaker
+labels come from directories or an explicit CSV; unlabelled identities are not
+guessed. Existing prepared directories can also be reused without new splits.
+
+```bash
+python main.py --data-folder /data/raw_speakers --prepare-audio \
+  --output-dir agent/experiments/raw_run \
+  --training-control-json '{"min_epochs":3,"patience":3}'
+```
+
+Epoch control is opt-in. HPO freezes warmup, plateau and comparable-peer rules
+before a Trial; the runner applies them at validation boundaries. Early exits
+are recorded as stopped Trials, excluded from promotion and primary-metric
+selection. Confirmation runs retain their full budgets. Additional agents declare
+dependencies through `AgentRegistration.requires` and receive validated previous
+results and data handoffs. See [usage and extension contracts](docs/AGENT_EXTENSIONS.md)
+for data requirements, configuration, feedback, resume behavior and validation.
+
 ## Real Demo
 
 The submission demo is in `demo/` and uses the real `speechbrain` runner. It is not a fake execution path.

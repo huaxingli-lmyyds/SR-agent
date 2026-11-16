@@ -81,6 +81,19 @@ class HPOFeedbackAnalyzer:
             ),
             "completed_trials": len(completed),
             "failed_trials": failure_total,
+            "training_control": {
+                "stopped_trials": sum(t.status == "stopped" and bool(t.cost.get("training_control")) for t in trials),
+                "stop_reasons": dict(Counter(t.stop_reason for t in trials if t.status == "stopped" and t.cost.get("training_control"))),
+                "stopped_examples": [
+                    {"trial_id": t.trial_id, "parameters": dict(t.parameters),
+                     "allocated_budget": t.budget.to_dict(), "rung": t.rung,
+                     "observed_epoch": t.cost["training_control"].get("epoch"),
+                     "reason": t.stop_reason,
+                     "curve": self._curve_summary(t.intermediate_metrics)}
+                    for t in trials if t.status == "stopped" and t.cost.get("training_control")
+                ][-5:],
+                "metric_role": "internal_dev_proxy_not_primary_objective",
+            },
             "terminal_trials": terminal_count,
             "failure_clusters": dict(failures),
             "dominant_failure": failures.most_common(1)[0][0] if failures else None,

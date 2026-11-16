@@ -1,6 +1,5 @@
 """Budgeted, restart-safe confirmation that never feeds the search sampler."""
 from collections import defaultdict
-from copy import deepcopy
 import json
 from pathlib import Path
 import random
@@ -121,6 +120,7 @@ def run_confirmation(agent, tracker, service, campaign, search_best, search_expe
             source = tracker.get_experiment(candidate["source_experiment"])
             source_study = service.load_study(candidate["source_experiment"])
             runtime = {**options, "promotion_training": "restart", "managed_execution": True}
+            runtime.pop("training_control", None)  # Confirmation uses its full fixed budget.
             source_trial = service.load_trial(candidate["source_experiment"], candidate["source_trial_id"])
             observed = source_trial.cost.get("managed_training_result", {}).get("extensions", {}).get("speechbrain", {}).get("runtime", {})
             if observed.get("training_manifests"):

@@ -706,11 +706,18 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         data_fraction = None
         checkpoint_selection = "legacy"
         continuation = {}
+        prepared_data = None
+        training_control = None
         if isinstance(overrides, dict):
             normalized_overrides, run_opts = _runtime_options_from_overrides(overrides)
             data_fraction = normalized_overrides.pop("_hpo_data_fraction", None)
             checkpoint_selection = normalized_overrides.pop("_hpo_checkpoint_selection", "legacy")
             continuation = normalized_overrides.pop("_hpo_continuation", {})
+            prepared_data = normalized_overrides.pop("_prepared_data", None)
+            training_control = normalized_overrides.pop("_hpo_training_control", None)
+            if prepared_data:
+                from agent.data_processing.preparation import prepared_training_overrides
+                normalized_overrides.update(prepared_training_overrides(prepared_data))
             normalized_overrides.pop("_hpo_max_duration_seconds", None)
         elif isinstance(overrides, list):
             normalized_overrides = overrides
@@ -738,6 +745,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
         if err:
             return {"status": "failed", "valid_error_rate": None, "error": err}
         hparams["hpo_checkpoint_selection"] = checkpoint_selection
+        hparams["hpo_training_control"] = training_control
         _apply_distributed_batch_size(hparams, distributed_runtime)
 
         data_folder = hparams.get("data_folder")
@@ -752,71 +760,72 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
             if resolved is not None:
                 hparams[key] = str(resolved)
 
-        splits = ["train", "dev"]
-        required_files = _required_prep_files(splits, hparams["verification_file"])
+        if not prepared_data:
+            splits = ["train", "dev"]
+            required_files = _required_prep_files(splits, hparams["verification_file"])
 
-        def prepare_cached_inputs() -> None:
-            cache_result = _prepare_cached_data(
-                "train",
-                hparams,
-                splits,
-                hparams["sentence_len"],
-                hparams.get("random_chunk", False),
-            )
-            if cache_result.get("status") == "success":
-                _link_from_cache(
-                    Path(cache_result["save_folder"]),
-                    Path(hparams["save_folder"]),
-                    required_files,
+            def prepare_cached_inputs() -> None:
+                cache_result = _prepare_cached_data(
+                    "train",
+                    hparams,
+                    splits,
+                    hparams["sentence_len"],
+                    hparams.get("random_chunk", False),
                 )
-            elif hparams.get("prep_cache_root"):
-                raise RuntimeError(
-                    f"isolated data preparation failed: {cache_result.get('error')}"
-                )
-
-        if distributed_runtime["enabled"]:
-            sb.utils.distributed.run_on_main(prepare_cached_inputs)
-        else:
-            prepare_cached_inputs()
-        if all((Path(hparams["save_folder"]) / name).exists() for name in required_files):
-            hparams["skip_prep"] = True
-
-        veri_file_path = os.path.join(
-            hparams["save_folder"], os.path.basename(hparams["verification_file"])
-        )
-        if not Path(veri_file_path).exists():
-            if distributed_runtime["enabled"]:
-                def download_verification_file() -> None:
-                    recipe.download_file(
-                        hparams["verification_file"], veri_file_path
+                if cache_result.get("status") == "success":
+                    _link_from_cache(
+                        Path(cache_result["save_folder"]),
+                        Path(hparams["save_folder"]),
+                        required_files,
+                    )
+                elif hparams.get("prep_cache_root"):
+                    raise RuntimeError(
+                        f"isolated data preparation failed: {cache_result.get('error')}"
                     )
 
-                sb.utils.distributed.run_on_main(download_verification_file)
-            else:
-                recipe.download_file(hparams["verification_file"], veri_file_path)
-
-        if not hparams.get("skip_prep", False):
-            preparation_kwargs = {
-                "data_folder": hparams["data_folder"],
-                "save_folder": hparams["save_folder"],
-                "verification_pairs_file": veri_file_path,
-                "splits": splits,
-                "split_ratio": hparams["split_ratio"],
-                "seg_dur": hparams["sentence_len"],
-                "random_segment": hparams.get("random_chunk", False),
-                "amp_th": hparams.get("amp_th", 5e-4),
-                "split_speaker": hparams.get("split_speaker", False),
-                "skip_prep": hparams["skip_prep"],
-            }
-            if hparams.get("split_unit") is not None:
-                preparation_kwargs["split_unit"] = hparams["split_unit"]
             if distributed_runtime["enabled"]:
-                sb.utils.distributed.run_on_main(
-                    prepare_module.prepare_voxceleb,
-                    kwargs=preparation_kwargs,
-                )
+                sb.utils.distributed.run_on_main(prepare_cached_inputs)
             else:
-                prepare_module.prepare_voxceleb(**preparation_kwargs)
+                prepare_cached_inputs()
+            if all((Path(hparams["save_folder"]) / name).exists() for name in required_files):
+                hparams["skip_prep"] = True
+
+            veri_file_path = os.path.join(
+                hparams["save_folder"], os.path.basename(hparams["verification_file"])
+            )
+            if not Path(veri_file_path).exists():
+                if distributed_runtime["enabled"]:
+                    def download_verification_file() -> None:
+                        recipe.download_file(
+                            hparams["verification_file"], veri_file_path
+                        )
+
+                    sb.utils.distributed.run_on_main(download_verification_file)
+                else:
+                    recipe.download_file(hparams["verification_file"], veri_file_path)
+
+            if not hparams.get("skip_prep", False):
+                preparation_kwargs = {
+                    "data_folder": hparams["data_folder"],
+                    "save_folder": hparams["save_folder"],
+                    "verification_pairs_file": veri_file_path,
+                    "splits": splits,
+                    "split_ratio": hparams["split_ratio"],
+                    "seg_dur": hparams["sentence_len"],
+                    "random_segment": hparams.get("random_chunk", False),
+                    "amp_th": hparams.get("amp_th", 5e-4),
+                    "split_speaker": hparams.get("split_speaker", False),
+                    "skip_prep": hparams["skip_prep"],
+                }
+                if hparams.get("split_unit") is not None:
+                    preparation_kwargs["split_unit"] = hparams["split_unit"]
+                if distributed_runtime["enabled"]:
+                    sb.utils.distributed.run_on_main(
+                        prepare_module.prepare_voxceleb,
+                        kwargs=preparation_kwargs,
+                    )
+                else:
+                    prepare_module.prepare_voxceleb(**preparation_kwargs)
 
         configured_speaker_count = hparams.get("out_n_neurons")
         if configured_speaker_count is not None:
@@ -897,6 +906,7 @@ def run_training(config_path: str, overrides: Union[List[str], Dict[str, Any]]) 
                 "training_speaker_count": actual_speaker_count,
                 "final_learning_rate_schedule": scheduler_snapshot(hparams["lr_annealing"]),
                 "checkpoint_selection": checkpoint_selection,
+                "training_control": getattr(speaker_brain, "hpo_training_decision", {}),
                 "continuation": hparams.get("hpo_continuation", {}),
                 "training_manifests": {key: {"path": str(hparams[key]), "sha256": __import__("hashlib").sha256(Path(hparams[key]).read_bytes()).hexdigest()}
                     for key in ("train_annotation", "valid_annotation")},

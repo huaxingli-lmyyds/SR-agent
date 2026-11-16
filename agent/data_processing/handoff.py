@@ -24,6 +24,7 @@ def build_data_handoff(
         "training_allowed": decision.get("training_allowed"),
         "blockers": decision.get("blockers") or [],
         "warnings": decision.get("warnings") or [],
+        **({"prepared_data": version["prepared_data"]} if version.get("prepared_data") else {}),
         "data_processing_experiment_id": str(experiment_id)
         if experiment_id
         else None,
@@ -104,6 +105,7 @@ def resolve_data_handoff(
             or handoff.get("quality_blockers")
             or [],
             "warnings": handoff.get("warnings") or [],
+            **({"prepared_data": handoff["prepared_data"]} if handoff.get("prepared_data") else {}),
         }
 
     return {

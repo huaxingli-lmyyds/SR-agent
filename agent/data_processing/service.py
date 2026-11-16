@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
+import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +29,8 @@ from .materialization import (
     validate_materialization_mode,
 )
 from .quality import DefaultQualityGate
+from .preparation import PrepareAudioProcessor
+from .impact import impact_rejection
 from .scope import validate_mutation_scope
 from .registry import PROCESSORS, PROFILERS, register_processor
 
@@ -235,6 +239,8 @@ def build_processing_plan(
             continue
         advisory = bool(requested.get("_advisory"))
         try:
+            if advisory and "prepare_speaker_dataset" in seen:
+                raise ValueError("advisor cannot append operations after frozen dataset preparation")
             processor = PROCESSORS.get(
                 operation_name, profile.dataset.dataset_type
             )
@@ -242,6 +248,8 @@ def build_processing_plan(
                 validate_mutation_scope(profile.dataset)
             parameters = dict(requested.get("parameters") or {})
             if advisory:
+                if not getattr(processor, "advisor_allowed", True):
+                    raise ValueError("advisor cannot create or change dataset splits")
                 for name, rule in getattr(
                     processor, "parameter_schema", {}
                 ).items():
@@ -279,7 +287,10 @@ def build_processing_plan(
                 ),
             )
         )
-    for issue in profile.issues:
+    if "prepare_speaker_dataset" in seen:
+        if operations[-1].operation != "prepare_speaker_dataset":
+            raise ValueError("prepare_speaker_dataset must be the final operation to freeze splits")
+    for issue in ([] if "prepare_speaker_dataset" in seen else profile.issues):
         # A warning is evidence to review, not permission to discard speech.
         # In particular, long recordings remain useful for random chunking.
         if (
@@ -636,7 +647,17 @@ def execute_plan(
             if callable(preview_method)
             else OperationImpact(operation.operation)
         )
-        result = processor.execute(current_dataset, parameters)
+        rejection = (impact_rejection(impact, policy)
+                     if operation.operation not in AUDIT_OPERATIONS else None)
+        if rejection:
+            discard = getattr(processor, "discard_preview", None)
+            if callable(discard):
+                discard(parameters)
+        result = (DataOperationResult(
+            status="failed", operation=operation.operation,
+            error=f"impact guard blocked operation: {rejection}",
+            details={"rejection_reason": rejection},
+        ) if rejection else processor.execute(current_dataset, parameters))
         result.impact = impact.to_dict()
         result.impact.pop("operation", None)
         result.parameters = {
@@ -769,13 +790,23 @@ def publish_dataset_version(
         quality_decision=quality_decision,
         file_hashes=file_hashes,
         hashes_complete=hashes_complete,
+        prepared_data=dict((final_output.details if final_output else dataset.metadata).get("prepared_data") or {}),
         created_at=datetime.now().isoformat(),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(record.to_dict(), indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # Readers see either the previous complete version or the new complete version.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent,
+                                         prefix=".dataset-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(record.to_dict(), stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, output_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return record
 
 
@@ -950,3 +981,4 @@ def _version_id(
 register_processor(ValidateDatasetProcessor())
 register_processor(FilterManifestRowsProcessor())
 register_audio_components()
+register_processor(PrepareAudioProcessor())

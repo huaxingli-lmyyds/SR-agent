@@ -34,6 +34,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-name", type=str, default="GLM-4.7")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--objective", type=str, default="Improve the primary model metric")
+    parser.add_argument("--prepare-audio", action="store_true", help="Prepare labelled raw audio from --data-folder into frozen training, dev, HPO validation and final-test splits.")
+    parser.add_argument("--data-preparation-json", type=_json_object, default=None, help="Preparation options: seed, fractions, sample_rate and optional labels_csv.")
+    parser.add_argument("--training-control-json", type=_json_object, default=None, help="Enable HPO epoch control with validated warmup, plateau and peer comparison rules.")
     parser.add_argument(
         "--strategy",
         choices=[
@@ -316,6 +319,13 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if args.data_folder is not None:
         context["data_folder"] = args.data_folder
         context["dataset_uri"] = args.data_folder
+    if args.prepare_audio or args.data_preparation_json is not None:
+        if args.resume_experiment_id:
+            raise SystemExit("resume uses the frozen prepared dataset; do not request new splits")
+        from agent.data_processing.preparation import PreparationOptions
+
+        options = PreparationOptions.from_dict(args.data_preparation_json)
+        context["data_processing"] = {"prepare": options.__dict__}
     if args.search_space_json is not None:
         if not isinstance(args.search_space_json, dict):
             raise SystemExit("--search-space-json must be a JSON object")
@@ -323,6 +333,10 @@ def build_context(args: argparse.Namespace) -> dict[str, Any]:
     if args.target_value is not None:
         context["target_value"] = args.target_value
     runtime_options: dict[str, Any] = {}
+    if args.training_control_json is not None:
+        from dataclasses import asdict
+        from agent.hpo.training_control import TrainingControlOptions
+        runtime_options["training_control"] = asdict(TrainingControlOptions.from_dict(args.training_control_json))
     from agent.hpo.execution_options import KEYS
     for key in ("decision_opportunities", "checkpoint_selection", *KEYS):
         if getattr(args, key, None) is not None:

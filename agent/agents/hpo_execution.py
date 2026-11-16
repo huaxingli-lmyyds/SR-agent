@@ -23,6 +23,16 @@ class TrialExecutor:
     runner: str
     resource_budget: CampaignResourceBudget | None = None
 
+    def _training_control(self, trial):
+        if "training_control" not in self.runtime_options:
+            return None
+        from agent.hpo.service import HPOService
+        from agent.hpo.training_control import build_trial_control
+        from agent.utils import ExperimentTracker
+
+        service = HPOService(ExperimentTracker(self.experiments_dir))
+        return json.dumps(build_trial_control(service, service.load_study(self.experiment_id), trial, self.runtime_options["training_control"]))
+
     def _invoke_stage(self, trial, attempt, tool, payload, stage, gpu_count):
         resources = self.resource_budget
         experiment_id = self.experiment_id
@@ -107,6 +117,8 @@ class TrialExecutor:
                     "training_exclusion_pairs": runtime_options.get(
                         "training_exclusion_pairs"
                     ),
+                    "prepared_data_json": json.dumps(runtime_options["prepared_data"]) if runtime_options.get("prepared_data") else None,
+                    "training_control_json": self._training_control(trial),
                     "task_type": task_type,
                     "model_family": model_family,
                     "implementation": implementation,
@@ -154,6 +166,14 @@ class TrialExecutor:
                     "attempt_evaluation_gpu_seconds": 0.0,
                 },
             }
+        from agent.hpo.training_control import stopped_training_result
+
+        stopped = stopped_training_result(train_result)
+        if stopped:
+            stopped["cost"].update(attempt_training_seconds=training_seconds,
+                                   attempt_training_gpu_seconds=training_seconds * training_gpu_count,
+                                   training_world_size=training_world_size)
+            return stopped
         # Bind evaluation to this attempt, not the first historical artifact.
         current_checkpoint = next(
             (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -30,11 +31,7 @@ class OrchestrationDecisionPolicy:
     """Choose registered agents deterministically; registry additions are automatic."""
 
     def order(self, registry: AgentRegistry) -> List[str]:
-        preferred = ["data_processing_agent", "hpo_agent"]
-        available = [item["agent_type"] for item in registry.describe()]
-        return [item for item in preferred if item in available] + [
-            item for item in available if item not in preferred
-        ]
+        return registry.ordered(["data_processing_agent", "hpo_agent"])
 
     def order_for_context(
         self,
@@ -42,10 +39,12 @@ class OrchestrationDecisionPolicy:
         context: Dict[str, Any],
     ) -> List[str]:
         if context.get("resume_experiment_id"):
-            available = {
-                item["agent_type"] for item in registry.describe()
-            }
-            return ["hpo_agent"] if "hpo_agent" in available else []
+            ordered = self.order(registry)
+            selected = {"hpo_agent"}
+            for name in ordered:
+                if set(registry.get(name).requires) & selected:
+                    selected.add(name)
+            return [name for name in ordered if name in selected]
         return self.order(registry)
 
 
@@ -86,19 +85,23 @@ class OrchestrationWorkflow:
         return graph.compile()
 
     def run(self, context: Dict[str, Any], budget: Dict[str, Any]) -> OrchestrationGraphState:
+        self.registry.ordered()  # Reject invalid graphs before advice or dispatch.
         return self.graph.invoke(
             {
                 "context": context,
                 "budget": budget,
                 "records": [],
                 "latest_results": {},
-            }
+            },
+            config={"recursion_limit": max(25, 2 * len(self.registry.describe()) + 5)},
         )
 
     def _plan(self, state: OrchestrationGraphState) -> Dict[str, Any]:
         descriptions = self.registry.describe()
         try:
             advice = self.advisor(descriptions, state.get("context") or {}) if self.advisor else {}
+            if not isinstance(advice, dict):
+                raise ValueError("coordination advisor must return an object")
         except Exception as exc:
             advice = {"advice_error": f"{type(exc).__name__}: {exc}"}
         context = state.get("context") or {}
@@ -130,13 +133,34 @@ class OrchestrationWorkflow:
         action = registration.actions[0]
         request = self.request_factory(dict(state.get("context") or {}), dict(state.get("budget") or {}))
         request.action = action
-        record = self.dispatcher.dispatch(agent_type, request)
+        latest = dict(state.get("latest_results") or {})
+        dependencies = list(registration.requires)
+        # HPO owns validation of the saved data protocol when resuming a study.
+        if agent_type == "hpo_agent" and (state.get("context") or {}).get("resume_experiment_id"):
+            dependencies = [name for name in dependencies if name != "data_processing_agent"]
+        blocked = [name for name in dependencies if latest.get(name, {}).get("status") != "success"]
+        if blocked:
+            now = datetime.now().isoformat()
+            record = TaskExecutionRecord(
+                agent_type, action, request.to_dict(),
+                {"status": "failed", "request_id": request.request_id,
+                 "error": "upstream dependencies did not succeed",
+                 "summary": {"dispatch_status": "blocked", "blocked_by": blocked}},
+                now, now,
+            )
+        else:
+            record = self.dispatcher.dispatch(agent_type, request)
         records = list(state.get("records") or [])
         records.append(record)
-        latest = dict(state.get("latest_results") or {})
         latest[agent_type] = record.result
         context = dict(state.get("context") or {})
         context["previous_results"] = latest
+        if record.status == "success" and agent_type == "hpo_agent":
+            summary = record.result.get("summary") or {}
+            if summary.get("data_handoff"):
+                context["data_handoff"] = summary["data_handoff"]
+            if summary.get("hpo_feedback"):
+                context["hpo_feedback"] = summary["hpo_feedback"]
         return {"records": records, "latest_results": latest, "context": context}
 
     def _complete(self, state: OrchestrationGraphState) -> Dict[str, Any]:

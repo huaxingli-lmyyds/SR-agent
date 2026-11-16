@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from .contracts import QualityPolicy
+from .feedback import consultation_opportunity, normalize_feedback
 from .scope import bind_evaluation_scope
 from .service import (
     build_processing_plan,
@@ -31,6 +32,9 @@ class DataProcessingGraphState(TypedDict, total=False):
     quality_policy: Dict[str, Any]
     profile: Dict[str, Any]
     advice: Dict[str, Any]
+    hpo_feedback: Dict[str, Any]
+    consultation_mode: str
+    decision: Dict[str, Any]
     plan: Dict[str, Any]
     results: list[Dict[str, Any]]
     published_version: Dict[str, Any]
@@ -108,6 +112,7 @@ class DataProcessingWorkflow:
         return graph.compile()
 
     def run(self, state: DataProcessingGraphState) -> DataProcessingGraphState:
+        consultation_opportunity(state)  # Validate configuration before processing.
         return self.graph.invoke(state)
 
     def _inspect(self, state: DataProcessingGraphState) -> Dict[str, Any]:
@@ -119,18 +124,35 @@ class DataProcessingWorkflow:
         self._policy = QualityPolicy.for_task(
             self._dataset.task_type, state.get("quality_policy")
         )
-        bind_evaluation_scope(self._dataset, state.get("training_exclusion_pairs"))
+        exclusion_pairs = state.get("training_exclusion_pairs")
+        protocol = Path(self._dataset.source_uri) / "prepared_protocol.json"
+        if protocol.is_file():
+            from .preparation import prepared_data_reference
+
+            prepared = prepared_data_reference(self._dataset.source_uri)
+            self._dataset.metadata["prepared_data"] = prepared
+            exclusion_pairs = str(protocol.parent / "training_exclusion_pairs.txt")
+            if "expected_sample_rates" not in (state.get("quality_policy") or {}):
+                self._policy.expected_sample_rates = [prepared["sample_rate"]]
+        bind_evaluation_scope(self._dataset, exclusion_pairs)
         self._profile = profile_dataset(self._dataset, self._policy)
-        return {"profile": self._profile.to_dict()}
+        return {"profile": self._profile.to_dict(),
+                "hpo_feedback": normalize_feedback(state.get("hpo_feedback"), state["dataset_uri"])}
 
     def _advise(self, state: DataProcessingGraphState) -> Dict[str, Any]:
+        opportunity = consultation_opportunity(state)
         if self.strategy_advisor is None:
-            return {"advice": {}}
+            return {"advice": {}, "decision": {**opportunity, "status": "disabled"}}
+        if not opportunity["should_consult"]:
+            return {"advice": {}, "decision": {**opportunity, "status": "skipped"}}
         try:
             advice = self.strategy_advisor(dict(state))
+            if not isinstance(advice, dict):
+                raise ValueError("data advisor must return an object")
         except Exception as exc:
             advice = {"advice_error": f"{type(exc).__name__}: {exc}"}
-        return {"advice": dict(advice or {})}
+        return {"advice": dict(advice or {}), "decision": {
+            **opportunity, "status": "failed" if "advice_error" in advice else "completed"}}
 
     def _build_plan(self, state: DataProcessingGraphState) -> Dict[str, Any]:
         requested = _requested_operations(state)

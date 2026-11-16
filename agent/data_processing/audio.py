@@ -533,6 +533,10 @@ class _AudioSubsetProcessor:
             f"{output.name}.selection.jsonl"
         )
 
+    def discard_preview(self, parameters: Dict[str, Any]) -> None:
+        """Release a selection when the controller rejects its impact."""
+        self._selection_path(parameters).unlink(missing_ok=True)
+
     def _accept(self, path: Path, parameters: Dict[str, Any]) -> bool:
         raise NotImplementedError
 
@@ -1090,7 +1094,7 @@ def _resolve_audio_path(
 ) -> Path | None:
     if not raw_path:
         return None
-    value = raw_path.replace("{data_root}", str(source)).replace(
+    value = raw_path.replace("$data_root", str(source)).replace("{data_root}", str(source)).replace(
         "{dataset_root}", str(source)
     )
     candidate = Path(value)
@@ -1147,6 +1151,8 @@ def _speaker(source: Path, path: Path) -> str | None:
         parts = path.resolve().relative_to(source).parts
     except ValueError:
         return path.parent.name or None
+    if len(parts) >= 3 and parts[0].lower() == "wav":
+        return parts[1]
     # VoxCeleb: [wav/]idNNNN/video_id/utterance.wav. A video's name is
     # never the speaker ID, even when the caller passes wav/ as its root.
     for index, part in enumerate(parts[:-2]):

@@ -66,8 +66,17 @@ class QualityPolicy:
     require_valid_trials: bool = True
     split_roles: Dict[str, str] = field(default_factory=dict)
     hash_file_limit: int = 10000
+    max_operation_affected_fraction: Optional[float] = None
+    max_operation_output_bytes: Optional[int] = None
 
     def __post_init__(self) -> None:
+        cap = self.max_operation_affected_fraction
+        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, float))
+                                or not 0 <= cap <= 1):
+            raise ValueError("max_operation_affected_fraction must be between 0 and 1")
+        size = self.max_operation_output_bytes
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
+            raise ValueError("max_operation_output_bytes must be a nonnegative integer")
         roles = {"train", "internal_dev", "hpo_validation", "final_test", "cohort"}
         if not isinstance(self.split_roles, dict) or any(
             not isinstance(name, str)
@@ -132,6 +141,8 @@ class QualityPolicy:
                 "dev": "internal_dev",
                 "valid": "internal_dev",
                 "validation": "hpo_validation",
+                "hpo_validation": "hpo_validation",
+                "final_test": "final_test",
                 "enrol": "final_test",
                 "test": "final_test",
             }
@@ -256,6 +267,7 @@ class DatasetVersion:
     hashes_complete: bool = True
     created_at: str = ""
     created_by: str = "data_processing_agent"
+    prepared_data: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

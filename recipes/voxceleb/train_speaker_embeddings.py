@@ -95,6 +95,8 @@ class SpeakerBrain(sb.core.Brain):
         super().on_fit_start()
         from agent.runners.continuation_state import restore_state
         restore_state(self)
+        from agent.hpo.training_control import initialize_training_control
+        initialize_training_control(self)
 
     def _fit_valid(self, valid_set, epoch, enable):
         super()._fit_valid(valid_set, epoch, enable)
@@ -142,6 +144,12 @@ class SpeakerBrain(sb.core.Brain):
                     ckpt_predicate=lambda checkpoint: checkpoint.path not in keep)
             else:
                 self.checkpointer.save_and_keep_only(meta=metadata, min_keys=["ErrorRate"])
+            from agent.hpo.training_control import observe_training_epoch
+            observe_training_epoch(self, epoch, {
+                "train_loss": self.train_stats["loss"],
+                "valid_loss": stage_loss,
+                "valid_error_rate": stage_stats["ErrorRate"],
+            })
 
 
 

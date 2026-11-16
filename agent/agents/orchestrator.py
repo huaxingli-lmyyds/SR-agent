@@ -146,6 +146,7 @@ class CoordinatorAgent(AdvisoryAgentBase):
                 enable_llm_advisor=self.enable_llm_advisor,
             ),
             "Run a model-agnostic HPO study.",
+            requires=("data_processing_agent",),
         ))
         return registry
 
@@ -230,7 +231,9 @@ class CoordinatorAgent(AdvisoryAgentBase):
 
         workflow_completion_policy = self.completion_policy
         if run_context.get("resume_experiment_id"):
-            workflow_completion_policy = CompletionPolicy({"hpo_agent"})
+            from .orchestration_workflow import OrchestrationDecisionPolicy
+            resumed_agents = OrchestrationDecisionPolicy().order_for_context(self.registry, run_context)
+            workflow_completion_policy = CompletionPolicy(self.completion_policy.required_agent_types & set(resumed_agents))
         workflow = OrchestrationWorkflow(
             self.registry,
             dispatcher,
@@ -243,7 +246,15 @@ class CoordinatorAgent(AdvisoryAgentBase):
             status="running",
             extensions={"orchestration": {"workflow": "langgraph", "registered_agents": self.registry.describe()}},
         )
-        state = workflow.run(workflow_context, workflow_budget)
+        try:
+            state = workflow.run(workflow_context, workflow_budget)
+        except Exception as exc:
+            self.manage_tracker.update_orchestration_experiment(
+                self._manage_experiment_id, status="failed",
+                duration=(datetime.now() - self._run_started_at).total_seconds(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         records = state.get("records") or []
         for record in records:
             self._merge_experiment_ids(record.result.get("experiment_ids") or {})
@@ -395,6 +406,8 @@ class CoordinatorAgent(AdvisoryAgentBase):
     def _compact_agent_summary(agent_type: str, summary: Dict[str, Any]) -> Dict[str, Any]:
         if not summary:
             return {}
+        if summary.get("dispatch_status") == "blocked":
+            return {"dispatch_status": "blocked", "blocked_by": summary.get("blocked_by") or []}
         if agent_type == "hpo_agent" or "best_trial_id" in summary:
             campaign = summary.get("campaign") or {}
             return {
@@ -413,7 +426,8 @@ class CoordinatorAgent(AdvisoryAgentBase):
                 "data_handoff": summary.get("data_handoff") or {},
             }
         if agent_type == "data_processing_agent":
-            return {"data_handoff": summary.get("data_handoff") or {}}
+            return {key: summary[key] for key in ("data_handoff", "data_decision", "feedback_status")
+                    if key in summary}
         if "dataset_version" in summary:
             return {
                 "dataset_version": summary.get("dataset_version") or {},

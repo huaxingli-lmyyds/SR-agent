@@ -14,7 +14,10 @@
     "Use only context.available_operations entries compatible with context.dataset_type. Parameters must come from that operation parameter_schema; omit protected advisor_allowed=false fields and workflow-internal fields such as _output_uri.",
     "Explicit context.requested_operations take priority and are already scheduled; do not duplicate or override them. If an operation cannot be justified by the supplied profile, leave it out.",
     "Proposals will be validated, previewed and quality-gated. Do not promise publication, successful cleaning, better model quality, or reduced training time before execution.",
-    "When no additional operation is justified, return suggested_operations=[] with concise diagnostics or notes. Never emit HPO parameters, agent routing or a prose report outside the JSON."
+    "When no additional operation is justified, return suggested_operations=[] with concise diagnostics or notes. Never emit HPO parameters, agent routing or a prose report outside the JSON.",
+    "Use profile_coverage to distinguish bounded probing from full inspection; null means unknown. Never generalize sampled quality counts to the whole dataset.",
+    "Only hpo_feedback with status=accepted is scoped validation evidence. Its metrics and diagnostics are hypotheses, not proof that data caused an HPO outcome. Do not use final-test evidence or request HPO changes.",
+    "Consultation success is not execution success or metric improvement. Operations remain subject to deterministic scope, parameter, preview-impact and post-processing quality gates."
   ],
   "task": "Review a compact dataset profile before data processing and propose only necessary, supported operations.",
   "response_contract": {

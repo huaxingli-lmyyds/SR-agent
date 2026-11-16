@@ -19,6 +19,7 @@ class SpeechBrainRunnerAdapter:
     default_evaluation_config: Optional[str] = None
     supported_implementations = {"speechbrain"}
     supported_model_families = {"*"}
+    supports_training_control = True
 
     def run_training(self, config_path: str, overrides: Dict[str, Any]) -> Dict[str, Any]:
         run_opts = dict(overrides.get("_run_opts") or {})

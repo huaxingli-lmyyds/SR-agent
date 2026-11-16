@@ -41,6 +41,7 @@ from agent.hpo import (
     study_confirmation_signature,
 )
 from agent.data_processing.handoff import resolve_data_handoff
+from agent.data_processing.feedback import export_hpo_feedback
 from agent.memory import EpisodeMemory, MemoryQuery, MemoryScope, MemoryService
 from agent.models import get_model_adapter
 from agent.prompt import render_prompt
@@ -227,6 +228,25 @@ class HPOAgent(LangGraphAgent):
         config = ConfigParser(self.config_path).load_config(resolve_references=True)
         data_handoff = resolve_data_handoff(request.context, config.get("data_folder"))
         data_folder = data_handoff["consumer_uri"]
+        prepared = data_handoff.get("prepared_data")
+        if prepared:
+            from agent.data_processing.preparation import validate_prepared_data
+            from agent.utils.path_tool import get_config_file
+
+            if Path(prepared["root"]).resolve() != Path(data_folder).resolve():
+                raise ValueError("prepared data root differs from handoff consumer_uri")
+            validate_prepared_data(prepared, verify_audio=True)
+            runtime = dict(request.context.get("runtime_options") or {})
+            for key, name in (("validation_pairs", "validation_pairs.txt"), ("training_exclusion_pairs", "training_exclusion_pairs.txt")):
+                expected = str(Path(data_folder) / name)
+                if runtime.get(key) and Path(runtime[key]).resolve() != Path(expected).resolve():
+                    raise ValueError(f"{key} conflicts with prepared data protocol")
+                runtime[key] = expected
+            defaults = {"ecapa_tdnn": "verification_ecapa.yaml", "resnet": "verification_resnet.yaml", "xvector": "verification_cosine_xvector.yaml"}
+            if not runtime.get("verification_config") and self.model_family in defaults:
+                runtime["verification_config"] = str(get_config_file(defaults[self.model_family]))
+            runtime["prepared_data"] = prepared
+            request.context["runtime_options"] = runtime
         output = resolve_config_value_path(config.get("output_folder"))
         self.memory_scope.dataset_key = data_folder
 
@@ -249,6 +269,11 @@ class HPOAgent(LangGraphAgent):
             runtime_options = freeze_ddp_runtime_options(runtime_options)
         from agent.hpo.execution_options import normalize_options
         runtime_options = normalize_options(runtime_options)
+        if "training_control" in runtime_options:
+            from dataclasses import asdict
+            from agent.hpo.training_control import TrainingControlOptions
+
+            runtime_options["training_control"] = asdict(TrainingControlOptions.from_dict(runtime_options["training_control"]))
         request.context["runtime_options"] = runtime_options
         controller_mode = str(
             request.context.get("controller_mode")
@@ -776,6 +801,7 @@ class HPOAgent(LangGraphAgent):
                 scheduled.trials,
             )
             campaign.study_summaries[-1]["resource_summary"] = {
+                "training_control": study_feedback.get("training_control") or {},
                 "failure_rate": study_feedback.get("failure_rate"),
                 "failure_clusters": study_feedback.get("failure_clusters") or {},
                 "cost_summary": study_feedback.get("cost_summary") or {},
@@ -871,6 +897,7 @@ class HPOAgent(LangGraphAgent):
                 "confirmation": campaign.control_state.get("confirmation", {"status": "disabled"}),
                 "studies": study_results,
                 "data_handoff": data_handoff,
+                "hpo_feedback": export_hpo_feedback(service.load_study(best_experiment_id), service.list_trials(best_experiment_id), data_handoff),
                 "pending_next_study_proposal": pending_next_study,
             },
             metrics=self._best_metric_record(best_trial, objectives[0]),
@@ -1001,12 +1028,15 @@ class HPOAgent(LangGraphAgent):
                     "resume DDP options conflict with the persisted Study "
                     "training runtime"
                 )
-        for key, default in (("decision_opportunities", False), ("checkpoint_selection", "legacy")):
+        for key, default in (("decision_opportunities", False), ("checkpoint_selection", "legacy"), ("prepared_data", None), ("training_control", None)):
             if key in runtime_options and runtime_options[key] != persisted_training_runtime.get(key, default):
                 raise ValueError(f"resume {key} conflicts with the persisted Study")
         from agent.hpo.execution_options import resume_options
         runtime_options = resume_options(runtime_options, persisted_training_runtime)
         runtime_options.update(persisted_training_runtime)
+        if runtime_options.get("prepared_data"):
+            from agent.data_processing.preparation import validate_prepared_data
+            validate_prepared_data(runtime_options["prepared_data"], verify_audio=True)
         if runner == "speechbrain":
             from agent.runners.speechbrain_validation import validate_verification_config
 
@@ -1230,6 +1260,7 @@ class HPOAgent(LangGraphAgent):
             }},
         )
         resumed_handoff = {
+            **({"prepared_data": runtime_options["prepared_data"]} if runtime_options.get("prepared_data") else {}),
             **dict(data_handoff),
             "consumer_uri": data_folder,
         }
@@ -1267,6 +1298,7 @@ class HPOAgent(LangGraphAgent):
                 "confirmation": campaign.control_state.get("confirmation", {"status": "disabled"}),
                 "resume_record": scheduled.advice.get("resume") or {},
                 "data_handoff": resumed_handoff,
+                "hpo_feedback": export_hpo_feedback(service.load_study(result_best_experiment_id), service.list_trials(result_best_experiment_id), resumed_handoff),
             },
             metrics=self._best_metric_record(result_best_trial, objective),
             artifacts=result_best_trial.artifacts,
@@ -1771,6 +1803,8 @@ class HPOAgent(LangGraphAgent):
                 "eval_precision",
                 "decision_opportunities",
                 "checkpoint_selection",
+                "prepared_data",
+                "training_control",
                 "managed_execution", "max_concurrent_trials", "gpu_pool", "gpus_per_trial",
                 "promotion_training", "confirmation_enabled", "confirmation_top_k", "confirmation_seeds",
             )
@@ -1782,7 +1816,7 @@ class HPOAgent(LangGraphAgent):
         from agent.runners.speechbrain_distributed import training_runtime_signature
 
         signature = training_runtime_signature(runtime_options)
-        for key in ("decision_opportunities", "checkpoint_selection"):
+        for key in ("decision_opportunities", "checkpoint_selection", "prepared_data", "training_control"):
             if key in runtime_options:
                 signature[key] = runtime_options[key]
         return signature

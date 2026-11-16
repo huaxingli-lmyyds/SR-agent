@@ -511,6 +511,19 @@ class HPOScheduler:
         attempt = int(state.get("attempt", 1))
         result = state.get("last_result") or {}
         invalid_metric = False
+        if result.get("status") == "stopped":
+            self.service.record_trial(
+                self.study, trial_id, status="stopped",
+                intermediate_metrics=result.get("intermediate_metrics") or [],
+                cost={**(result.get("cost") or {}), "attempts": attempt},
+                artifacts=result.get("artifacts") or [],
+                stop_reason=result.get("stop_reason") or "training_control",
+            )
+            self.service.update_scheduler_state(
+                self.study, current_trial_id=None,
+                failure_guard=self._closed_failure_guard(self.study.scheduler_state.get("failure_guard") or {}),
+            )
+            return {"route": "review", "last_error": None}
         if result.get("status") == "success":
             try:
                 self.service.record_trial(

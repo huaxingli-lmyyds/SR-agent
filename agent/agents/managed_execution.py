@@ -53,6 +53,8 @@ class ManagedTrialExecutor(TrialExecutor):
                 "batch_size_semantics": options.get("batch_size_semantics"),
                 "continuation_json": json.dumps(continuation),
                 "frozen_data_json": json.dumps(options["frozen_data"]) if options.get("frozen_data") else None,
+                "prepared_data_json": json.dumps(options["prepared_data"]) if options.get("prepared_data") else None,
+                "training_control_json": self._training_control(trial),
             }, trial, attempt)
             study = service.load_study(self.experiment_id)
             current = service.load_trial(self.experiment_id, trial.trial_id)
@@ -60,6 +62,11 @@ class ManagedTrialExecutor(TrialExecutor):
                 cost={"managed_training_result": train, "continuation": continuation})
         if train.get("status") != "success":
             return {**train, "stage": "training"}
+        from agent.hpo.training_control import stopped_training_result
+
+        stopped = stopped_training_result(train)
+        if stopped:
+            return stopped
         observation = (train.get("extensions") or {}).get("speechbrain") or {}
         current = service.load_trial(self.experiment_id, trial.trial_id)
         topk = options.get("checkpoint_selection") == "validation_topk"
