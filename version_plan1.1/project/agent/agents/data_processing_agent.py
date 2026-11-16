@@ -1,0 +1,319 @@
+"""LangGraph data-processing agent with a single structured task interface."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
+
+from agent.agents.base_agent import LangGraphAgent
+from agent.agents.communication import AgentTaskRequest, AgentTaskResult
+from agent.data_processing.handoff import build_data_handoff
+from agent.data_processing.feedback import normalize_feedback
+from agent.data_processing.registry import PROCESSORS
+from agent.data_processing.workflow import DataProcessingWorkflow
+from agent.memory import EpisodeMemory, MemoryScope, MemoryService
+from agent.prompt import render_prompt
+from agent.utils import ConfigParser, ExperimentTracker
+from agent.utils.path_tool import (
+    get_config_file,
+    get_data_processing_experiments_dir,
+    resolve_config_path,
+    resolve_config_value_path,
+    resolve_data_path,
+)
+
+
+class DataProcessingAgent(LangGraphAgent):
+    """Use LLM guidance with deterministic dataset safety controls."""
+
+    action = "optimize_data_processing"
+
+    def __init__(
+        self,
+        model_name: str = "GLM-4.7",
+        temperature: float = 0.2,
+        max_iterations: int = 6,
+        verbose: bool = True,
+        config_path: str = str(get_config_file("train_ecapa_tdnn.yaml")),
+        experiments_dir: Optional[Union[str, Path]] = None,
+        task_type: str = "speaker_verification",
+        model_family: str = "ecapa_tdnn",
+        implementation: str = "speechbrain",
+        runner: str = "speechbrain",
+        enable_llm_advisor: bool = False,
+        memory_service: Optional[MemoryService] = None,
+    ) -> None:
+        super().__init__(model_name, temperature, max_iterations, verbose)
+        self.config_path = str(resolve_config_path(config_path))
+        self.experiments_dir = (
+            Path(experiments_dir).resolve()
+            if experiments_dir
+            else get_data_processing_experiments_dir()
+        )
+        self.task_type = task_type
+        self.model_family = model_family
+        self.implementation = implementation
+        self.runner = runner
+        self.enable_llm_advisor = enable_llm_advisor
+        self.tracker = ExperimentTracker(self.experiments_dir)
+        self.memory_service = memory_service if memory_service is not None else MemoryService()
+        self.memory_scope = MemoryScope(
+            agent_type="data_processing",
+            task_type=task_type,
+            model_family=model_family,
+            tags=["data_processing", "langgraph"],
+        )
+
+    def run_workflow(self, request: AgentTaskRequest) -> AgentTaskResult:
+        started_at = datetime.now()
+        config = ConfigParser(self.config_path).load_config(
+            resolve_references=True
+        )
+        requested_dataset = request.context.get(
+            "dataset_uri"
+        ) or request.context.get("data_folder")
+        data_folder = str(
+            resolve_data_path(requested_dataset or config.get("data_folder"))
+        )
+        self.memory_scope.dataset_key = data_folder
+        output = resolve_config_value_path(
+            config.get("save_folder") or config.get("output_folder")
+        )
+        experiment_id = request.experiment_ids.get(
+            "data_processing"
+        ) or self.tracker.create_data_processing_experiment(
+            config_path=self.config_path,
+            data_folder=data_folder,
+            output_folder=str(output) if output else None,
+            description="LangGraph data processing run",
+            task={"type": self.task_type, "dataset": data_folder},
+            model={
+                "family": self.model_family,
+                "implementation": self.implementation,
+                "config_path": self.config_path,
+            },
+            execution={
+                "runner": self.runner,
+                "output_folder": str(output) if output else None,
+            },
+        )
+        version_path = (
+            self.experiments_dir
+            / str(experiment_id)
+            / "dataset_versions"
+            / "dataset_version.json"
+        )
+        workflow = DataProcessingWorkflow(
+            strategy_advisor=self._planning_advice
+            if self.enable_llm_advisor
+            else None,
+        )
+        processing_config = (
+            config.get("data_processing")
+            if isinstance(config.get("data_processing"), dict)
+            else {}
+        )
+        context_processing = (
+            request.context.get("data_processing")
+            if isinstance(request.context.get("data_processing"), dict)
+            else {}
+        )
+        requested_operations = (
+            request.context.get("data_operations")
+            or context_processing.get("operations")
+            or processing_config.get("operations")
+            or []
+        )
+        quality_policy = (
+            context_processing.get("quality_policy")
+            or processing_config.get("quality_policy")
+            or {}
+        )
+        feedback = normalize_feedback(request.context.get("hpo_feedback"), data_folder)
+        self.tracker.update_data_processing_experiment(
+            str(experiment_id),
+            status="running",
+            extensions={
+                "data_processing": {
+                    "objective": request.objective,
+                    "workflow": "langgraph",
+                    "hpo_feedback": feedback,
+                    "requested_operations": requested_operations,
+                    "input_dataset_uri": data_folder,
+                }
+            },
+        )
+        try:
+            state = workflow.run(
+                {
+                    "dataset_uri": data_folder,
+                    "dataset_type": request.context.get("dataset_type", "auto"),
+                    "task_type": self.task_type,
+                    "target_goal": request.context.get("target_goal")
+                    or request.objective,
+                    "output_path": str(version_path),
+                    "requested_operations": requested_operations,
+                    "quality_policy": quality_policy,
+                    "hpo_feedback": request.context.get("hpo_feedback"),
+                    "consultation_mode": context_processing.get(
+                        "consultation_mode", processing_config.get("consultation_mode", "always")),
+                    "training_exclusion_pairs": (
+                        request.context.get("runtime_options") or {}
+                    ).get("training_exclusion_pairs"),
+                }
+            )
+        except Exception as exc:
+            self.tracker.update_data_processing_experiment(
+                str(experiment_id), status="failed",
+                duration=(datetime.now() - started_at).total_seconds(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        if state.get("status") != "success":
+            error = state.get("error") or "data processing workflow failed"
+            duration = (datetime.now() - started_at).total_seconds()
+            self.tracker.update_data_processing_experiment(
+                str(experiment_id),
+                status="failed",
+                duration=duration,
+                error=error,
+                extensions={
+                    "data_lifecycle": {
+                        "profile": state.get("profile"),
+                        "plan": state.get("plan"),
+                        "results": state.get("results"),
+                        "decision": state.get("decision"),
+                    }
+                },
+            )
+            raise RuntimeError(error)
+        duration = (datetime.now() - started_at).total_seconds()
+        published = state.get("published_version") or {}
+        advice = state.get("advice") or {}
+        handoff = build_data_handoff(published, experiment_id)
+        operation_artifacts = [
+            artifact
+            for result in state.get("results") or []
+            for artifact in result.get("artifacts") or []
+        ]
+        artifacts = [
+            {
+                "type": "dataset_version",
+                "name": "published_dataset",
+                "path": str(version_path),
+            },
+            *operation_artifacts,
+        ]
+        self.tracker.update_data_processing_experiment(
+            str(experiment_id),
+            status="success",
+            duration=duration,
+            metrics={"summary": published.get("quality_metrics") or {}},
+            artifacts=artifacts,
+            extensions={
+                "data_lifecycle": {
+                    "profile_before": state.get("profile"),
+                    "plan": state.get("plan"),
+                    "operation_results": state.get("results"),
+                    "published_version": {
+                        key: value for key, value in published.items()
+                        if key not in {"file_hashes", "quality_metrics", "quality_policy", "operations"}
+                    },
+                    "dataset_version_path": str(version_path),
+                    "file_hash_count": len(published.get("file_hashes") or {}),
+                    "llm_advice": advice,
+                    "decision": state.get("decision"),
+                }
+            },
+        )
+        self.memory_service.remember_episode(
+            EpisodeMemory(
+                agent_type="data_processing",
+                objective=request.objective,
+                action={
+                    "operations": [
+                        item.get("operation")
+                        for item in (state.get("plan") or {}).get(
+                            "operations", []
+                        )
+                    ]
+                },
+                outcome={
+                    "dataset_version": published.get("version"),
+                    "quality_decision": published.get("quality_decision"),
+                    "llm_operations": [
+                        item.get("operation")
+                        for item in advice.get(
+                            "suggested_operations", []
+                        )
+                    ],
+                },
+                summary=f"Published dataset version {published.get('version')}",
+                experiment_ids=[str(experiment_id)],
+                scope=self.memory_scope,
+                importance=0.8,
+            )
+        )
+        return AgentTaskResult(
+            status="success",
+            summary={"data_handoff": handoff, "data_decision": state.get("decision"),
+                     "feedback_status": feedback["status"]},
+            metrics={"data_quality": published.get("quality_metrics") or {}},
+            artifacts=artifacts,
+            recommendations=[advice] if advice else [],
+            experiment_ids={"data_processing": str(experiment_id)},
+            request_id=request.request_id,
+        )
+
+    def _planning_advice(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        profile = state.get("profile") or {}
+        issues = [
+            {
+                key: issue.get(key)
+                for key in (
+                    "code",
+                    "severity",
+                    "message",
+                    "suggested_operation",
+                )
+            }
+            for issue in (profile.get("issues") or [])[:30]
+            if isinstance(issue, dict)
+        ]
+        context = {
+            "dataset_uri": state.get("dataset_uri"),
+            "dataset_type": state.get("dataset_type"),
+            "task_type": state.get("task_type"),
+            "target_goal": state.get("target_goal"),
+            "quality_metrics": profile.get("quality_metrics") or {},
+            "profile_coverage": {
+                key: ((profile.get("extensions") or {}).get("audio") or {}).get(key)
+                for key in ("probe_limit", "probe_limited", "signal_probe_count")
+            },
+            "hpo_feedback": state.get("hpo_feedback") or {"status": "absent"},
+            "distributions": profile.get("distributions") or {},
+            "issues": issues,
+            "requested_operations": state.get("requested_operations") or [],
+            "available_operations": PROCESSORS.describe(),
+        }
+        prompt = render_prompt(
+            "data_processing_planning_advice", context=context
+        )
+        return self._request_json_advice(prompt)
+
+    def get_execution_details(self) -> Dict[str, Any]:
+        return {
+            "action": self.action,
+            "workflow": "langgraph",
+            "mode": "llm_guided_quality_guard",
+            "llm_role": "data_quality_planning",
+            "enable_llm_advisor": self.enable_llm_advisor,
+        }
+
+
+def create_data_processing_agent(**kwargs: Any) -> DataProcessingAgent:
+    return DataProcessingAgent(**kwargs)
+
+
+__all__ = ["DataProcessingAgent", "create_data_processing_agent"]

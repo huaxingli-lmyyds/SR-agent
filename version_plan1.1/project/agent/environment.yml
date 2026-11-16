@@ -1,0 +1,11 @@
+name: sr-agent
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip>=23.0
+  - pip:
+    # Install the CUDA-matched torch/torchaudio stack before this file when
+    # using a remote GPU image. See the CUDA install commands in README.md.
+    - -e .[speech]

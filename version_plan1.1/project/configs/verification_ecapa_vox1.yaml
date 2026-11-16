@@ -1,0 +1,60 @@
+# Frozen validation/test profile shared by the VoxCeleb1 DDP benchmarks.
+# Verification is intentionally single-GPU: DDP is used only for training.
+# A conservative batch of 8 avoids padding-driven peaks from long utterances.
+
+seed: 1234
+__set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
+
+data_folder: !PLACEHOLDER
+output_folder: results/voxceleb1/speaker_verification_ecapa/<seed>
+save_folder: !ref <output_folder>/save/
+verification_file: https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt
+pretrain_path: speechbrain/spkrec-ecapa-voxceleb
+
+train_data: !ref <save_folder>/train.csv
+enrol_data: !ref <save_folder>/enrol.csv
+test_data: !ref <save_folder>/test.csv
+split_ratio: [90, 10]
+skip_prep: False
+
+batch_size: 8
+score_norm: none
+cohort_size: 20000
+n_train_snts: 400000
+
+n_mels: 80
+num_workers: 4
+
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
+
+enrol_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
+
+test_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
+
+compute_features: !new:speechbrain.lobes.features.Fbank
+    n_mels: !ref <n_mels>
+
+mean_var_norm: !new:speechbrain.processing.features.InputNormalization
+    norm_type: sentence
+    std_norm: False
+
+embedding_model: !new:speechbrain.lobes.models.ECAPA_TDNN.ECAPA_TDNN
+    input_size: !ref <n_mels>
+    channels: [1024, 1024, 1024, 1024, 3072]
+    kernel_sizes: [5, 3, 3, 3, 1]
+    dilations: [1, 2, 3, 4, 1]
+    attention_channels: 128
+    lin_neurons: 192
+
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+    collect_in: !ref <save_folder>
+    loadables:
+        embedding_model: !ref <embedding_model>
+    paths:
+        embedding_model: !ref <pretrain_path>/embedding_model.ckpt

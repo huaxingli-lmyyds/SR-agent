@@ -1,0 +1,646 @@
+from copy import deepcopy
+import json
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from scripts.experiments import run_hpo_benchmark as benchmark
+
+
+def config():
+    return benchmark.read_json(benchmark.DEFAULT_CONFIG)
+
+
+@pytest.mark.parametrize("kind", ["parse", "request"])
+def test_partial_advisor_failure_marks_controller_degraded(kind):
+    advisor = [{"status": "success", "duration_seconds": 1},
+               {"status": "failed" if kind == "request" else "success", "duration_seconds": 2}]
+    proposals = [{"raw": {"action": "keep_strategy"}},
+                 {"raw": {"action": "invalid_proposal"}}]
+    result = benchmark.advisor_outcome(advisor, proposals, uses_advisor=True)
+    assert result["llm_valid_proposals"] == 1
+    assert result["invalid_advisor_proposals"] == 1
+    assert result["advisor_failures"] == (kind == "request")
+    assert result["controller_degraded"]
+    assert result["advisor_seconds"] == 3
+
+
+def test_fixed_baseline_does_not_require_advisor():
+    assert not benchmark.advisor_outcome([], [], uses_advisor=False)["controller_degraded"]
+
+
+def test_five_groups_have_explicit_budgets():
+    cfg = config()
+    specs = [benchmark.variant_spec(cfg, name) for name in benchmark.VARIANTS]
+    assert [s["max_training_runs"] for s in specs] == [1, 9, 9, 13, 13]
+    assert all(s["budgets"][-1]["epochs"] == 24 for s in specs)
+    assert all(s["pruner"] == "none" for s in specs[:3])
+    assert specs[3]["budgets"] == specs[4]["budgets"]
+    assert specs[3]["nominal_full_data_epochs"] == 42.75
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"seeds": [1, 1]},
+        {"seeds": [True]},
+        {"full_trials": 0},
+        {"full_epochs": 20},
+        {"max_retries": -1},
+        {"promotion_limits": [4, 1]},
+        {"promotion_limits": [3]},
+    ],
+)
+def test_invalid_config_rejected(change):
+    cfg = config()
+    cfg.update(change)
+    with pytest.raises(ValueError):
+        benchmark.validate_config(cfg)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True])
+def test_invalid_numeric_budget_and_domain(value):
+    cfg = config()
+    cfg["budgets"][0]["data_fraction"] = value
+    with pytest.raises(ValueError):
+        benchmark.validate_config(cfg)
+    cfg = config()
+    cfg["search_space"]["parameters"][0]["low"] = value
+    with pytest.raises(ValueError):
+        benchmark.validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    ("config_name", "world_size", "batch_size", "step_size"),
+    [
+        ("five_group_ecapa_vox1_3gpu.json", 3, 72, 4000),
+        ("five_group_ecapa_vox1_8gpu.json", 8, 128, 2250),
+    ],
+)
+def test_ddp_profiles_have_valid_global_batch_contracts(
+    config_name, world_size, batch_size, step_size
+):
+    from agent.utils import ConfigParser
+
+    path = benchmark.ROOT / "configs/experiments" / config_name
+    cfg = benchmark.read_json(path)
+    benchmark.validate_config(cfg)
+    train = ConfigParser(
+        benchmark.project_path(cfg["train_config"])
+    ).load_config()
+    evaluation = ConfigParser(
+        benchmark.project_path(cfg["validation_config"])
+    ).load_config()
+    plan = {
+        "enabled": True,
+        "world_size": world_size,
+        "batch_size_semantics": "global",
+    }
+    benchmark.validate_ddp_batch_contract(cfg, train, plan)
+    assert train["batch_size"] == batch_size
+    assert train["step_size"] == step_size
+    assert train["batch_size"] % plan["world_size"] == 0
+    assert evaluation["batch_size"] == 8
+
+
+def test_global_ddp_rejects_unshardable_batch_search_values():
+    cfg = benchmark.read_json(
+        benchmark.ROOT / "configs/experiments/five_group_ecapa_vox1_8gpu.json"
+    )
+    cfg["search_space"]["parameters"].append({
+        "name": "batch_size",
+        "parameter_type": "categorical",
+        "choices": [128, 130],
+    })
+    with pytest.raises(ValueError, match=r"invalid: \[130\]"):
+        benchmark.validate_ddp_batch_contract(
+            cfg,
+            {"batch_size": 128},
+            {
+                "enabled": True,
+                "world_size": 8,
+                "batch_size_semantics": "global",
+            },
+        )
+
+
+def test_dry_run_is_dependency_light_and_does_not_write(tmp_path):
+    destination = tmp_path / "not-created"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(benchmark.ROOT / "scripts/experiments/run_hpo_benchmark.py"),
+            "--dry-run",
+            "--seeds",
+            "12",
+            "--output-dir",
+            str(destination),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    plan = json.loads(result.stdout)
+    assert len(plan["run_order"]) == 5
+    assert {r["seed"] for r in plan["run_order"]} == {12}
+    assert not destination.exists()
+
+
+def test_summary_excludes_failed_and_nonfinite_results():
+    rows = [
+        {
+            "variant": "tpe",
+            "seed": 1,
+            "status": "success",
+            "confirmation_satisfied": True,
+            "validation_eer": 0.04,
+        },
+        {
+            "variant": "tpe",
+            "seed": 2,
+            "status": "failed",
+            "validation_eer": 0.0,
+        },
+        {
+            "variant": "tpe",
+            "seed": 3,
+            "status": "success",
+            "confirmation_satisfied": True,
+            "validation_eer": float("nan"),
+        },
+        {
+            "variant": "system",
+            "seed": 1,
+            "status": "success",
+            "confirmation_satisfied": True,
+            "validation_eer": 0.03,
+        },
+    ]
+    result = benchmark.summarize(rows)
+    assert result["by_variant"]["tpe"]["validation_eer_mean"] == 0.04
+    assert result["by_variant"]["tpe"]["failures"] == 2
+    assert result["paired_validation_differences"]["tpe"] == [
+        {"seed": 1, "system_minus_baseline": pytest.approx(-0.01)}
+    ]
+
+
+def test_proposal_constraints_lock_resource_and_tool_boundaries():
+    from agent.hpo import StrategyProposal
+    from scripts.experiments.benchmark_runtime import (
+        constrain_proposal,
+        within_envelope,
+    )
+
+    space = config()["search_space"]
+    narrowed = deepcopy(space)
+    narrowed["parameters"][0]["low"] = 0.001
+    assert within_envelope(narrowed, space)
+    expanded = deepcopy(space)
+    expanded["parameters"][0]["low"] = 0.00001
+    assert not within_envelope(expanded, space)
+    proposal = StrategyProposal(
+        action="switch_strategy",
+        requested_sampler="agent_proposal",
+        requested_pruner="none",
+        max_training_runs=999,
+        budgets=[],
+        initial_trial_count=99,
+        promotion_limits=[9],
+        candidate_proposals=[{"parameters": {"lr": 0.001}}],
+        search_space=expanded,
+    )
+    actual = constrain_proposal(proposal, space)
+    assert actual.requested_sampler is None and actual.requested_pruner is None
+    assert actual.budgets is None and actual.max_training_runs is None
+    assert actual.search_space is None and actual.candidate_proposals == []
+    assert "requested_sampler" in actual.evidence["benchmark_blocked_fields"]
+    assert constrain_proposal(None, space).action == "keep_strategy"
+    assert proposal.max_training_runs == 999
+
+
+def test_pairs_reject_bad_labels_and_path_traversal(tmp_path):
+    path = tmp_path / "pairs.txt"
+    for text in (
+        "2 a/x/a.wav a/x/b.wav",
+        "0 ../x/a.wav a/x/b.wav",
+        "1 a/x/a.wav a/x/b.wav",
+    ):
+        path.write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError):
+            benchmark.read_pairs(path)
+
+
+def test_snapshot_keeps_hyperpyyaml_tags_and_changes_seed(tmp_path):
+    from agent.utils import ConfigParser
+
+    source = tmp_path / "source.yaml"
+    dest = tmp_path / "frozen.yaml"
+    source.write_text(
+        "seed: 42\noutput_folder: !ref results/<seed>\nmodel: !new:some.Model {}\n",
+        encoding="utf-8",
+    )
+    benchmark.snapshot_yaml(source, dest, {"seed": 7})
+    text = dest.read_text(encoding="utf-8")
+    assert "!new:some.Model" in text and "!ref" in text
+    assert ConfigParser(dest).load_config()["seed"] == 7
+    assert "seed: 42" in source.read_text(encoding="utf-8")
+
+
+def test_output_lock_rejects_concurrent_writer(tmp_path):
+    with benchmark.exclusive_run(tmp_path):
+        with pytest.raises(OSError):
+            with benchmark.exclusive_run(tmp_path):
+                pass
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shared file locks")
+def test_parallel_gpu_locks_reserve_devices_and_exclude_serial_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(benchmark.tempfile, "gettempdir", lambda: str(tmp_path))
+    cfg = {"parallel_single_gpu": True, "device": "cuda:0"}
+    first = "GPU-00000000-0000-0000-0000-000000000001"
+    second = "GPU-00000000-0000-0000-0000-000000000002"
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", first)
+    with benchmark.speechbrain_execution_lock(cfg):
+        with pytest.raises(OSError):
+            with benchmark.speechbrain_execution_lock(cfg):
+                pass
+        with pytest.raises(OSError):
+            with benchmark.speechbrain_execution_lock({}):
+                pass
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", second)
+        with benchmark.speechbrain_execution_lock(cfg):
+            pass
+    with benchmark.speechbrain_execution_lock({}):
+        with pytest.raises(OSError):
+            with benchmark.speechbrain_execution_lock(cfg):
+                pass
+
+
+@pytest.mark.parametrize("visible", ["", "0", "GPU-invalid", "0,1"])
+def test_parallel_gpu_lock_requires_full_uuid(visible, monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    with pytest.raises(ValueError, match="full GPU UUID"):
+        benchmark.independent_gpu_uuid({"parallel_single_gpu": True, "device": "cuda:0"})
+
+
+def test_parallel_gpu_assignment_is_frozen(tmp_path, monkeypatch):
+    first = "GPU-00000000-0000-0000-0000-000000000001"
+    second = "GPU-00000000-0000-0000-0000-000000000002"
+    plan = {"schema_version": benchmark.SCHEMA_VERSION, "output_root": str(tmp_path),
+            "config": {"parallel_single_gpu": True, "device": "cuda:0"},
+            "gpu_assignment": {"physical_gpu_uuid": first}}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", second)
+    with pytest.raises(ValueError, match="GPU assignment changed"):
+        benchmark.verify_frozen(plan, tmp_path)
+
+
+def test_isolated_snapshot_rebinds_hardcoded_artifact_paths(tmp_path):
+    from agent.utils import ConfigParser
+
+    source, dest = tmp_path / "source.yaml", tmp_path / "isolated.yaml"
+    source.write_text(
+        "output_folder: shared\nsave_folder: shared/save\ntrain_log: shared/log\n"
+        "train_annotation: shared/train.csv\ntrain_data: shared/train.csv\n"
+        "checkpointer: !new:some.Checkpointer {checkpoints_dir: shared/ckpt}\n"
+        "train_logger: !new:some.Logger {save_file: shared/log}\n"
+        "pretrainer: !new:some.Pretrainer {collect_in: shared/pretrained}\n"
+        "prepare_noise_data: !name:some.writer {}\n",
+        encoding="utf-8",
+    )
+    benchmark.snapshot_yaml(
+        source, dest, {"output_folder": str(tmp_path / "trial")}, isolate=True
+    )
+    cfg = ConfigParser(dest).load_config()
+    assert cfg["checkpointer"]["checkpoints_dir"] == cfg["save_folder"]
+    assert cfg["pretrainer"]["collect_in"] == cfg["save_folder"]
+    assert cfg["train_logger"]["save_file"] == cfg["train_log"]
+    assert "prepare_noise_data" not in cfg
+    assert all(
+        str(tmp_path / "trial") in cfg[k]
+        for k in ("save_folder", "train_log", "train_annotation", "train_data")
+    )
+    assert "!ref <output_folder>/save" in dest.read_text(encoding="utf-8")
+
+
+def test_augmentation_is_prepared_once_outside_dataset(tmp_path, monkeypatch):
+    from recipes.voxceleb import augmentation_prepare
+
+    calls = []
+
+    def prepare(**kwargs):
+        calls.append(kwargs)
+        audio = benchmark.Path(kwargs["dest_folder"]) / "immutable.wav"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"immutable-audio")
+        path = benchmark.Path(kwargs["csv_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "ID,duration,wav\na,1,immutable.wav\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(
+        augmentation_prepare, "prepare_dataset_from_URL", prepare
+    )
+    plan = {
+        "frozen_inputs": {
+            "train_config": str(
+                benchmark.ROOT / "configs/train_ecapa_tdnn.yaml"
+            )
+        }
+    }
+    first = benchmark.prepare_assets(plan, tmp_path)
+    assert len(calls) == 2 and calls[0]["URL"].startswith("https://")
+    assert all(
+        benchmark.Path(c["dest_folder"]).is_relative_to(tmp_path / "assets")
+        for c in calls
+    )
+    assert benchmark.prepare_assets(plan, tmp_path) == first
+    assert len(calls) == 2
+    benchmark.Path(first["noise_annotation"]).write_text(
+        "changed", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="annotation changed"):
+        benchmark.prepare_assets(plan, tmp_path)
+
+
+def test_local_augmentation_audio_is_reused_read_only(tmp_path, monkeypatch):
+    from recipes.voxceleb import augmentation_prepare
+
+    dataset = tmp_path / "dataset"
+    for kind in ("noise", "rir"):
+        folder = dataset / kind / "nested"
+        folder.mkdir(parents=True)
+        (folder / f"{kind}.wav").write_bytes(b"immutable-audio")
+
+    local_calls = []
+
+    def prepare_local(**kwargs):
+        local_calls.append(kwargs)
+        annotation = benchmark.Path(kwargs["csv_file"])
+        annotation.parent.mkdir(parents=True, exist_ok=True)
+        annotation.write_text(
+            "ID,duration,wav\na,1,local.wav\n", encoding="utf-8"
+        )
+
+    monkeypatch.setattr(
+        augmentation_prepare, "prepare_dataset_from_folder", prepare_local
+    )
+    monkeypatch.setattr(
+        augmentation_prepare,
+        "prepare_dataset_from_URL",
+        lambda **_kwargs: pytest.fail("local assets must not download"),
+    )
+    plan = {
+        "data_folder": str(dataset),
+        "frozen_inputs": {
+            "train_config": str(
+                benchmark.ROOT / "configs/train_ecapa_tdnn.yaml"
+            )
+        },
+    }
+    overrides = benchmark.prepare_assets(plan, tmp_path / "experiment")
+    assert len(local_calls) == 2
+    assert overrides["data_folder_noise"] == str((dataset / "noise").resolve())
+    assert overrides["data_folder_rir"] == str((dataset / "rir").resolve())
+    assert all(
+        benchmark.Path(call["csv_file"]).is_relative_to(
+            tmp_path / "experiment" / "assets"
+        )
+        for call in local_calls
+    )
+    manifest = benchmark.read_json(tmp_path / "experiment" / "assets.json")
+    assert manifest["sources"]["noise"]["mode"] == "local"
+    assert manifest["sources"]["rir"]["mode"] == "local"
+    assert benchmark.prepare_assets(plan, tmp_path / "experiment") == overrides
+
+    (dataset / "noise" / "nested" / "added.wav").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="noise augmentation audio inventory"):
+        benchmark.prepare_assets(plan, tmp_path / "experiment")
+
+
+def test_real_configs_are_compatible_but_missing_audio_fails_early(tmp_path):
+    pairs = tmp_path / "pairs.txt"
+    pairs.write_text(
+        "1 a/x/a.wav a/x/b.wav\n0 a/x/a.wav b/x/b.wav\n", encoding="utf-8"
+    )
+    plan = {
+        "data_folder": str(tmp_path),
+        "frozen_inputs": {
+            "train_config": str(
+                benchmark.ROOT / "configs/train_ecapa_tdnn.yaml"
+            ),
+            "validation_config": str(
+                benchmark.ROOT / "configs/verification_ecapa.yaml"
+            ),
+            "validation_pairs": str(pairs),
+            "test_pairs": str(pairs),
+        },
+    }
+    with pytest.raises(ValueError, match="missing validation_pairs audio"):
+        benchmark.validate_speechbrain_inputs(plan)
+    for utterance in ("a/x/a.wav", "a/x/b.wav", "b/x/b.wav"):
+        path = tmp_path / "wav" / utterance
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+    benchmark.validate_speechbrain_inputs(plan)
+    bad = tmp_path / "bad.yaml"
+    benchmark.snapshot_yaml(
+        plan["frozen_inputs"]["validation_config"], bad, {"n_mels": 40}
+    )
+    plan["frozen_inputs"]["validation_config"] = str(bad)
+    with pytest.raises(ValueError, match="feature mismatch"):
+        benchmark.validate_speechbrain_inputs(plan)
+
+
+def test_torn_journal_append_is_preserved_and_repaired(tmp_path):
+    path = tmp_path / "attempts.jsonl"
+    path.write_bytes(b'{"event":"started"}\n{"event":"fin')
+    benchmark.append_event(tmp_path, "attempts", {"event": "resumed"})
+    events = benchmark.read_events(path)
+    assert [e["event"] for e in events] == ["started", "resumed"]
+    assert events[-1]["repaired_truncated_event"] is True
+    assert next(tmp_path.glob("*.partial")).read_bytes() == b'{"event":"fin'
+
+
+def test_valid_journal_entry_without_newline_is_not_lost(tmp_path):
+    path = tmp_path / "attempts.jsonl"
+    path.write_bytes(b'{"event":"started"}')
+    benchmark.append_event(tmp_path, "attempts", {"event": "finished"})
+    assert len(benchmark.read_events(path)) == 2
+
+
+@pytest.mark.parametrize("has_checkpoint", [True, False])
+def test_executor_binds_current_checkpoint_and_validation_protocol(
+    monkeypatch, has_checkpoint
+):
+    from agent.agents.hpo_agent import HPOAgent
+    from agent.hpo import Trial, TrialBudget
+    from agent.tools import evaluation_tools, training_tools
+
+    captured = []
+    monkeypatch.setattr(
+        training_tools,
+        "TrainModel",
+        SimpleNamespace(
+            invoke=lambda kwargs: json.dumps(
+                {
+                    "status": "success",
+                    "artifacts": [
+                        {"type": "checkpoint", "path": "current.ckpt"}
+                    ]
+                    if has_checkpoint
+                    else [],
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        evaluation_tools,
+        "RunEvaluation",
+        SimpleNamespace(
+            invoke=lambda kwargs: (
+                captured.append(kwargs)
+                or json.dumps(
+                    {"status": "success", "metrics": {"test": {"eer": 0.03}}}
+                )
+            )
+        ),
+    )
+    agent = SimpleNamespace(
+        task_type="speaker_verification",
+        model_family="ecapa_tdnn",
+        implementation="speechbrain",
+        runner="fake",
+        experiments_dir="isolated",
+    )
+    trial = Trial(
+        "trial1",
+        {"lr": 0.001},
+        TrialBudget("full", epochs=2, data_fraction=1.0),
+    )
+    execute = HPOAgent._trial_executor(
+        agent, "exp1", "data", {"verification_config": "validation.yaml"}
+    )
+    result = execute(trial, 1)
+    if has_checkpoint:
+        assert captured[0]["model_path"] == "current.ckpt"
+        assert captured[0]["verification_config"] == "validation.yaml"
+        assert result["cost"]["evaluated_checkpoint"] == "current.ckpt"
+    else:
+        assert (
+            result["status"] == "failed"
+            and "missing checkpoint" in result["error"]
+        )
+        assert not captured
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [None, "gpu_hours", "wall_seconds", "incomplete", "degraded", "zero"],
+)
+def test_paired_efficiency_requires_complete_cost_and_confirmation(missing):
+    system = {
+        "variant": "system",
+        "seed": 7,
+        "status": "success",
+        "confirmation_satisfied": True,
+        "validation_eer": 0.04,
+        "gpu_hours": 2,
+        "wall_seconds": 8000,
+    }
+    baseline = {
+        **system,
+        "variant": "tpe_successive_halving",
+        "validation_eer": 0.05,
+        "gpu_hours": 3,
+        "wall_seconds": 12000,
+    }
+    if missing in {"gpu_hours", "wall_seconds"}:
+        system.pop(missing)
+    elif missing == "incomplete":
+        system["cost_may_be_incomplete"] = True
+    elif missing == "degraded":
+        system["controller_degraded"] = True
+    elif missing == "zero":
+        baseline["gpu_hours"] = 0
+    paired = benchmark.summarize([system, baseline])["paired_efficiency"][
+        "tpe_successive_halving"
+    ][0]
+    assert paired["system_minus_baseline_eer"] == pytest.approx(-0.01)
+    if missing is None:
+        assert paired["better_and_faster"] is True
+        assert paired["system_over_baseline_gpu_hours"] == pytest.approx(2 / 3)
+    else:
+        assert paired["better_and_faster"] is None
+        assert not paired["eligible_for_efficiency_claim"]
+
+
+def test_policy_keeps_are_not_reported_as_llm_successes():
+    result = benchmark.advisor_outcome(
+        [],
+        [{"origin": "policy", "raw": {"action": "keep_strategy"}}],
+        uses_advisor=True,
+    )
+    assert result["llm_valid_proposals"] == result["advisor_requests"] == 0
+
+
+def test_hypothesis_benchmark_configuration_preserves_baseline_allocation():
+    cfg = benchmark.read_json(
+        benchmark.ROOT
+        / "configs/experiments/five_group_ecapa_vox1_hypothesis.json"
+    )
+    benchmark.validate_config(cfg)
+    for variant in ("system", "tpe_successive_halving"):
+        assert benchmark.variant_spec(cfg, variant)["max_training_runs"] == 13
+    assert cfg["hypothesis_probes"] is True
+
+
+def test_cross_stage_configuration_preserves_baseline_run_allocation():
+    cfg = benchmark.read_json(
+        benchmark.ROOT
+        / "configs/experiments/five_group_ecapa_vox1_cross_stage.json"
+    )
+    benchmark.validate_config(cfg)
+    assert benchmark.variant_spec(cfg, "system")["max_training_runs"] == 13
+    assert (
+        benchmark.variant_spec(cfg, "system")["budgets"]
+        == benchmark.variant_spec(cfg, "tpe_successive_halving")["budgets"]
+    )
+    cfg["hypothesis_probes"] = True
+    with pytest.raises(ValueError, match="either"):
+        benchmark.validate_config(cfg)
+
+
+def test_cross_stage_advice_is_counted_separately_from_policy_keeps():
+    result = benchmark.advisor_outcome(
+        [{"status": "success"}],
+        [
+            {
+                "kind": "cross_stage",
+                "origin": "llm",
+                "raw": {"action": "paired_promotion"},
+            },
+            {"origin": "policy", "raw": {"action": "keep_strategy"}},
+        ],
+        uses_advisor=True,
+    )
+    assert (
+        result["llm_valid_proposals"] == 1 and not result["controller_degraded"]
+    )
+    failed = benchmark.advisor_outcome(
+        [{"status": "failed"}],
+        [
+            {
+                "kind": "cross_stage",
+                "origin": "llm",
+                "raw": {"advice_error": "schema error"},
+            }
+        ],
+        uses_advisor=True,
+    )
+    assert (
+        failed["invalid_advisor_proposals"] == 1
+        and failed["controller_degraded"]
+    )

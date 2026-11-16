@@ -1,0 +1,64 @@
+# ################################
+# Model: ResNet speaker verification with cosine scoring
+# ################################
+
+seed: 1984
+__set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
+
+data_folder: !PLACEHOLDER
+output_folder: results/resnet_verification/<seed>
+save_folder: !ref <output_folder>/save
+
+# VoxCeleb1 cleaned verification list. Override this path for other sets.
+verification_file: https://www.robots.ox.ac.uk/~vgg/data/voxceleb/meta/veri_test2.txt
+
+# A local SpeechBrain CKPT+... directory can be supplied by the runner.
+pretrain_path: underdogliu1005/spkrec-resnet-voxceleb
+
+train_data: !ref <save_folder>/train.csv
+enrol_data: !ref <save_folder>/enrol.csv
+test_data: !ref <save_folder>/test.csv
+split_ratio: [90, 10]
+skip_prep: False
+
+# Keep evaluation memory independent from the training batch size.
+batch_size: 8
+num_workers: 4
+score_norm: none
+cohort_size: 20000
+n_train_snts: 400000
+
+n_mels: 80
+
+train_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
+
+enrol_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
+
+test_dataloader_opts:
+    batch_size: !ref <batch_size>
+    num_workers: !ref <num_workers>
+
+compute_features: !new:speechbrain.lobes.features.Fbank
+    n_mels: !ref <n_mels>
+
+mean_var_norm: !new:speechbrain.processing.features.InputNormalization
+    norm_type: sentence
+    std_norm: False
+
+embedding_model: !new:speechbrain.lobes.models.ResNet.ResNet
+    input_size: !ref <n_mels>
+    channels: [128, 128, 256, 256]
+    strides: [1, 2, 2, 2]
+    block_sizes: [3, 4, 6, 3]
+    lin_neurons: 256
+
+pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
+    collect_in: !ref <save_folder>
+    loadables:
+        embedding_model: !ref <embedding_model>
+    paths:
+        embedding_model: !ref <pretrain_path>/embedding_model.ckpt

@@ -15,6 +15,18 @@
 !/CHANGELOG.md
 !/CONTRIBUTING.md
 !/LICENSE.md
+# Keep the version_plan1.1 delivery instructions and implementation notes.
+!/version_plan1.1/AGENTS.md
+!/version_plan1.1/ARCHITECTURE.md
+!/version_plan1.1/CHANGELOG.md
+!/version_plan1.1/DATA_LOOP_REVIEW.md
+!/version_plan1.1/EXPERIMENTS.md
+!/version_plan1.1/EXTENSIONS.md
+!/version_plan1.1/PROGRESS.md
+!/version_plan1.1/RESEARCH.md
+!/version_plan1.1/START_HERE.md
+!/version_plan1.1/TASKS.md
+!/version_plan1.1/VALIDATION.md
 read/
 docs/build/
 docs/API/*.rst
@@ -188,3 +200,11 @@ Thumbs.db
 .venv-hpo/
 
 /tmp/
+
+# version_plan1.1: keep source/evidence manifests; exclude reproducible outputs.
+/version_plan1.1/experiments/generated/
+/version_plan1.1/validation/*
+!/version_plan1.1/validation/change_manifest.json
+!/version_plan1.1/validation/final_source_manifest.json
+!/version_plan1.1/validation/loop_audit.json
+!/version_plan1.1/validation/verified_test_inventory.json

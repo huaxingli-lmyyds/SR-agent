@@ -1,0 +1,3082 @@
+{
+  "counts": {
+    "passed": 766,
+    "failed": 0,
+    "skipped": 2
+  },
+  "method": "Full regression plus final affected tests and stable-source rerun; not a single all-green invocation",
+  "tests": {
+    "tests.integration.test_complete_system::test_complete_system_isolated_records_and_failure_status[False]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.integration.test_complete_system::test_complete_system_isolated_records_and_failure_status[True]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.integration.test_continuation_state::test_full_epoch_state_restores_optimizer_scheduler_rng_and_model": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_fixed_expert_parameters_and_separate_test_without_hpo": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_resume_reuses_training_directory_and_skips_successful_stages[train]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_resume_reuses_training_directory_and_skips_successful_stages[eval]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_invalid_evaluation_is_retried_without_retraining[eer]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_invalid_evaluation_is_retried_without_retraining[min_dcf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_unconfirmed_training_never_reaches_evaluation[failure]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_unconfirmed_training_never_reaches_evaluation[epochs]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_unconfirmed_training_never_reaches_evaluation[missing_checkpoint]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_unconfirmed_training_never_reaches_evaluation[foreign_checkpoint]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_repeated_seeds_and_separate_output_roots_do_not_share_state": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_resume_and_test_reject_tampered_or_foreign_state[checkpoint]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_resume_and_test_reject_tampered_or_foreign_state[snapshot]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_resume_and_test_reject_tampered_or_foreign_state[missing_manifest]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_resume_and_test_reject_tampered_or_foreign_state[copied_root]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_overwrite_overlap_and_search_config_rejected": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_speechbrain_overrides_bind_explicit_checkpoint_file": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_heldout_interruption_does_not_retrain_or_revalidate": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_record_from_another_seed_is_rejected[training]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_record_from_another_seed_is_rejected[validation]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_expert_and_benchmark_share_device_lock": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_overlapping_speakers_fail_before_training": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_export_never_counts_invalid_saved_results_as_success[eer]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_export_never_counts_invalid_saved_results_as_success[min_dcf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_export_never_counts_invalid_saved_results_as_success[ownership]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_expert_baseline::test_default_preview_is_read_only_and_does_not_import_agents": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_fake_runner_tool_boundary::test_evaluation_tool_uses_registered_runner_and_records_result": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_fake_runner_tool_boundary::test_checkpoint_selection_is_scoped_to_trial": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_fake_runner_tool_boundary::test_training_tool_applies_budget_and_synchronizes_trial[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_fake_runner_tool_boundary::test_training_tool_applies_budget_and_synchronizes_trial[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_fake_runner_tool_boundary::test_checkpoint_selection_reads_trial_summary_artifacts": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_fake_runner_tool_boundary::test_study_objective_remains_authoritative_during_trial_evaluation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_five_groups_use_real_scheduler_and_separate_test": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_system_failure_blocks_other_groups_and_survives_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_candidate_resource_failure_does_not_stop_other_groups": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_system_failure_survives_late_summary_error": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_shared_error_outside_scheduler_stops_benchmark": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_resume_reuses_same_trial_and_frozen_config": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_no_test_before_all_search_runs_and_no_overwrite": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_overlapping_validation_test_speakers_fail_before_training": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_distinct_repetitions_really_change_training_seed": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_heldout_rejects_modified_snapshot": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_resume_rejects_foreign_root_code_and_protocol[moved]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_resume_rejects_foreign_root_code_and_protocol[source]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_resume_rejects_foreign_root_code_and_protocol[version]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_resume_rejects_foreign_root_code_and_protocol[dependency]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_benchmark_resource_limits_reach_real_training_and_evaluation[gpu]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_benchmark_resource_limits_reach_real_training_and_evaluation[wall]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_different_output_roots_share_real_runner_exclusion": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_evaluate_on_another_gpu_records_assignment_without_changing_training": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_hypothesis_batches_keep_budget_and_feed_tpe": {
+      "status": "passed",
+      "report": "stable-source.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_hypothesis_llm_format_failure_preserves_tpe_budget": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_benchmark::test_cross_stage_mode_uses_real_scheduler_and_bounded_llm_reviews[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_llm_compact_and_stop_affect_execution_and_survive_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_non_llm_modes_never_call_campaign_model[fixed]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_non_llm_modes_never_call_campaign_model[rule]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_invalid_campaign_advice_falls_back_to_bounded_rule": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_interrupted_campaign_review_retries_without_retraining": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_cross_stage_campaign_reserves_complete_promotion_brackets[26-expected0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_campaign_control::test_cross_stage_campaign_reserves_complete_promotion_brackets[23-expected1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores3]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores6]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores7]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-scores8]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[genuine-None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores3]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores6]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores7]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-scores8]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_raw_scores_rejected_before_computation[impostor-None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_finite_arrays_and_true_perfect_scores_remain_valid": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[a b 1 nan\\nc d 0 nan\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[a b 1 inf\\nc d 0 -inf\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[a b 1 0.8\\nc d 0 0.1\\ne f 1 nan\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[a b 2 0.9\\nc d 0 0.1\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[broken line\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[a b 1 0.8\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_invalid_score_file_fails_entire_trial_even_with_finite_runner_metrics[a b 1 not-a-number\\nc d 0 0.2\\n]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_score_computation_error_cannot_fall_back_to_runner_metric[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_score_computation_error_cannot_fall_back_to_runner_metric[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_valid_score_file_parses_all_pairs": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_valid_scores_do_not_overwrite_complete_backend_metrics": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_missing_backend_metric_uses_eer_ratio_and_scaled_min_dcf": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[adaptive_search-epochs]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[adaptive_search-fraction]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[adaptive_search-duration]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[adaptive_search-dataset]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[adaptive_search-legacy]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[adaptive_search-malformed]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[tpe-epochs]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[tpe-fraction]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[tpe-duration]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[tpe-dataset]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[tpe-legacy]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_incompatible_history_is_not_sent_to_sampler_or_dedup[tpe-malformed]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_compatible_history_ignores_stage_label_and_normalizes_full_data": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_agent_proposals_can_retest_parameters_from_incompatible_history": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_campaign_history_keeps_same_parameters_at_distinct_budgets": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_retry_preserves_future_initial_and_promotion_runs[0-1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_retry_preserves_future_initial_and_promotion_runs[0-2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_retry_preserves_future_initial_and_promotion_runs[1-1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_retry_preserves_future_initial_and_promotion_runs[1-2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_direct_retry_and_resume_enforce_reserved_budget": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_multi_rung_reservations_are_not_double_counted": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_legacy_unconfirmed_study_cannot_report_completed[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_legacy_unconfirmed_study_cannot_report_completed[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_observation_budget_safety::test_failed_confirmation_cannot_fall_back_to_screening_success": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_rebuilds_best_after_result_commit_before_study_refresh[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_rebuilds_best_after_result_commit_before_study_refresh[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_partial_promotion_is_recovered_without_duplicate_or_lost_children[before_child]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_partial_promotion_is_recovered_without_duplicate_or_lost_children[before_parent]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_partial_promotion_is_recovered_without_duplicate_or_lost_children[before_study]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_repairs_legacy_parent_first_promotion_gap": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_can_itself_be_interrupted_during_legacy_repair": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_multirung_promotion_without_explicit_limits_does_not_repromote_losers": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_reviews_pending_batch_before_generating_more_candidates[0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_reviews_pending_batch_before_generating_more_candidates[1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_resume_does_not_replay_committed_review_or_overwrite_it_with_stale_study": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_final_review_is_deferred_when_current_grid_is_exhausted": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_coordinator_resume_reads_snapshot_before_mutable_source": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_resume_consistency::test_agent_rejects_missing_snapshot_before_changing_trial_or_study": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_empty_agent_queue_falls_back_even_when_review_fails[exception-none]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_empty_agent_queue_falls_back_even_when_review_fails[exception-successive_halving]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_empty_agent_queue_falls_back_even_when_review_fails[invalid-none]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_empty_agent_queue_falls_back_even_when_review_fails[invalid-successive_halving]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_empty_agent_queue_falls_back_even_when_review_fails[rejected_candidates-none]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_empty_agent_queue_falls_back_even_when_review_fails[rejected_candidates-successive_halving]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_resume_with_already_reviewed_exhausted_or_stale_queue[pending0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_resume_with_already_reviewed_exhausted_or_stale_queue[pending1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_resume_with_already_reviewed_exhausted_or_stale_queue[pending2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_exhausted_fallback_search_space_terminates[none]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_exhausted_fallback_search_space_terminates[successive_halving]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_valid_replenishment_keeps_agent_sampler": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_fixed_scheduler_never_invokes_llm_reviewer": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_stale_invalid_head_does_not_discard_valid_pending_candidates": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_self_referencing_fallback_uses_random": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer-nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer-inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer--inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer-True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer-None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[eer-0.1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy-nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy-inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy--inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy-True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy-None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_invalid_completed_metric_rejected_before_write[accuracy-0.1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[-inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_scheduler_fails_invalid_trial_without_retry_and_continues[0.1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_all_invalid_results_fail_study[metrics0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_all_invalid_results_fail_study[metrics1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_all_invalid_results_fail_study[metrics2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[-inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_task_adapter_and_campaign_reject_invalid_values[0.1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_legacy_invalid_best_is_not_a_completed_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_completed_shortcut_rechecks_legacy_metrics": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_legacy_invalid_results_excluded_from_best_feedback_and_promotion": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_samplers_ignore_invalid_history": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_evaluation_tool_rejects_bad_success_but_preserves_runner_error[raw0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_evaluation_tool_rejects_bad_success_but_preserves_runner_error[raw1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_evaluation_tool_rejects_bad_success_but_preserves_runner_error[raw2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_runtime_safety::test_evaluation_tool_rejects_bad_success_but_preserves_runner_error[raw3]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_hpo_study_trial_lifecycle_without_training": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_prepare_resume_reopens_running_trial_without_new_candidate": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_agent_proposal_candidates_are_validated_and_audited_as_one_strategy": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_candidate_validation_is_independent_of_conditional_field_order": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_runtime_candidate_is_rejected_after_generation_capacity_is_exhausted": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_hpo_quotas_promotion_and_strict_completion": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_successive_halving_waits_for_startup_cohort_before_promotion": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_grid_search_strategy_is_selected_by_service": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_runtime_review_updates_only_future_candidate_generation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_llm_runtime_review_cannot_change_frozen_allocation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_fixed_controller_never_applies_runtime_proposals": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_llm_planning_candidate_requires_evidence_confidence": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_applied_decision_is_attributed_only_to_affected_trials": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_study_rejects_non_finite_training_deadline": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_sampler_exhaustion_defers_later_advice_to_next_study": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_training_runs_used_includes_retries": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_record_trial_deduplicates_artifacts": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_service::test_warm_start_history_guides_new_study_sampler": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_evaluation_recovery_reuses_checkpoint_without_training_or_new_budget": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_evaluation_recovery_validates_checkpoints_before_reopening": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_resource_ceiling_blocks_retry_and_following_trials[gpu]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_resource_ceiling_blocks_retry_and_following_trials[wall]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_shared_errors_abort_before_retry_review_or_promotion[AttributeError: Can't get local object 'dataio_prep.<locals>.audio_pipeline']": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_shared_errors_abort_before_retry_review_or_promotion[ModuleNotFoundError: No module named 'speechbrain']": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_shared_errors_abort_before_retry_review_or_promotion[builtins.FileNotFoundError: [Errno 2] No such file: '/data/wav/a.wav']": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_shared_errors_abort_before_retry_review_or_promotion[PermissionError: [Errno 13] Permission denied: '/data/wav/a.wav']": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_shared_errors_abort_before_retry_review_or_promotion[CUDA error: invalid device ordinal]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_unknown_repeated_failure_matches_different_trial_paths": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_candidate_failures_do_not_block_the_search[torch.OutOfMemoryError: CUDA out of memory]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_candidate_failures_do_not_block_the_search[TimeoutError: training exceeded 10 seconds]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_candidate_failures_do_not_block_the_search[InvalidMetricError: invalid metric 'eer': NaN]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_candidate_failures_do_not_block_the_search[ValueError: invalid margin for this candidate]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_success_resets_unknown_failure_streak": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_same_error_in_different_stages_does_not_form_shared_streak": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_stop_preserves_trained_checkpoint_and_previous_success": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_resume_stays_blocked_until_explicit_reset": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_resume_recovers_system_failure_committed_before_guard": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_legacy_completed_study_is_not_invalidated_by_old_failure": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_legacy_failure_before_later_success_does_not_block_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_classifier_ignores_incidental_traceback_source_text": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_additional_shared_environment_and_contract_errors_stop_immediately[OSError: [Errno 28] No space left on device]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_additional_shared_environment_and_contract_errors_stop_immediately[RuntimeError: Cannot re-initialize CUDA in forked subprocess]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_additional_shared_environment_and_contract_errors_stop_immediately[TypeError: compute_embedding() got an unexpected keyword argument 'device']": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_additional_shared_environment_and_contract_errors_stop_immediately[missing checkpoint artifact from current training attempt]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_additional_shared_environment_and_contract_errors_stop_immediately[ValueError: numpy.dtype size changed, may indicate binary incompatibility]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_scheduler_node_failure_is_persisted_and_blocks_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_persistent_transient_retries_are_bounded_and_recover_guard_after_crash": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_wrapper_and_torchrun_rank_prefix_do_not_hide_underlying_system_error": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_non_oom_cuda_failure_cannot_repeat_through_entire_search": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_worker_wrapper_does_not_turn_oom_into_shared_connection_failure": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_hpo_system_failure_guard::test_campaign_failure_blocks_later_studies_and_older_study_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_managed_execution::test_process_batch_and_confirmation_are_budgeted_and_resumable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_uses_training_yaml_and_explicit_overrides[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_uses_training_yaml_and_explicit_overrides[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments3]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_preparation_tool_rejects_invalid_options_before_backend[arguments6]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_evaluation_tools_support_task_metrics_and_preserve_runner_fields[RunEvaluation]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_evaluation_tools_support_task_metrics_and_preserve_runner_fields[EvaluateModel]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_module_interfaces::test_inspection_tool_preserves_policy_and_scope_in_plan_json": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_stage_process_recovery::test_reused_pid_is_never_signalled": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_stage_process_recovery::test_recovery_terminates_worker_before_settling_and_is_idempotent": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_stage_process_recovery::test_uncertain_worker_exit_blocks_recovery_and_keeps_reservation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_stage_process_recovery::test_completed_result_recovers_actual_cost": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_verification_loader_reads_audio_with_spawn_workers": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_plda_config_is_rejected_before_model_loading": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_training_audio_and_labels_load_with_spawn_workers[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_training_audio_and_labels_load_with_spawn_workers[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_validation_crop_is_stable_while_training_crop_is_random": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_real_session_preparation_rebuilds_after_exclusion_protocol_changes": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_xvector_default_declares_the_executed_scoring_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_verification_spawn::test_real_ecapa_evaluation_with_local_weights_and_spawn_workers": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_version_plan11_lifecycle::test_feedback_and_decision_survive_agent_and_record_boundary": {
+      "status": "passed",
+      "report": "stable-source.xml"
+    },
+    "tests.integration.test_version_plan11_lifecycle::test_invalid_registry_marks_management_record_failed": {
+      "status": "passed",
+      "report": "stable-source.xml"
+    },
+    "tests.smoke.test_base_agent_llm::test_base_agent_llm_connectivity": {
+      "status": "skipped",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_real_sdk_recovers_transport_failure_and_keeps_json_mode": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_authentication_is_not_retried": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_json_mode_fallback_only_on_explicit_unsupported_feature": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_network_failure_does_not_restart_whole_tool_loop": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_format_retry_uses_original_evidence_and_strict_schema": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_malformed_second_response_stays_invalid": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_ambiguous_json_is_rejected[{\"x\":1,\"x\":2}]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_ambiguous_json_is_rejected[{\"x\":NaN}]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_ambiguous_json_is_rejected[{\"x\":Infinity}]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_nested_network_cause_is_recorded_without_credentials": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_deadline_is_shared_across_retries": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_valid_json_cannot_hide_corrupted_evidence_reference": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_overflowing_json_numbers_rejected": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_reliability::test_real_sdk_tool_rounds_and_json_mode_work_together": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[wrapper]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[missing]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[string_array]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[string_parameters]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[unknown_operation]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[unknown_parameter]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[protected]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[wrong_type]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[duplicate]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_data_processing_retries_shape_errors_once_with_original_context[too_many]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_coordination_bad_reply_never_escapes_as_valid_advice": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_format_correction_keeps_planning_permissions_and_handles_truncation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisor_stage_contracts::test_cross_stage_reply_gets_one_format_retry_without_changing_phase": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_text_and_block_responses_decode[{\"answer\":1}]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_text_and_block_responses_decode[```json\\n{\"answer\":1}\\n```]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_text_and_block_responses_decode[Analysis first.\\n\\n```json\\n{\"answer\":1}\\n```\\nFinal note.]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_text_and_block_responses_decode[Analysis first.\\r\\n```JSON\\r\\n{\"answer\":1}\\r\\n```]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_text_and_block_responses_decode[content4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_text_and_block_responses_decode[content5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[[]]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[null]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[explanation {\"answer\":1}]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[{\"answer\":]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[Analysis\\n```json\\n{\"answer\":1}]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[Analysis\\n```json\\n{\"answer\":1}\\n```\\n```json\\n{\"answer\":2}\\n```]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_invalid_or_incomplete_responses_are_not_repaired[Analysis\\n```python\\n{\"answer\":1}\\n```]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_failed_proposal_records_bounded_response_and_finish_reason": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_valid_block_proposal_still_passes_strict_schema_validation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_resource_deadline_is_never_swallowed_by_response_parser": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_request_failures_have_separate_diagnostics": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_advisory_response::test_shared_advisor_parser_accepts_fences_and_keeps_failure_diagnostics": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_split_excludes_both_pair_sides_with_native_paths[True-utterance]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_split_excludes_both_pair_sides_with_native_paths[False-utterance]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_split_excludes_both_pair_sides_with_native_paths[False-session]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_preparation_seed_does_not_consume_training_random_state": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_random_segment_csv_reads_metadata_without_decoding": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_training_speaker_count_is_bound_from_exclusion_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_training_only_view_accepts_full_corpus_exclusions": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_benchmark_voxceleb_split::test_preparation_cache_is_scoped_and_fingerprinted": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_communication::test_dispatch_preserves_request_correlation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_communication::test_dispatch_converts_agent_exception_to_failed_result": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_core_contracts_are_json_serializable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_agent_and_domain_contracts_keep_required_fields": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_hpo_strategy_audit_contracts_are_json_serializable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_llm_cannot_supply_strategy_proposal_audit_identity": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_trial_result_does_not_finish_parent_experiment": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_ecapa_default_search_space_stays_close_to_reference_recipe": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_other_model_and_runner_resolve_through_public_adapter_boundary": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_speaker_model_adapters_are_registered": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_contracts::test_manage_record_compacts_child_agent_results_like_hpo_top_level": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_scheduler_pairs_early_then_focuses_one_batch_and_preserves_allocation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[invented]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[same_id]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[winner_not_anchor]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[low_confidence]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[missing_evidence]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[nonpositive_threshold]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_pair_is_rejected_without_consuming_training_slots[budget_change]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_partial_pair_commit_recovers_without_duplicate_children": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_failed_arm_never_supports_region_focus": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_region_requires_broad_bounds_and_complete_evidence[narrow]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_region_requires_broad_bounds_and_complete_evidence[outside]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_region_requires_broad_bounds_and_complete_evidence[missing_pair]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_region_requires_broad_bounds_and_complete_evidence[wrong_winner]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_bad_advice_falls_back_to_the_original_tpe_and_promotion_budget": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_pair_outcome_handles_maximization_and_invalid_lineage": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_rejected_region_samples_fall_back_to_global_tpe": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_interrupted_consultation_retries_on_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_unsupported_hypothesis_never_calls_region_reviewer[-0.01]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_unsupported_hypothesis_never_calls_region_reviewer[0.0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_unsupported_hypothesis_never_calls_region_reviewer[0.0005]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_resume_repairs_child_commit_before_parent_and_index": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_global_valid_but_outside_focus_candidate_falls_back": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_cost_and_partial_focus_are_recorded_without_false_final_gain": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_pair_reservation_cannot_spend_merit_or_confirmation_allowance": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_unknown_cross_stage_phase_is_rejected": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_final_outcome_obeys_objective_and_exact_budget[min-0.2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_cross_stage::test_final_outcome_obeys_objective_and_exact_budget[max--0.2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_handoff::test_ready_data_handoff_is_selected_for_hpo": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_handoff::test_handoff_builder_keeps_stable_public_fields": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_handoff::test_non_consumable_processing_output_cannot_silently_fall_back": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_handoff::test_successful_data_processing_must_publish_handoff": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_handoff::test_failed_data_processing_blocks_downstream_training": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_handoff::test_quality_gate_explicitly_blocks_hpo": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_path_configuration::test_data_root_env_controls_default_dataset_root": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_path_configuration::test_dataset_path_env_overrides_placeholder": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_path_configuration::test_absolute_dataset_path_is_preserved": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_processing::test_generic_dataset_profile_plan_and_publish": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_manifest_quality_issue_creates_and_executes_optimization": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_complete_derived_dataset_can_be_consumed_downstream": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_requested_operation_parameters_are_validated": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_llm_cannot_enable_protected_materialization": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_other_domains_can_register_parameterized_processors": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_dataset_scan_limit_must_be_positive": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_validation_preview_profile_is_reused": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_quality_policy_rejects_unsafe_bounds": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_manifest_output_cannot_modify_source_tree": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_recursive_manifests_keep_relative_paths": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_audio_profile_detects_split_leakage_and_invalid_trials": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_debug_subset_preview_version_hashes_and_quality_gate": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_adjacent_audio_filters_share_one_duration_scan": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_execute_reuses_preview_selection": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_hash_dataset_stops_at_limit": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_hardlink_materialization_preserves_source_on_manifest_rewrite": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_processing::test_materialize_file_hardlinks_or_safely_falls_back": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_data_usage::test_manifest_errors_survive_trial_profile_and_block_gate[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_manifest_errors_survive_trial_profile_and_block_gate[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_voxceleb_identity_uses_speaker_not_video": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_internal_dev_identity_overlap_allowed_but_file_leakage_blocked": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_endpoint_lists_share_population_but_holdout_remains_disjoint": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_explicit_split_roles_support_custom_manifest_names": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_voxceleb_profile_ignores_augmentation_assets": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_duration_warning_does_not_automatically_delete_speech": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_mixed_corpus_protection_covers_planning_and_direct_execution": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_training_only_view_can_be_processed": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_workflow_binds_protocol_before_advice_and_enforces_gate[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_workflow_binds_protocol_before_advice_and_enforces_gate[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_data_usage::test_session_split_preserves_identities_and_isolates_recordings": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_evaluate_checkpoint_script::test_evaluate_checkpoint_passes_explicit_inputs_and_writes_report": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_evaluate_checkpoint_script::test_evaluate_checkpoint_accepts_embedding_model_file": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_evaluate_checkpoint_script::test_evaluate_checkpoint_rejects_directory_without_model_file": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_confirmation_preserves_explicit_search_and_total_cap": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_confirmation_incomplete_never_ranks": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_invalid_execution_options_fail_before_training[options0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_invalid_execution_options_fail_before_training[options1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_invalid_execution_options_fail_before_training[options2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_invalid_execution_options_fail_before_training[options3]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_invalid_execution_options_fail_before_training[options4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_invalid_execution_options_fail_before_training[options5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_resume_inherits_but_rejects_changed_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_continuation_rejects_changed_semantics_before_execution": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_execution_protocol::test_comparison_arms_share_budget_and_isolate_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_admin::test_filtered_archive_and_clear_keep_indexes_consistent": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_tracker::test_custom_store_never_falls_back_to_global_records": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_tracker::test_experiment_lifecycle_and_scoped_best_query": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_tracker::test_best_metric_split_is_queryable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_tracker::test_config_snapshot_survives_custom_execution_and_source_changes[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_tracker::test_config_snapshot_survives_custom_execution_and_source_changes[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_tracker::test_missing_snapshot_fails_instead_of_using_mutable_source": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_versioning::test_tracker_writes_model_aware_version_manifest": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_experiment_versioning::test_catalog_pointer_tracks_terminal_status": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_generate_hpo_validation::test_generates_balanced_deterministic_speaker_disjoint_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_generate_hpo_validation::test_rejects_missing_test_audio_before_writing": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_generate_hpo_validation::test_refuses_to_overwrite_frozen_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_evaluation_can_use_any_idle_gpu_in_explicit_pool": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_evaluation_rebinding_preserves_training_plan_and_hash_checks": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_rebinding_is_never_allowed_in_training_mode": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_mismatching_evaluation_binding_rejected": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_queue_wait_has_deadline_and_durable_reason": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_global_test_barrier_is_kept": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_heldout_queue::test_committed_heldout_failures_are_not_selectively_rerun": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_analysis_tools::test_hpo_analysis_tools_are_read_only_and_see_pending_candidates": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_analysis_tools::test_agent_history_tool_requires_exact_frozen_confirmation_signature": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_analysis_tools::test_agent_history_tool_rejects_unbound_comparison": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_partial_advisor_failure_marks_controller_degraded[parse]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_partial_advisor_failure_marks_controller_degraded[request]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_fixed_baseline_does_not_require_advisor": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_five_groups_have_explicit_budgets": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change3]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_config_rejected[change6]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_numeric_budget_and_domain[nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_numeric_budget_and_domain[inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_invalid_numeric_budget_and_domain[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_ddp_profiles_have_valid_global_batch_contracts[five_group_ecapa_vox1_3gpu.json-3-72-4000]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_ddp_profiles_have_valid_global_batch_contracts[five_group_ecapa_vox1_8gpu.json-8-128-2250]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_global_ddp_rejects_unshardable_batch_search_values": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_dry_run_is_dependency_light_and_does_not_write": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_summary_excludes_failed_and_nonfinite_results": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_proposal_constraints_lock_resource_and_tool_boundaries": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_pairs_reject_bad_labels_and_path_traversal": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_snapshot_keeps_hyperpyyaml_tags_and_changes_seed": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_output_lock_rejects_concurrent_writer": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_parallel_gpu_locks_reserve_devices_and_exclude_serial_runs": {
+      "status": "skipped",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_parallel_gpu_lock_requires_full_uuid[]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_parallel_gpu_lock_requires_full_uuid[0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_parallel_gpu_lock_requires_full_uuid[GPU-invalid]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_parallel_gpu_lock_requires_full_uuid[0,1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_parallel_gpu_assignment_is_frozen": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_isolated_snapshot_rebinds_hardcoded_artifact_paths": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_augmentation_is_prepared_once_outside_dataset": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_local_augmentation_audio_is_reused_read_only": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_real_configs_are_compatible_but_missing_audio_fails_early": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_torn_journal_append_is_preserved_and_repaired": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_valid_journal_entry_without_newline_is_not_lost": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_executor_binds_current_checkpoint_and_validation_protocol[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_executor_binds_current_checkpoint_and_validation_protocol[False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_paired_efficiency_requires_complete_cost_and_confirmation[None]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_paired_efficiency_requires_complete_cost_and_confirmation[gpu_hours]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_paired_efficiency_requires_complete_cost_and_confirmation[wall_seconds]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_paired_efficiency_requires_complete_cost_and_confirmation[incomplete]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_paired_efficiency_requires_complete_cost_and_confirmation[degraded]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_paired_efficiency_requires_complete_cost_and_confirmation[zero]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_policy_keeps_are_not_reported_as_llm_successes": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_hypothesis_benchmark_configuration_preserves_baseline_allocation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_cross_stage_configuration_preserves_baseline_run_allocation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_benchmark::test_cross_stage_advice_is_counted_separately_from_policy_keeps": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_menu_preserves_cross_stage_slots_and_confirmation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_campaign_response_is_bounded_by_menu_and_observed_evidence[unknown_plan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_campaign_response_is_bounded_by_menu_and_observed_evidence[early_stop]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_campaign_response_is_bounded_by_menu_and_observed_evidence[invented_study]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_campaign_response_is_bounded_by_menu_and_observed_evidence[budget_override]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_global_option_restores_original_domain": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_complete_bracket_cost_screens_unaffordable_plan": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_campaign_control::test_actual_cost_feedback_uses_current_executor_fields": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_cost_consultations::test_ledger_includes_retries_checkpoints_and_filters_studies": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_cost_consultations::test_missing_ledger_does_not_silently_use_stale_projection": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_cost_consultations::test_consultation_retry_and_response_replay": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_cost_consultations::test_interruption_before_response_can_resume_and_retry_is_bounded": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_cost_consultations::test_saved_runtime_response_is_applied_once_after_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_effects::test_decision_effect_uses_only_predecision_same_fidelity_references": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_effects::test_decision_effect_does_not_invent_a_causal_control": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_feedback_clusters_failures_and_detects_search_boundary": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_feedback_expands_log_boundaries_locally": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_feedback_uses_adaptive_generation_when_history_is_available": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_feedback_preserves_tpe_and_does_not_select_it_when_unavailable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_failed_trial_metric_is_not_counted_as_completed_feedback": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_campaign_stops_on_target_patience_and_total_cost": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_campaign_rejects_a_changed_confirmation_protocol": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_planning_policy_cannot_change_frozen_final_budget": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_feedback_campaign::test_evidence_gate_requires_same_fidelity_evidence_and_finite_confidence": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_opportunity_respects_evidence_remaining_and_active_batch": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_feedback_uses_initial_fidelity_and_log_distance": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_curve_detects_late_reversal_and_missing_values": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_paired_rank_reversal_requires_three_pairs": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_candidates_are_top_two_plus_last_and_selection_is_complete": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_concurrent_reservations_and_idempotent_settlement": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_signature_separates_protocols_and_bounded_tool_output": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_improvements::test_candidate_evaluation_failure_recovers_without_repeating_successes": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_hpo_protocol_requires_explicit_validation_inputs[runtime0-verification_config]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_hpo_protocol_requires_explicit_validation_inputs[runtime1-validation_pairs]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_hpo_protocol_rejects_test_pairs_and_incomplete_training_exclusion": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_hpo_protocol_requires_explicit_training_exclusion": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_hpo_protocol_persists_hashes_and_rejects_legacy_or_changed_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_study_creation_rejects_objective_that_conflicts_with_record": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_protocol::test_study_rejects_multiple_objectives_that_scheduler_cannot_honor": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_resource_limit_rejects_invalid[0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_resource_limit_rejects_invalid[-1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_resource_limit_rejects_invalid[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_resource_limit_rejects_invalid[1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_resource_limit_rejects_invalid[nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_resource_limit_rejects_invalid[inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_ddp_evaluation_cpu_counts": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_gpu_accounting_includes_training_evaluation_and_retries": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_tightest_stage_deadline_and_frozen_limits_survive_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_crash_reservation_is_not_refunded_or_charged_twice": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_ledger_cannot_be_spent_by_two_controllers": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_resource_budget::test_advisor_timeout_is_bounded_and_exhaustion_does_not_fallback": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_scheduler_resume_reopens_running_trials_without_duplicating_candidates": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_scheduler_retries_recoverable_failure_and_completes": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_scheduler_exits_when_promotion_limit_is_exhausted": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_scheduler_advisor_failure_does_not_control_execution": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_successive_halving_reviewer_runs_at_stage_boundaries": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_successive_halving_batches_allow_feedback_to_change_current_study": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_scheduler::test_scheduler_uses_pruner_independently_from_sampler": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_grid_search_enumerates_unique_combinations": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_grid_search_omits_inactive_conditions_regardless_of_field_order": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_agent_proposal_is_a_standalone_candidate_strategy": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_adaptive_search_clamps_all_values_to_a_revised_search_space": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_adaptive_search_moves_around_best_completed_trial": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_adaptive_search_perturbs_log_parameters_by_multiplier": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_auto_planning_selects_strategy_deterministically": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_optuna_tpe_uses_completed_history_and_returns_unique_candidates": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_tpe_does_not_mistake_repeated_optimum_for_exhausted_space": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_registry_hides_unavailable_optional_strategy": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategies::test_auto_components_combine_tpe_with_successive_halving": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_valid_structured_proposal_is_applied": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_invalid_fields_are_rejected_and_valid_fields_are_kept": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_proposal_cannot_raise_hard_training_run_limit": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_invalid_search_space_falls_back_to_base_plan": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_missing_proposal_records_base_plan_decision": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_interdependent_strategy_and_search_space_are_approved_together": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hpo_strategy_decisions::test_optimization_plan_decides_sampler_pruner_and_allocation_independently": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_low_sample_probe_replaces_candidates_and_returns_to_tpe": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_interaction_is_a_complete_three_arm_design_and_survives_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[missing_control]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[wrong_control]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[unknown_evidence]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[wrong_fidelity]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[unrelated_change]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[no_falsification]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[duplicate]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[space_change]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[too_many]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[wrong_metric]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_invalid_design_is_rejected_atomically[reused_id]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_failure_remains_inconclusive_and_consumes_probe_quota": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_no_improvement_rejects_hypothesis_without_changing_space": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_boundary_probe_requires_an_actual_endpoint": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_consultation_quota_survives_reload_and_early_evidence_does_not_prune": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_at_least_three_successful_initial_observations_required": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_maximize_objective_scores_positive_gains": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_pending_candidates_prevent_premature_hypothesis_result": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_hypothesis_probes::test_retries_reduce_capacity_for_complete_probe_design": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_rejects_malformed_responses[None]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_rejects_malformed_responses[raw1]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_rejects_malformed_responses[raw2]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_rejects_malformed_responses[raw3]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_rejects_malformed_responses[raw4]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_rejects_malformed_responses[raw5]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_optional_result_collector_does_not_mutate_backend_metrics": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runner_compatibility_accepts_single_string_capabilities": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_bad_agent_results_become_correlated_failures[returned0]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_bad_agent_results_become_correlated_failures[returned1]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_bad_agent_results_become_correlated_failures[returned2]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_generic_tasks_keep_their_own_metrics_and_units": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_interface_boundaries::test_runtime_options_and_tighter_deadline_are_shared": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_data_processing_langgraph_publishes_valid_dataset": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_data_processing_llm_advice_runs_after_profile": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_data_processing_rejects_unknown_llm_operation": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_data_processing_rejects_unknown_explicit_operation": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_orchestration_langgraph_automatically_includes_registered_agents": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_orchestration_advisor_cannot_change_decision_policy_order": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_orchestration_resume_dispatches_only_hpo_agent": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_orchestration_passes_data_processing_result_to_hpo_context": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_default_agent_search_space_does_not_include_budget_controlled_epochs": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_agent_rejects_missing_validation_protocol_before_creating_study": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_agent_rejects_epoch_search_when_budget_controls_epochs": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_best_metric_record_separates_training_and_evaluation_metrics": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_successive_halving_defaults_use_conservative_complete_bracket": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_study_learning_summary_records_next_study_guidance": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_cross_study_memory_exposes_recent_learning_for_next_planning": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_next_study_proposal_is_inherited_only_by_policy_controllers": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_strategy_prompt_is_json_only_and_compact": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_reference_profile_guides_local_ecapa_search": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_runtime_prompt_uses_compact_study_summary": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_data_processing_prompt_uses_compact_profile": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_campaign_history_keeps_valid_base_fidelity_and_deduplicates": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_langgraph_workflows::test_hpo_resource_snapshot_and_budget_analysis_are_structured": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_saves_result_and_returns_failure_exit_code[success]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_saves_result_and_returns_failure_exit_code[failed]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_resource_limits": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_accepts_tpe_and_llm_advisor_flag": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_exposes_resume_experiment_id": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_evaluation_recovery_requires_explicit_resume": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_requires_explicit_resume_to_reset_failure_guard": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_builds_single_budget_from_budget_flags": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_builds_budget_controls": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_accepts_json_budgets_and_search_space": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_rejects_non_list_budgets_json": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_passes_data_folder_to_context": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_passes_runtime_options_to_context": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_passes_optional_single_trial_ddp_options": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cli_builds_independent_sampler_pruner_controls": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_hypothesis_probe_cli_validates_controller_and_sampler": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_main_cli::test_cross_stage_cli_requires_dedicated_llm_mode": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_memory::test_memory_isolated_by_task_model_and_dataset": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_package_structure::test_public_packages_import_without_loading_optional_tool_modules": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_package_structure::test_legacy_runner_path_is_a_thin_compatibility_layer": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_package_structure::test_domain_and_infrastructure_modules_do_not_depend_on_agent_or_tool_layers": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_package_structure::test_speechbrain_is_an_external_dependency": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_package_structure::test_gpu_installation_guidance_stays_in_readme_not_requirements_files": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_progress_logging::test_progress_is_interactive_only[False-False-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_progress_logging::test_progress_is_interactive_only[False-True-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_progress_logging::test_progress_is_interactive_only[True-False-True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_progress_logging::test_progress_is_interactive_only[True-True-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_prompt_templates_define_schema_and_json_rules[hpo_strategy_proposal-required_schema_keys0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_prompt_templates_define_schema_and_json_rules[data_processing_planning_advice-required_schema_keys1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_prompt_templates_define_schema_and_json_rules[orchestration_coordination_advisor-required_schema_keys2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_render_prompt_merges_runtime_fields_without_mutating_template": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_hpo_prompt_examples_are_schema_exact_and_parseable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_hpo_prompt_strict_parser_rejects_missing_extra_and_wrong_types": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_hpo_prompt_declares_gpu_hours_as_a_hard_ceiling": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_stage_prompt_has_only_compatible_examples_and_contract[study_planning-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_stage_prompt_has_only_compatible_examples_and_contract[runtime_review-False]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_stage_prompt_has_only_compatible_examples_and_contract[runtime_review-True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_benchmark_constraints_remove_inapplicable_sampler_examples": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_prompt_templates::test_non_hpo_prompts_distinguish_pre_execution_advice_from_results": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_real_demo_framework::test_demo_config_uses_real_speechbrain_runner": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_real_demo_framework::test_real_demo_dry_run_builds_main_command": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_real_demo_framework::test_demo_readme_is_allowed_by_gitignore": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_remote_environment_check::test_major_minor_ignores_cuda_build_suffix": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_remote_environment_check::test_collect_environment_reports_mismatch_and_missing_cuda": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_runner_registry_supports_external_runtime_without_tool_changes": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_runner_registry_rejects_unknown_runner": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_runner_compatibility_rejects_unsupported_model": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_owns_log_and_checkpoint_discovery": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_rejects_invalid_training_deadlines[0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_rejects_invalid_training_deadlines[-1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_rejects_invalid_training_deadlines[nan]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_rejects_invalid_training_deadlines[inf]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_rejects_invalid_training_deadlines[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_rejects_invalid_training_deadlines[1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_terminates_training_at_deadline": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_returns_child_result_before_join": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_reports_early_child_crash_without_waiting_for_deadline": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_isolates_evaluation_in_one_shot_process": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_evaluation_cleanup_drops_recipe_cuda_references": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_evaluation_budget_timeout_terminates_worker_and_strips_override": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_device_parser_and_explicit_plan_are_deterministic": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_auto_falls_back_when_only_one_gpu_is_visible": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_rejects_invalid_explicit_devices[0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_rejects_invalid_explicit_devices[0,0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_rejects_invalid_explicit_devices[-1,1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_rejects_invalid_explicit_devices[0,x]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_rejects_invalid_explicit_devices[value4]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_training_runtime_signature_separates_ddp_from_single_gpu": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_training_runtime_signature_handles_persisted_ddp_fields": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_global_batch_is_split_without_changing_effective_batch": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_global_batch_rejects_non_divisible_value": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_speechbrain_runner_routes_optional_ddp_before_single_process_timeout": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_auto_single_gpu_fallback_keeps_timeout_guard": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_child_import_error_is_returned_instead_of_generic_exit_code[training]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_child_import_error_is_returned_instead_of_generic_exit_code[evaluation]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_nonzero_rank_retains_cause_for_launcher": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_runner_registry::test_ddp_bootstrap_failure_reads_bounded_log_tail": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_cohort_size_is_capped_and_statistics_match_topk": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_cohort_statistics_are_reused_for_repeated_utterances": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_statistics_match_original_cosine_topk_calculation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_invalid_cohort_size_is_rejected[0]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_invalid_cohort_size_is_rejected[1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_invalid_cohort_size_is_rejected[-1]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_invalid_cohort_size_is_rejected[True]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_invalid_cohort_size_is_rejected[1.5]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_invalid_cohort_size_is_rejected[2]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_degenerate_or_too_small_cohort_is_rejected": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_nonfinite_embeddings_are_rejected": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_verification_scoring_with_normalization_modes[z-norm]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_verification_scoring_with_normalization_modes[t-norm]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_score_normalization::test_verification_scoring_with_normalization_modes[s-norm]": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_voxceleb_recipes_use_project_audio_compat_layer": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_verification_audio_pipeline_is_module_level": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_verification_audio_pipeline_is_pickleable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_audio_compat_exposes_load_function": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_soundfile_fallback_loads_channel_first_tensor": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_training_audio_pipeline_guards_short_random_chunks": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_soundfile_fallback_pads_short_reads": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_voxceleb_recipes_use_project_batch_compat_layer": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_audio_compat_uses_shared_soundfile_backend": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_training_configs_store_augmentation_annotations_with_augmentation_data": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_training_configs_use_project_augmentation_prepare": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_additive_margin_training_configs_are_hpo_overridable": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_project_augmentation_prepare_writes_speechbrain_csv": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_training_reuses_valid_augmentation_annotations": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_voxceleb_recipe_entrypoints_use_package_imports": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_project_augmentation_prepare_delays_soundfile_import": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_ecapa_verification_config_disables_score_norm_by_default": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_resnet_verification_config_is_safe_and_explicit": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_hpo_evaluation_uses_explicit_score_norm_mode": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_audio_compat::test_evaluation_preparation_splits_follow_score_normalization": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_dependency::test_speechbrain_dependency_accepts_pinned_version": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_dependency::test_speechbrain_dependency_reports_missing_installation": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_dependency::test_speechbrain_dependency_rejects_unverified_version": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_dependency::test_torchaudio_compatibility_patch_restores_removed_backend_api": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_speechbrain_dependency::test_torchaudio_compatibility_patch_keeps_existing_backend_api": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_tool_definitions::test_all_tool_functions_have_docstrings": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_tool_definitions::test_tool_package_history_exports_exist": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_training_observation::test_cycle_phase_uses_actual_scheduler_steps_and_omits_nonfinite_values": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_training_observation::test_actual_selected_checkpoint_metadata_precedes_final_epoch": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_training_observation::test_legacy_checkpoint_does_not_get_an_invented_epoch": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_dependency_order_and_scalable_graph": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_invalid_dependency_graph_fails_before_advice[True]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_invalid_dependency_graph_fails_before_advice[False]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_failed_dependency_blocks_transitively_but_not_independent_agent": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_hpo_resume_uses_saved_protocol_without_reprocessing_data": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_rejects_unscoped_evidence[updates0-not_hpo_validation]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_rejects_unscoped_evidence[updates1-dataset_mismatch]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_rejects_unscoped_evidence[updates2-missing_trial_evidence]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_rejects_unscoped_evidence[updates3-missing_trial_evidence]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_rejects_unscoped_evidence[updates4-missing_or_invalid_study_id]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_rejects_unscoped_evidence[updates5-invalid_diagnostics]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_feedback_bounds_fields_and_preserves_provenance": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_workflow_feedback_reaches_advisor_and_gates_opportunities": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_advisor_failure_remains_visible_and_does_not_replace_quality_gate": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_invalid_impact_limits_rejected[kwargs0]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_invalid_impact_limits_rejected[kwargs1]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_invalid_impact_limits_rejected[kwargs2]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_invalid_impact_limits_rejected[kwargs3]": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_impact_limits_boundary_unknown_and_legacy": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_impact_rejection_prevents_execution_and_publication": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_atomic_publication_failure_preserves_previous_version": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_advisor_prompt_exposes_coverage_and_scoped_feedback": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_compact_orchestration_record_preserves_blocking_and_data_decisions": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_real_audio_filter_guard_before_materialization": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_version_plan11::test_bad_coordination_advice_does_not_prevent_deterministic_execution": {
+      "status": "passed",
+      "report": "lifecycle-final.xml"
+    },
+    "tests.unit.test_voxceleb_verification_compat::test_parse_verification_pair_accepts_variable_whitespace": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_voxceleb_verification_compat::test_parse_verification_pair_ignores_blank_lines": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_voxceleb_verification_compat::test_parse_verification_pair_reports_file_and_line_for_malformed_rows": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.unit.test_voxceleb_verification_compat::test_voxceleb_recipes_do_not_use_positional_space_split_for_verification": {
+      "status": "passed",
+      "report": "regression-final.xml"
+    },
+    "tests.integration.test_version_plan11_lifecycle::test_data_workflow_exception_does_not_leave_running_record": {
+      "status": "passed",
+      "report": "stable-source.xml"
+    }
+  }
+}

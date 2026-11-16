@@ -1,0 +1,376 @@
+"""SpeechBrain runner implementation and SpeechBrain-specific result discovery."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import math
+import multiprocessing
+from multiprocessing.connection import wait as wait_for_process_io
+from pathlib import Path
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+from agent.core.contracts import Artifact, OperationResult
+
+
+@dataclass
+class SpeechBrainRunnerAdapter:
+    runner: str = "speechbrain"
+    default_evaluation_config: Optional[str] = None
+    supported_implementations = {"speechbrain"}
+    supported_model_families = {"*"}
+
+    def run_training(self, config_path: str, overrides: Dict[str, Any]) -> Dict[str, Any]:
+        run_opts = dict(overrides.get("_run_opts") or {})
+        if run_opts.get("ddp_devices"):
+            from .speechbrain_distributed import run_distributed_training
+
+            return run_distributed_training(config_path, overrides)
+        return _run_speechbrain_training_with_timeout(config_path, overrides)
+
+
+    def run_evaluation(
+        self,
+        config_path: str,
+        model_path: Optional[str],
+        data_path: Optional[str],
+        overrides: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return _run_speechbrain_evaluation_isolated(
+            config_path=config_path,
+            model_path=model_path,
+            data_folder=data_path,
+            overrides=overrides,
+        )
+
+    def collect_training_result(
+        self,
+        raw: Dict[str, Any],
+        output_folder: Optional[Path],
+        experiment_dir: Path,
+    ) -> Dict[str, Any]:
+        result = dict(raw)
+        resolved_output = _find_output_folder(experiment_dir, output_folder)
+        train_log = resolved_output / "train_log.txt" if resolved_output else None
+        epoch_data, final_metrics = _parse_training_log(train_log) if train_log else ([], {})
+        metrics = {"valid_error_rate": result.get("valid_error_rate")}
+        metrics.update(result.get("metrics") or {})
+        metrics.update(final_metrics)
+        model_paths = _find_model_paths(resolved_output, experiment_dir)
+        from .checkpoint_selection import candidates
+        result["checkpoint_candidates"] = candidates(resolved_output / "save") if resolved_output else []
+        continuation = (raw.get("runtime") or {}).get("continuation") or {}
+        if continuation.get("enabled"):
+            rows = [*continuation.get("parent_candidates", []), *result["checkpoint_candidates"]]
+            rows = list({r["path"]: r for r in rows}.values())
+            best = sorted(rows, key=lambda r: (r.get("error_rate", float("inf")), r["epoch"]))[:2]
+            latest = max(rows, key=lambda r: r["epoch"]) if rows else None
+            result["checkpoint_candidates"] = list({r["path"]: r for r in [*best, *([latest] if latest else [])]}.values())
+        from .training_observation import selected_checkpoint_observation
+        result["selected_checkpoint"] = selected_checkpoint_observation(model_paths[0]) if model_paths else {}
+        result.update({
+            "output_folder": str(resolved_output) if resolved_output else None,
+            "metrics": metrics,
+            "model_paths": model_paths,
+            "train_log_path": str(train_log) if train_log else None,
+            "epoch_data": epoch_data,
+            "final_metrics": final_metrics,
+        })
+        return result
+
+    def normalize_training_result(self, raw: Dict[str, Any]) -> OperationResult:
+        artifacts = [
+            Artifact("checkpoint", Path(path).name, str(path))
+            for path in raw.get("model_paths") or []
+        ]
+        if (raw.get("runtime") or {}).get("checkpoint_selection") == "validation_topk":
+            artifacts = [Artifact("checkpoint_candidate", Path(r["path"]).name, r["path"])
+                         for r in raw.get("checkpoint_candidates") or []]
+        manifest = (raw.get("runtime") or {}).get("resume_manifest")
+        if manifest:
+            artifacts.append(Artifact("continuation_state", "last_complete_state", manifest))
+        if raw.get("train_log_path"):
+            artifacts.append(Artifact("log", "training_log", str(raw["train_log_path"])))
+        launcher_log = (raw.get("runtime") or {}).get("launcher_log")
+        if launcher_log:
+            artifacts.append(Artifact("log", "ddp_launcher_log", str(launcher_log)))
+        return OperationResult(
+            status=raw.get("status", "failed"),
+            stage="training",
+            metrics={"validation": raw.get("metrics") or {}},
+            artifacts=artifacts,
+            extensions={"speechbrain": {
+                "output_folder": raw.get("output_folder"),
+                "epoch_data": raw.get("epoch_data") or [],
+                "final_metrics": raw.get("final_metrics") or {},
+                "selected_checkpoint": raw.get("selected_checkpoint") or {},
+                "checkpoint_candidates": raw.get("checkpoint_candidates") or [],
+                "timeout_seconds": raw.get("timeout_seconds"),
+                "terminated_by_budget": bool(raw.get("terminated_by_budget", False)),
+                "process_exitcode": raw.get("process_exitcode"),
+                "runtime": dict(raw.get("runtime") or {}),
+            }},
+            error=raw.get("error"),
+        )
+
+    def normalize_evaluation_result(self, raw: Dict[str, Any]) -> OperationResult:
+        artifacts = []
+        for artifact_type, key, name in (
+            ("log", "evaluation_log_path", "evaluation_log"),
+            ("predictions", "scores_path", "scores"),
+        ):
+            if raw.get(key):
+                artifacts.append(Artifact(artifact_type, name, str(raw[key])))
+        return OperationResult(
+            status=raw.get("status", "failed"),
+            stage="evaluation",
+            metrics={"test": raw.get("metrics") or {}},
+            artifacts=artifacts,
+            extensions={"speechbrain": {
+                "output_folder": raw.get("output_folder"),
+                "timeout_seconds": raw.get("timeout_seconds"),
+                "terminated_by_budget": bool(raw.get("terminated_by_budget", False)),
+                "process_exitcode": raw.get("process_exitcode"),
+                "runtime": dict(raw.get("runtime") or {}),
+            }},
+            error=raw.get("error"),
+        )
+
+
+def _run_speechbrain_training_with_timeout(
+    config_path: str, overrides: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Run the non-DDP backend with the same budget guard for all callers."""
+    from .speechbrain_backend import run_training
+
+    timeout = overrides.get("_hpo_max_duration_seconds")
+    if timeout is None:
+        return run_training(config_path, overrides)
+    return _run_isolated_stage(
+        _run_speechbrain_training_process,
+        (config_path, overrides),
+        timeout=timeout,
+        stage="training",
+    )
+
+
+def _stop_process(process: Any, grace_seconds: float = 5.0) -> None:
+    """Reap a worker, escalating to kill when termination is ignored."""
+    if process.is_alive():
+        process.terminate()
+        process.join(grace_seconds)
+        if process.is_alive() and hasattr(process, "kill"):
+            process.kill()
+            process.join(5.0)
+
+
+def _run_isolated_stage(
+    target, args: tuple, *, timeout: Optional[float], stage: str
+) -> Dict[str, Any]:
+    """Share spawn, result delivery, timeout and cleanup across both stages."""
+    if timeout is not None and (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        raise ValueError("_hpo_max_duration_seconds must be a finite positive number")
+    context = multiprocessing.get_context("spawn")
+    receive_connection, send_connection = context.Pipe(duplex=False)
+    process = context.Process(target=target, args=(send_connection, *args))
+    result = None
+    timed_out = False
+    try:
+        process.start()
+        send_connection.close()
+        ready = wait_for_process_io(
+            [receive_connection, process.sentinel], timeout
+        )
+        timed_out = not ready
+        if ready:
+            # Drain the pipe even when process exit and result delivery race.
+            if receive_connection in ready or receive_connection.poll():
+                try:
+                    result = receive_connection.recv()
+                except EOFError:
+                    pass
+            process.join(30.0 if stage == "evaluation" else 10.0)
+        _stop_process(process, 10.0)
+        exitcode = getattr(process, "exitcode", None)
+        if result is not None:
+            result.setdefault("process_exitcode", exitcode)
+            return result
+        defaults = (
+            {"valid_error_rate": None}
+            if stage == "training"
+            else {
+                "eer": None, "min_dcf": None,
+                "output_folder": None, "scores_path": None,
+            }
+        )
+        return {
+            **defaults,
+            "status": "failed",
+            "error": (
+                f"TimeoutError: {stage} exceeded {timeout} seconds"
+                if timed_out else (
+                    f"{stage} process exited without returning a result "
+                    f"(exit code {exitcode})"
+                )
+            ),
+            "terminated_by_budget": timed_out,
+            "timeout_seconds": timeout,
+            "process_exitcode": exitcode,
+        }
+    finally:
+        _stop_process(process)
+        receive_connection.close()
+        send_connection.close()
+
+
+def _run_speechbrain_training_process(
+    connection: Any, config_path: str, overrides: Dict[str, Any]
+) -> None:
+    try:
+        from .speechbrain_backend import run_training
+        connection.send(run_training(config_path, overrides))
+    except Exception as exc:
+        import traceback
+        connection.send({
+            "status": "failed", "valid_error_rate": None,
+            "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        })
+    finally:
+        connection.close()
+
+
+def _run_speechbrain_evaluation_isolated(
+    config_path: str,
+    model_path: Optional[str],
+    data_folder: Optional[str],
+    overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Give evaluation CUDA tensors and process-wide log handlers a bounded lifetime."""
+    overrides = dict(overrides)
+    timeout = overrides.pop("_hpo_max_duration_seconds", None)
+    return _run_isolated_stage(
+        _run_speechbrain_evaluation_process,
+        (config_path, model_path, data_folder, overrides),
+        timeout=timeout,
+        stage="evaluation",
+    )
+
+
+def _run_speechbrain_evaluation_process(
+    connection: Any,
+    config_path: str,
+    model_path: Optional[str],
+    data_folder: Optional[str],
+    overrides: Dict[str, Any],
+) -> None:
+    try:
+        from .speechbrain_backend import run_evaluation
+        connection.send(
+            run_evaluation(
+                config_path=config_path,
+                model_path=model_path,
+                data_folder=data_folder,
+                overrides=overrides,
+            )
+        )
+    except BaseException as exc:
+        import traceback
+        connection.send(
+            {
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+                "eer": None,
+                "min_dcf": None,
+                "output_folder": None,
+                "scores_path": None,
+            }
+        )
+    finally:
+        connection.close()
+
+
+def _find_output_folder(experiment_dir: Path, requested: Optional[Path]) -> Optional[Path]:
+    candidates = [item for item in (requested, experiment_dir / "output", experiment_dir / "results") if item]
+    return next(
+        (item for item in candidates if (item / "train_log.txt").exists() or (item / "save").exists()),
+        requested,
+    )
+
+
+def _find_model_paths(output_folder: Optional[Path], experiment_dir: Path) -> List[str]:
+    candidates: List[Path] = []
+    checkpoint_scores: Dict[Path, float] = {}
+    checkpoint_dirs: List[Path] = []
+    save_dirs = [output_folder / "save"] if output_folder else []
+    save_dirs.extend([experiment_dir / "output" / "save", experiment_dir / "results" / "save"])
+    for save_dir in save_dirs:
+        if not save_dir.exists():
+            continue
+        candidates.extend(save_dir.glob("*.ckpt"))
+        candidates.extend(save_dir.glob("*.pt"))
+        for checkpoint_dir in save_dir.glob("CKPT+*"):
+            checkpoint_dirs.append(checkpoint_dir)
+            metadata = checkpoint_dir / "CKPT.yaml"
+            if not metadata.exists():
+                continue
+            try:
+                for line in metadata.read_text(encoding="utf-8").splitlines():
+                    if line.strip().startswith("ErrorRate:"):
+                        checkpoint_scores[checkpoint_dir] = float(line.split(":", 1)[1].strip())
+                        break
+            except (OSError, ValueError):
+                continue
+    for directory in (output_folder, experiment_dir):
+        if directory and directory.exists():
+            candidates.extend(directory.glob("*.ckpt"))
+            candidates.extend(directory.glob("*.pt"))
+    if checkpoint_scores:
+        return [str(min(checkpoint_scores, key=checkpoint_scores.get))]
+    if checkpoint_dirs:
+        return [str(max(checkpoint_dirs, key=lambda item: item.stat().st_mtime))]
+    unique = {item.resolve(): item for item in candidates}
+    return [str(max(unique.values(), key=lambda item: item.stat().st_mtime))] if unique else []
+
+
+def _parse_training_log(path: Path) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not path.exists():
+        return [], {}
+    pattern = re.compile(
+        r"epoch:\s*(\d+),\s*lr:\s*([\d.e+-]+)\s*-\s*"
+        r"train loss:\s*([\d.e+-]+)\s*-\s*"
+        r"valid loss:\s*([\d.e+-]+),\s*valid ErrorRate:\s*([\d.e+-]+)"
+    )
+    epochs = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = pattern.search(line)
+        if match:
+            epochs.append({
+                "epoch": int(match.group(1)),
+                "lr": float(match.group(2)),
+                "train_loss": float(match.group(3)),
+                "valid_loss": float(match.group(4)),
+                "valid_error_rate": float(match.group(5)),
+            })
+    if not epochs:
+        return [], {}
+    final = epochs[-1]
+    best = min(epochs, key=lambda item: item["valid_error_rate"])
+    return epochs, {
+        "final_epoch": final["epoch"],
+        "final_lr": final["lr"],
+        "final_train_loss": final["train_loss"],
+        "final_valid_loss": final["valid_loss"],
+        "final_valid_error_rate": final["valid_error_rate"],
+        "total_epochs": len(epochs),
+        "best_epoch": best["epoch"],
+        "best_valid_loss": best["valid_loss"],
+        "best_error_rate": best["valid_error_rate"],
+    }
+
+
+__all__ = ["SpeechBrainRunnerAdapter"]

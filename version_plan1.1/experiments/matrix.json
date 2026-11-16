@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "seeds": [11, 22, 33],
+  "train_configs_by_seed": {"11": null, "22": null, "33": null},
+  "data_folder": null,
+  "training_manifest": null,
+  "verification_config": null,
+  "validation_pairs": null,
+  "training_exclusion_pairs": null,
+  "final_test_pairs": null,
+  "max_gpu_hours_per_arm_seed": null,
+  "max_total_training_runs": 15,
+  "budgets": [
+    {"stage": "screen", "epochs": 3, "data_fraction": 1.0},
+    {"stage": "promote", "epochs": 8, "data_fraction": 1.0},
+    {"stage": "full", "epochs": 12, "data_fraction": 1.0}
+  ],
+  "search_space": {"parameters": [
+    {"name": "lr", "parameter_type": "float", "low": 0.0003, "high": 0.003, "scale": "log"},
+    {"name": "margin", "parameter_type": "float", "low": 0.15, "high": 0.3},
+    {"name": "weight_decay", "parameter_type": "float", "low": 0.0000005, "high": 0.00002, "scale": "log"}
+  ]},
+  "experiments": [
+    {"id": "E0", "name": "contracts_and_failure_replay", "hardware": "CPU", "status": "covered_by_regression"},
+    {"id": "E1", "name": "controlled_data_corruption", "hardware": "CPU", "status": "planned", "corruption_fractions": [0, 0.01, 0.05]},
+    {"id": "E2", "name": "agent_ablation", "hardware": "single_GPU", "status": "planned", "arms": ["deterministic", "data_advisor_only", "hpo_advisor_only", "both_advisors"]},
+    {"id": "E3", "name": "hpo_protocol_comparison", "hardware": "single_GPU", "status": "preview_only", "arms": ["legacy", "p0", "full"]},
+    {"id": "E4", "name": "hardware_recovery_and_throughput", "hardware": "multi_GPU", "status": "not_verified"},
+    {"id": "E5", "name": "domain_generalization", "hardware": "single_GPU", "status": "planned"}
+  ]
+}

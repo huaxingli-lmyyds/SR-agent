@@ -1,0 +1,449 @@
+"""Project entry point for the orchestration agent."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from typing import Any
+
+from agent.utils.path_tool import get_config_file, resolve_config_value_path
+
+
+def _json_object(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"invalid JSON: {exc}") from exc
+
+
+def _int_list(value: str) -> list[int]:
+    if not value.strip():
+        return []
+    try:
+        return [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "expected a comma-separated list of integers"
+        ) from exc
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="SR-agent orchestration entry point")
+    parser.add_argument("--max-iterations", type=int, default=10)
+    parser.add_argument("--data-iterations", type=int, default=6)
+    parser.add_argument("--model-name", type=str, default="GLM-4.7")
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--objective", type=str, default="Improve the primary model metric")
+    parser.add_argument(
+        "--strategy",
+        choices=[
+            "auto",
+            "random_search",
+            "grid_search",
+            "adaptive_search",
+            "tpe",
+            "agent_proposal",
+            "successive_halving",
+        ],
+        default="auto",
+    )
+    parser.add_argument(
+        "--sampler",
+        choices=[
+            "auto", "random_search", "grid_search", "adaptive_search", "tpe",
+            "agent_proposal",
+        ],
+        default=None,
+        help="Candidate sampler; independent from the fidelity pruner.",
+    )
+    parser.add_argument(
+        "--pruner",
+        choices=["auto", "none", "successive_halving"],
+        default=None,
+        help="Fidelity scheduler; use successive_halving with multiple budget rungs.",
+    )
+    parser.add_argument(
+        "--enable-llm-advisor",
+        action="store_true",
+        help="Allow LLMs to submit structured strategy/data-processing proposals.",
+    )
+    parser.add_argument("--cross-stage-probes", action="store_true",
+                        help="Use paired early promotions and one temporary TPE region (requires LLM/TPE/SH).")
+    parser.add_argument("--hypothesis-probes", action="store_true",
+                        help="Use bounded, falsifiable candidate batches between TPE batches (requires LLM/TPE).")
+    parser.add_argument(
+        "--controller-mode",
+        choices=["fixed", "rule", "llm"],
+        default=None,
+        help=(
+            "HPO policy controller: fixed never mutates the requested search, "
+            "rule uses deterministic feedback rules, and llm uses the advisor."
+        ),
+    )
+    parser.add_argument(
+        "--resume-experiment-id",
+        type=str,
+        default=None,
+        help="Resume the persisted HPO Study for an existing experiment id.",
+    )
+    parser.add_argument(
+        "--reset-failure-guard",
+        action="store_true",
+        help="After repairing a system failure, explicitly unblock a resumed HPO Study.",
+    )
+    parser.add_argument(
+        "--retry-failed-evaluations", action="store_true",
+        help="On resume, evaluate retained checkpoints of Trials whose training succeeded; do not retrain them.",
+    )
+    parser.add_argument(
+        "--hpo-experiments-dir",
+        help="HPO record directory, including the hpo/ directory of an isolated benchmark run.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        help="Root directory for this system run's manage, dp, hpo and memory records.",
+    )
+    parser.add_argument(
+        "--max-training-runs",
+        type=int,
+        default=None,
+        help="Maximum training runs per Study. Defaults to --max-iterations.",
+    )
+    parser.add_argument("--max-studies", type=int, default=1)
+    parser.add_argument("--max-total-training-runs", type=int, default=None)
+    parser.add_argument("--managed-execution", action="store_true", default=None)
+    parser.add_argument("--max-concurrent-trials", type=int, default=None)
+    parser.add_argument("--gpu-pool", default=None)
+    parser.add_argument("--gpus-per-trial", type=int, default=None)
+    parser.add_argument("--promotion-training", choices=["restart", "resume_if_compatible"], default=None)
+    parser.add_argument("--confirmation-enabled", action="store_true", default=None)
+    parser.add_argument("--confirmation-top-k", type=int, default=None)
+    parser.add_argument("--confirmation-seeds", type=int, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--decision-opportunities", action="store_true", default=None,
+                        help="Consult only when a runtime action can affect remaining candidates.")
+    parser.add_argument("--checkpoint-selection", choices=["legacy", "validation_topk"], default=None)
+    parser.add_argument("--max-gpu-hours", type=float, default=None,
+                        help="Campaign GPU-hour ceiling, including DDP, evaluation and retries.")
+    parser.add_argument("--max-wall-seconds", type=float, default=None,
+                        help="Campaign wall-clock deadline in seconds; persists across resume.")
+    parser.add_argument("--campaign-patience", type=int, default=None)
+    parser.add_argument("--campaign-min-improvement", type=float, default=0.0)
+    parser.add_argument("--target-value", type=float, default=None)
+    parser.add_argument("--initial-trial-count", type=int, default=None)
+    parser.add_argument(
+        "--promotion-limits",
+        type=_int_list,
+        default=None,
+        help="Comma-separated promotion limits for successive halving, e.g. 2,1.",
+    )
+    parser.add_argument("--min-completed-per-rung", type=int, default=1)
+    parser.add_argument("--reduction-factor", type=int, default=3)
+    parser.add_argument("--strategy-review-interval-trials", type=int, default=3)
+    parser.add_argument(
+        "--candidate-batch-size",
+        type=int,
+        default=None,
+        help="Number of new candidates generated before runtime feedback; defaults to the review interval.",
+    )
+    parser.add_argument(
+        "--sampler-config-json",
+        type=_json_object,
+        default=None,
+        help='Sampler configuration object, e.g. \'{"n_startup_trials":3,"multivariate":false}\' for TPE.',
+    )
+    parser.add_argument("--max-retries", type=int, default=1)
+    parser.add_argument(
+        "--budgets-json",
+        type=_json_object,
+        default=None,
+        help=(
+            "JSON list of Trial budgets, e.g. "
+            '\'[{"stage":"screen","epochs":3,"data_fraction":0.25}]\''
+        ),
+    )
+    parser.add_argument(
+        "--budget-stage",
+        type=str,
+        default=None,
+        help="Stage name for a single budget rung when --budgets-json is omitted.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Epochs for a single budget rung.",
+    )
+    parser.add_argument(
+        "--data-fraction",
+        type=float,
+        default=None,
+        help="Training data fraction for a single budget rung, in (0, 1].",
+    )
+    parser.add_argument(
+        "--max-duration-seconds",
+        type=float,
+        default=None,
+        help="Timeout for each training run in seconds.",
+    )
+    parser.add_argument(
+        "--search-space-json",
+        type=_json_object,
+        default=None,
+        help="Optional JSON search space object with parameters/constraints.",
+    )
+    parser.add_argument(
+        "--data-folder",
+        type=str,
+        default=None,
+        help="Dataset path; absolute paths such as /tmp/voxceleb1 are supported.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        help="Runtime device for SpeechBrain, e.g. auto, cuda, cuda:0, or cpu.",
+    )
+    parser.add_argument(
+        "--ddp-devices",
+        type=str,
+        default=None,
+        help=(
+            "Optional one-Trial DDP devices: 'auto' uses all visible GPUs when "
+            "at least two exist; otherwise use comma-separated indices such as 0,1."
+        ),
+    )
+    parser.add_argument(
+        "--distributed-backend",
+        choices=["nccl", "gloo"],
+        default="nccl",
+        help="Backend for optional one-Trial DDP.",
+    )
+    parser.add_argument(
+        "--ddp-batch-size-semantics",
+        choices=["global", "per_device"],
+        default="global",
+        help="Interpret configured/search batch_size globally or per DDP worker.",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=["fp32", "fp16", "bf16"],
+        default=None,
+        help="SpeechBrain training precision.",
+    )
+    parser.add_argument(
+        "--eval-precision",
+        choices=["fp32", "fp16", "bf16"],
+        default=None,
+        help="SpeechBrain evaluation precision.",
+    )
+    parser.add_argument(
+        "--verification-config",
+        type=str,
+        default=None,
+        help="Required HPO validation evaluation YAML; never the held-out test YAML.",
+    )
+    parser.add_argument(
+        "--validation-pairs",
+        type=str,
+        default=None,
+        help="Required independent validation-pairs file used for every HPO Trial.",
+    )
+    parser.add_argument(
+        "--training-exclusion-pairs",
+        type=str,
+        default=None,
+        help=(
+            "Optional pairs file whose speakers are excluded from training; "
+            "defaults to --validation-pairs and must cover it."
+        ),
+    )
+    parser.add_argument("--primary-metric", type=str, default="eer")
+    parser.add_argument("--metric-mode", choices=["min", "max"], default="min")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--config-path",
+        type=str,
+        default=str(get_config_file("train_ecapa_tdnn.yaml")),
+    )
+    parser.add_argument("--task-type", type=str, default="speaker_verification")
+    parser.add_argument("--model-family", type=str, default="ecapa_tdnn")
+    parser.add_argument("--implementation", type=str, default="speechbrain")
+    parser.add_argument("--runner", type=str, default="speechbrain")
+    return parser
+
+
+def build_context(args: argparse.Namespace) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "strategy": args.strategy,
+        "primary_metric": args.primary_metric,
+        "metric_mode": args.metric_mode,
+    }
+    if args.cross_stage_probes:
+        if args.hypothesis_probes:
+            raise SystemExit("select either --cross-stage-probes or --hypothesis-probes")
+        if not args.enable_llm_advisor or args.controller_mode not in {None, "llm"}:
+            raise SystemExit("--cross-stage-probes requires --enable-llm-advisor and an LLM controller")
+        if not args.resume_experiment_id and (args.sampler or args.strategy) != "tpe":
+            raise SystemExit("--cross-stage-probes requires starting with TPE")
+        context["cross_stage_probes"] = True
+    if args.hypothesis_probes:
+        if not args.enable_llm_advisor or args.controller_mode not in {None, "llm"}:
+            raise SystemExit("--hypothesis-probes requires --enable-llm-advisor and an LLM controller")
+        if not args.resume_experiment_id and (args.sampler or args.strategy) != "tpe":
+            raise SystemExit("--hypothesis-probes requires starting with --sampler tpe or --strategy tpe")
+        context["hypothesis_probes"] = True
+    if args.controller_mode is not None:
+        context["controller_mode"] = args.controller_mode
+    if args.sampler is not None:
+        context["sampler"] = args.sampler
+    if args.pruner is not None:
+        context["pruner"] = args.pruner
+    if args.resume_experiment_id is not None:
+        context["resume_experiment_id"] = args.resume_experiment_id
+    if args.reset_failure_guard:
+        if not args.resume_experiment_id:
+            raise SystemExit("--reset-failure-guard requires --resume-experiment-id")
+        context["reset_failure_guard"] = True
+    if args.retry_failed_evaluations:
+        if not args.resume_experiment_id:
+            raise SystemExit("--retry-failed-evaluations requires --resume-experiment-id")
+        context["retry_failed_evaluations"] = True
+    if args.sampler_config_json is not None:
+        if not isinstance(args.sampler_config_json, dict):
+            raise SystemExit("--sampler-config-json must be a JSON object")
+        context["sampler_config"] = args.sampler_config_json
+    if args.data_folder is not None:
+        context["data_folder"] = args.data_folder
+        context["dataset_uri"] = args.data_folder
+    if args.search_space_json is not None:
+        if not isinstance(args.search_space_json, dict):
+            raise SystemExit("--search-space-json must be a JSON object")
+        context["search_space"] = args.search_space_json
+    if args.target_value is not None:
+        context["target_value"] = args.target_value
+    runtime_options: dict[str, Any] = {}
+    from agent.hpo.execution_options import KEYS
+    for key in ("decision_opportunities", "checkpoint_selection", *KEYS):
+        if getattr(args, key, None) is not None:
+            runtime_options[key] = getattr(args, key)
+    if args.device:
+        runtime_options["device"] = args.device
+    if args.ddp_devices is not None:
+        runtime_options["ddp_devices"] = args.ddp_devices
+        runtime_options["distributed_backend"] = args.distributed_backend
+        runtime_options["batch_size_semantics"] = args.ddp_batch_size_semantics
+    if args.precision is not None:
+        runtime_options["precision"] = args.precision
+    if args.eval_precision is not None:
+        runtime_options["eval_precision"] = args.eval_precision
+    if args.verification_config is not None:
+        runtime_options["verification_config"] = args.verification_config
+    if args.validation_pairs is not None:
+        runtime_options["validation_pairs"] = args.validation_pairs
+    if args.training_exclusion_pairs is not None:
+        runtime_options["training_exclusion_pairs"] = args.training_exclusion_pairs
+    if runtime_options:
+        from agent.hpo.execution_options import normalize_options
+        context["runtime_options"] = normalize_options(runtime_options)
+
+    if args.budgets_json is not None:
+        if not isinstance(args.budgets_json, list):
+            raise SystemExit("--budgets-json must be a JSON list")
+        context["budgets"] = args.budgets_json
+    elif any(
+        value is not None
+        for value in (
+            args.budget_stage,
+            args.epochs,
+            args.data_fraction,
+            args.max_duration_seconds,
+        )
+    ):
+        budget: dict[str, Any] = {"stage": args.budget_stage or "full"}
+        if args.epochs is not None:
+            budget["epochs"] = args.epochs
+        if args.data_fraction is not None:
+            budget["data_fraction"] = args.data_fraction
+        if args.max_duration_seconds is not None:
+            budget["max_duration_seconds"] = args.max_duration_seconds
+        context["budgets"] = [budget]
+    return context
+
+
+def build_budget(args: argparse.Namespace) -> dict[str, Any]:
+    from agent.hpo.resources import positive_limit
+    for name in ("max_gpu_hours", "max_wall_seconds"):
+        try:
+            positive_limit(getattr(args, name, None), name)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+    if args.candidate_batch_size is not None and args.candidate_batch_size <= 0:
+        raise SystemExit("--candidate-batch-size must be positive")
+    budget: dict[str, Any] = {
+        "max_training_runs": args.max_training_runs or args.max_iterations,
+        "max_studies": args.max_studies,
+        "campaign_min_improvement": args.campaign_min_improvement,
+        "min_completed_per_rung": args.min_completed_per_rung,
+        "reduction_factor": args.reduction_factor,
+        "strategy_review_interval_trials": args.strategy_review_interval_trials,
+        "max_retries": args.max_retries,
+    }
+    optional_values = {
+        "max_gpu_hours": getattr(args, "max_gpu_hours", None),
+        "max_wall_seconds": getattr(args, "max_wall_seconds", None),
+        "max_total_training_runs": args.max_total_training_runs,
+        "campaign_patience": args.campaign_patience,
+        "target_value": args.target_value,
+        "initial_trial_count": args.initial_trial_count,
+        "promotion_limits": args.promotion_limits,
+        "candidate_batch_size": args.candidate_batch_size,
+    }
+    budget.update({
+        key: value for key, value in optional_values.items() if value is not None
+    })
+    return budget
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+
+    from agent.agents.orchestrator import CoordinatorAgent
+
+    if args.dry_run:
+        from agent.agents.hpo_preview import preview_plan
+        print(json.dumps(preview_plan(build_context(args), build_budget(args)), indent=2, ensure_ascii=False))
+        return
+    pipeline = CoordinatorAgent(
+        model_name=args.model_name,
+        temperature=args.temperature,
+        max_iterations=args.max_iterations,
+        data_iterations=args.data_iterations,
+        verbose=args.verbose,
+        config_path=args.config_path,
+        task_type=args.task_type,
+        model_family=args.model_family,
+        implementation=args.implementation,
+        runner=args.runner,
+        enable_llm_advisor=args.enable_llm_advisor,
+        hpo_experiments_dir=args.hpo_experiments_dir,
+        output_dir=args.output_dir,
+    )
+    result = pipeline.run(
+        objective=args.objective,
+        context=build_context(args),
+        budget=build_budget(args),
+    )
+    print(result.experiment_id)
+    if args.output_dir:
+        output = resolve_config_value_path(args.output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "result.json").write_text(
+            json.dumps(result.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    if result.status != "success":
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

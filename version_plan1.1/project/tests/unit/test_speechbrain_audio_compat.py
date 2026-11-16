@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import ast
+import pickle
+from pathlib import Path
+
+import pytest
+
+
+def test_voxceleb_recipes_use_project_audio_compat_layer() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "recipes/voxceleb/train_speaker_embeddings.py",
+        "recipes/voxceleb/speaker_verification_cosine.py",
+        "recipes/voxceleb/voxceleb_prepare.py",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "from recipes.voxceleb.audio_compat import audio_io" in source
+        assert "from speechbrain.dataio import audio_io" not in source
+
+
+def test_verification_audio_pipeline_is_module_level() -> None:
+    source = Path("recipes/voxceleb/speaker_verification_cosine.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    assert any(
+        isinstance(node, ast.FunctionDef) and node.name == "audio_pipeline"
+        for node in tree.body
+    )
+    dataio_prep = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "dataio_prep"
+    )
+    assert not any(
+        isinstance(node, ast.FunctionDef) and node.name == "audio_pipeline"
+        for node in ast.walk(dataio_prep)
+    )
+
+
+def test_verification_audio_pipeline_is_pickleable() -> None:
+    pytest.importorskip("speechbrain")
+    from recipes.voxceleb import speaker_verification_cosine
+
+    pipeline = speaker_verification_cosine.audio_pipeline
+    assert pickle.loads(pickle.dumps(pipeline)) is pipeline
+
+
+def test_audio_compat_exposes_load_function() -> None:
+    pytest.importorskip("soundfile")
+    from recipes.voxceleb.audio_compat import audio_io
+
+    assert callable(audio_io.load)
+
+def test_soundfile_fallback_loads_channel_first_tensor(tmp_path) -> None:
+    pytest.importorskip("soundfile")
+    import numpy as np
+    import soundfile as sf
+
+    from recipes.voxceleb.audio_compat import audio_io
+
+    wav_path = tmp_path / "sample.wav"
+    samples = np.linspace(-0.5, 0.5, 160, dtype="float32")
+    sf.write(wav_path, samples, 16000)
+
+    signal, sample_rate = audio_io.load(str(wav_path), frame_offset=10, num_frames=20)
+
+    assert sample_rate == 16000
+    assert tuple(signal.shape) == (1, 20)
+
+
+def test_training_audio_pipeline_guards_short_random_chunks() -> None:
+    source = Path("recipes/voxceleb/train_speaker_embeddings.py").read_text(encoding="utf-8")
+
+    assert "duration_sample - snt_len_sample" in source
+    assert "if duration_sample > snt_len_sample" in source
+    assert "random.randint(0, duration_sample - snt_len_sample)" in source
+    assert "num_frames = max(1, stop - start)" in source
+
+
+def test_soundfile_fallback_pads_short_reads(tmp_path) -> None:
+    pytest.importorskip("soundfile")
+    import numpy as np
+    import soundfile as sf
+
+    from recipes.voxceleb.audio_compat import audio_io
+
+    wav_path = tmp_path / "short.wav"
+    sf.write(wav_path, np.ones(8, dtype="float32"), 16000)
+
+    signal, sample_rate = audio_io.load(str(wav_path), frame_offset=0, num_frames=20)
+
+    assert sample_rate == 16000
+    assert tuple(signal.shape) == (1, 20)
+    assert signal[0, 8:].abs().sum().item() == 0
+
+
+def test_voxceleb_recipes_use_project_batch_compat_layer() -> None:
+    project_root = Path(__file__).parents[2]
+    train_source = (project_root / "recipes/voxceleb/train_speaker_embeddings.py").read_text(
+        encoding="utf-8"
+    )
+    verification_source = (
+        project_root / "recipes/voxceleb/speaker_verification_cosine.py"
+    ).read_text(encoding="utf-8")
+    runner_source = (project_root / "agent/runners/speechbrain_backend.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from recipes.voxceleb.batch_compat import with_padded_batch" in train_source
+    assert "from recipes.voxceleb.batch_compat import with_padded_batch" in verification_source
+    assert "train_loader_kwargs=dataloader_options" in runner_source
+    assert "valid_loader_kwargs=dataloader_options" in runner_source
+    assert "recipe.with_padded_batch" in runner_source
+    assert "train_loader_kwargs=hparams[\"dataloader_options\"]" not in runner_source
+    assert "valid_loader_kwargs=hparams[\"dataloader_options\"]" not in runner_source
+
+
+def test_audio_compat_uses_shared_soundfile_backend() -> None:
+    audio_source = Path("recipes/voxceleb/audio_compat.py").read_text(encoding="utf-8")
+    backend_source = Path("agent/runners/soundfile_audio.py").read_text(encoding="utf-8")
+
+    from agent.runners.soundfile_audio import load_audio
+    from recipes.voxceleb import audio_compat
+
+    assert audio_compat.load_audio is load_audio
+    assert "from speechbrain.dataio import audio_io" not in audio_source
+    assert "import torchaudio" not in audio_source
+    assert "def load_audio" in backend_source
+    assert "import soundfile as sf" in backend_source
+    assert "sf.read(" in backend_source
+
+
+def test_training_configs_store_augmentation_annotations_with_augmentation_data() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "configs/train_ecapa_tdnn.yaml",
+        "configs/train_resnet.yaml",
+        "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
+        "recipes/voxceleb/hparams/train_resnet.yaml",
+        "recipes/voxceleb/hparams/train_x_vectors.yaml",
+        "recipes/voxceleb/hparams/train_ecapa_tdnn_mel_spec.yaml",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "noise_annotation: !ref <data_folder_noise>/noise.csv" in source
+        assert "rir_annotation: !ref <data_folder_rir>/rir.csv" in source
+        assert "noise_annotation: !ref <save_folder>/noise.csv" not in source
+        assert "rir_annotation: !ref <save_folder>/rir.csv" not in source
+
+def test_training_configs_use_project_augmentation_prepare() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "configs/train_ecapa_tdnn.yaml",
+        "configs/train_resnet.yaml",
+        "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
+        "recipes/voxceleb/hparams/train_resnet.yaml",
+        "recipes/voxceleb/hparams/train_x_vectors.yaml",
+        "recipes/voxceleb/hparams/train_ecapa_tdnn_mel_spec.yaml",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "recipes.voxceleb.augmentation_prepare.prepare_dataset_from_URL" in source
+        assert "speechbrain.augment.preparation.prepare_dataset_from_URL" not in source
+
+
+def test_additive_margin_training_configs_are_hpo_overridable() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "configs/train_ecapa_tdnn.yaml",
+        "configs/train_resnet.yaml",
+        "recipes/voxceleb/hparams/train_ecapa_tdnn.yaml",
+        "recipes/voxceleb/hparams/train_resnet.yaml",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "margin: 0.2" in source
+        assert "margin: !ref <margin>" in source
+        assert "weight_decay: 0.000002" in source
+        assert "weight_decay: !ref <weight_decay>" in source
+
+
+def test_project_augmentation_prepare_writes_speechbrain_csv(tmp_path) -> None:
+    pytest.importorskip("soundfile")
+    import numpy as np
+    import soundfile as sf
+
+    from recipes.voxceleb.augmentation_prepare import prepare_dataset_from_URL
+
+    wav_dir = tmp_path / "noise"
+    wav_dir.mkdir()
+    sf.write(wav_dir / "sample.wav", np.ones(160, dtype="float32"), 16000)
+    csv_path = wav_dir / "noise.csv"
+
+    prepare_dataset_from_URL("unused", str(wav_dir), ext="wav", csv_file=str(csv_path))
+
+    rows = csv_path.read_text(encoding="utf-8").splitlines()
+    assert rows[0] == "ID,duration,wav,wav_format,wav_opts"
+    assert len(rows) == 2
+    assert "sample.wav" in rows[1]
+
+
+def test_training_reuses_valid_augmentation_annotations(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from agent.runners.speechbrain_backend import _prepare_augmentation_inputs
+
+    calls = []
+    annotations = {}
+    for kind in ("noise", "rir"):
+        path = tmp_path / f"{kind}.csv"
+        path.write_text(
+            "ID,duration,wav,wav_format,wav_opts\n"
+            f"{kind}-0,1.0,{kind}.wav,wav,\n",
+            encoding="utf-8",
+        )
+        annotations[kind] = str(path)
+
+    distributed = SimpleNamespace(
+        run_on_main=lambda function: calls.append(function)
+    )
+    sb = SimpleNamespace(utils=SimpleNamespace(distributed=distributed))
+    _prepare_augmentation_inputs(
+        sb,
+        {
+            "noise_annotation": annotations["noise"],
+            "rir_annotation": annotations["rir"],
+            "prepare_noise_data": lambda: None,
+            "prepare_rir_data": lambda: None,
+        },
+    )
+
+    assert calls == []
+
+def test_voxceleb_recipe_entrypoints_use_package_imports() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "recipes/voxceleb/train_speaker_embeddings.py",
+        "recipes/voxceleb/speaker_verification_cosine.py",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "from recipes.voxceleb.voxceleb_prepare import prepare_voxceleb" in source
+        assert "from voxceleb_prepare import prepare_voxceleb" not in source
+
+
+def test_project_augmentation_prepare_delays_soundfile_import() -> None:
+    source = Path("recipes/voxceleb/augmentation_prepare.py").read_text(encoding="utf-8")
+
+    assert "def _soundfile_module" in source
+    assert "import soundfile as sf" in source
+    assert "soundfile as sf\nexcept" not in source
+
+def test_ecapa_verification_config_disables_score_norm_by_default() -> None:
+    project_root = Path(__file__).parents[2]
+    for relative in (
+        "configs/verification_ecapa.yaml",
+        "recipes/voxceleb/hparams/verification_ecapa.yaml",
+    ):
+        source = (project_root / relative).read_text(encoding="utf-8")
+        assert "score_norm: none" in source
+        assert "score_norm: s-norm" not in source
+        assert "batch_size: 8" in source
+        assert "num_workers: 4" in source
+
+
+def test_resnet_verification_config_is_safe_and_explicit() -> None:
+    source = Path("configs/verification_resnet.yaml").read_text(encoding="utf-8")
+
+    assert "speechbrain.lobes.models.ResNet.ResNet" in source
+    assert "score_norm: none" in source
+    assert "batch_size: 8" in source
+    assert "num_workers: 4" in source
+
+
+def test_hpo_evaluation_uses_explicit_score_norm_mode() -> None:
+    project_root = Path(__file__).parents[2]
+    recipe_source = (project_root / "recipes/voxceleb/speaker_verification_cosine.py").read_text(
+        encoding="utf-8"
+    )
+    runner_source = (project_root / "agent/runners/speechbrain_backend.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "def score_norm_mode" in recipe_source
+    assert "if score_norm_mode():" in recipe_source
+    assert "score_norm_mode(params)" in recipe_source
+    assert "train_data = None" in recipe_source
+    assert "if norm_mode:" in recipe_source
+    assert (
+        "normalization_mode = verification_module.score_norm_mode(params)"
+        in runner_source
+    )
+    assert "splits = _evaluation_splits(normalization_mode)" in runner_source
+    assert 'splits = ["train", "dev", "test"]' not in runner_source
+    assert 'if "score_norm" in params:' not in recipe_source
+    assert 'if "score_norm" in params:' not in runner_source
+
+
+def test_evaluation_preparation_splits_follow_score_normalization() -> None:
+    from agent.runners.speechbrain_backend import (
+        _evaluation_splits,
+        _required_prep_files,
+    )
+
+    assert _evaluation_splits(None) == ["test"]
+    assert _evaluation_splits("s-norm") == ["train", "test"]
+    fast_files = _required_prep_files(["test"], "validation.txt")
+    assert "enrol.csv" in fast_files and "test.csv" in fast_files
+    assert "train.csv" not in fast_files and "dev.csv" not in fast_files

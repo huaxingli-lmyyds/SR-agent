@@ -1,0 +1,71 @@
+{
+  "original_unchanged": true,
+  "baseline_files": 251,
+  "changes": [
+    {
+      "path": "agent/agents/coordination.py",
+      "baseline_sha256": "4662651c18a5decb33fb84a199330586468f958c73610a1b8f54913768d357e1",
+      "final_sha256": "42bd850c75b96178cdc01c1f949d5b7ff8c801fd2abfefba00bdd417a4d0bb9a"
+    },
+    {
+      "path": "agent/agents/data_processing_agent.py",
+      "baseline_sha256": "006abece46859e1d6adfc0c96bc641ff4b9626a39f33fe4be8a18e52c618f47a",
+      "final_sha256": "8bd9dc9cece3f9c21104b4e2f455939660378508da419da575d0eca1fa6f0a6c"
+    },
+    {
+      "path": "agent/agents/orchestration_workflow.py",
+      "baseline_sha256": "36976a05789124b4d9e484221203e1c8a0c9328fd15e56dd53851aad7e4d3eed",
+      "final_sha256": "25494de118f5a5f58d3825d7d17c0b7ee61a37f0c56e77bdfb77b549eafec076"
+    },
+    {
+      "path": "agent/agents/orchestrator.py",
+      "baseline_sha256": "d5126f7901ed2c6bbe51a384b30cdc9428d7cbc5baf5eda080d63e17237b5151",
+      "final_sha256": "5ad11a2a0ba7a94cbeb58a5fcdb0c3b42b131e3c3da2b639f40501d261631181"
+    },
+    {
+      "path": "agent/data_processing/audio.py",
+      "baseline_sha256": "19a1486862b8d67f137611fe689be452bf6497b5d83b55c403b94c57afaccadb",
+      "final_sha256": "7e641e631a1c300ff18d2ec69924f82a836e2a6c5d578b3518cf2969c98ef0f0"
+    },
+    {
+      "path": "agent/data_processing/contracts.py",
+      "baseline_sha256": "fbcaa7b531d2669799be48ff1f3cc70653f93761b45902c1a40ad5895efe9689",
+      "final_sha256": "3cbfbdc48d0f379c7489614682b5a85bde9d04043633225c09b138918aa19854"
+    },
+    {
+      "path": "agent/data_processing/feedback.py",
+      "baseline_sha256": null,
+      "final_sha256": "0f414683b04c2a97e68297d2711d1c11bb357fdfa813f166cfc508cf64bb35d5"
+    },
+    {
+      "path": "agent/data_processing/impact.py",
+      "baseline_sha256": null,
+      "final_sha256": "4fb261f3a23c97d01135abd79586e144d1b8e7813217d65771260ca427e1702d"
+    },
+    {
+      "path": "agent/data_processing/service.py",
+      "baseline_sha256": "9ca20d61a5cf4d355b9914b170b32e1bb79fe291387fef73900127e051fd5398",
+      "final_sha256": "2d8b235ccdec66850dc24c5e20e9d2681b254f48d2c58e767c9e75ba92468ee5"
+    },
+    {
+      "path": "agent/data_processing/workflow.py",
+      "baseline_sha256": "7483054cd24a7ebfb1408ce40d5c45efce468a4f0ce4cf4ba5656ee8fca116ca",
+      "final_sha256": "52879a9c9e12db791134e5cc3b0a433a49b6e3e7f6353fd58874ef405731caa5"
+    },
+    {
+      "path": "agent/prompt/data_processing_planning_advice.json",
+      "baseline_sha256": "cd1c1bf27ddf4dccb1bb987682fba4f24bb644f782b04c365aa4666dc429953d",
+      "final_sha256": "46262ce023c4631a1b5c4351d7d8cf1e146cfdbf806940a4018601f324f4775e"
+    },
+    {
+      "path": "tests/integration/test_version_plan11_lifecycle.py",
+      "baseline_sha256": null,
+      "final_sha256": "e64b32e721006b8bf73a0779364bc8569daaf9cdc6ee2c2cae5ffdfdb2ce20d8"
+    },
+    {
+      "path": "tests/unit/test_version_plan11.py",
+      "baseline_sha256": null,
+      "final_sha256": "a42c84f783ab2bd9858a2abd097bb5a7de1c373555e977fe745dd92c49e93dfd"
+    }
+  ]
+}

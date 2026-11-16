@@ -1,0 +1,275 @@
+import pytest
+
+from main import build_arg_parser, build_budget, build_context
+
+
+def parse_args(*args):
+    return build_arg_parser().parse_args(list(args))
+
+
+@pytest.mark.parametrize("status", ["success", "failed"])
+def test_cli_saves_result_and_returns_failure_exit_code(tmp_path, monkeypatch, status):
+    import json
+    import sys
+    from types import SimpleNamespace
+    import main
+
+    captured = {}
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run=lambda **_: SimpleNamespace(
+            status=status, experiment_id="test_run", to_dict=lambda: {"status": status},
+        ))
+    monkeypatch.setattr("agent.agents.orchestrator.CoordinatorAgent", create)
+    monkeypatch.setattr(sys, "argv", ["main.py", "--output-dir", str(tmp_path)])
+    if status == "failed":
+        with pytest.raises(SystemExit) as error:
+            main.main()
+        assert error.value.code == 1
+    else:
+        main.main()
+    assert captured["output_dir"] == str(tmp_path)
+    assert json.loads((tmp_path / "result.json").read_text())["status"] == status
+
+
+def test_cli_resource_limits():
+    budget = build_budget(parse_args("--max-gpu-hours", "48", "--max-wall-seconds", "86400"))
+    assert budget["max_gpu_hours"] == 48
+    assert budget["max_wall_seconds"] == 86400
+    for flag in ("--max-gpu-hours", "--max-wall-seconds"):
+        for value in ("0", "-1", "nan", "inf"):
+            with pytest.raises(SystemExit, match="finite positive"):
+                build_budget(parse_args(flag, value))
+
+
+def test_cli_accepts_tpe_and_llm_advisor_flag() -> None:
+    args = parse_args("--strategy", "tpe", "--enable-llm-advisor")
+
+    assert args.strategy == "tpe"
+    assert args.enable_llm_advisor is True
+
+
+def test_cli_exposes_resume_experiment_id() -> None:
+    args = parse_args("--resume-experiment-id", "hpo_abc123")
+
+    assert build_context(args)["resume_experiment_id"] == "hpo_abc123"
+
+
+def test_evaluation_recovery_requires_explicit_resume():
+    with pytest.raises(SystemExit, match="requires --resume-experiment-id"):
+        build_context(parse_args("--retry-failed-evaluations"))
+    context = build_context(parse_args(
+        "--resume-experiment-id", "hpo_abc123", "--retry-failed-evaluations",
+    ))
+    assert context["retry_failed_evaluations"] is True
+    assert parse_args("--hpo-experiments-dir", "/tmp/recovered/hpo").hpo_experiments_dir == "/tmp/recovered/hpo"
+
+
+def test_cli_requires_explicit_resume_to_reset_failure_guard() -> None:
+    with pytest.raises(SystemExit, match="requires --resume-experiment-id"):
+        build_context(parse_args("--reset-failure-guard"))
+    context = build_context(parse_args(
+        "--resume-experiment-id", "hpo_abc123", "--reset-failure-guard",
+    ))
+    assert context["reset_failure_guard"] is True
+
+
+def test_cli_builds_single_budget_from_budget_flags() -> None:
+    args = parse_args(
+        "--strategy",
+        "random_search",
+        "--epochs",
+        "3",
+        "--data-fraction",
+        "0.25",
+        "--max-duration-seconds",
+        "1800",
+    )
+
+    context = build_context(args)
+
+    assert context["strategy"] == "random_search"
+    assert context["budgets"] == [
+        {
+            "stage": "full",
+            "epochs": 3,
+            "data_fraction": 0.25,
+            "max_duration_seconds": 1800.0,
+        }
+    ]
+
+
+def test_cli_builds_budget_controls() -> None:
+    args = parse_args(
+        "--max-iterations",
+        "4",
+        "--max-training-runs",
+        "3",
+        "--max-studies",
+        "2",
+        "--max-total-training-runs",
+        "5",
+        "--campaign-patience",
+        "2",
+        "--campaign-min-improvement",
+        "0.01",
+        "--target-value",
+        "2.5",
+        "--initial-trial-count",
+        "2",
+        "--promotion-limits",
+        "2,1",
+        "--min-completed-per-rung",
+        "2",
+        "--strategy-review-interval-trials",
+        "4",
+        "--candidate-batch-size",
+        "2",
+        "--sampler-config-json",
+        '{"n_startup_trials":3,"multivariate":false}',
+        "--max-retries",
+        "2",
+    )
+
+    budget = build_budget(args)
+    context = build_context(args)
+
+    assert budget["max_training_runs"] == 3
+    assert budget["max_studies"] == 2
+    assert budget["max_total_training_runs"] == 5
+    assert budget["campaign_patience"] == 2
+    assert budget["campaign_min_improvement"] == 0.01
+    assert budget["target_value"] == 2.5
+    assert budget["initial_trial_count"] == 2
+    assert budget["promotion_limits"] == [2, 1]
+    assert budget["min_completed_per_rung"] == 2
+    assert budget["strategy_review_interval_trials"] == 4
+    assert budget["candidate_batch_size"] == 2
+    assert budget["max_retries"] == 2
+    assert context["target_value"] == 2.5
+    assert context["sampler_config"] == {
+        "n_startup_trials": 3,
+        "multivariate": False,
+    }
+
+
+def test_cli_accepts_json_budgets_and_search_space() -> None:
+    args = parse_args(
+        "--budgets-json",
+        '[{"stage":"screen","epochs":3,"data_fraction":0.25}]',
+        "--search-space-json",
+        '{"parameters":[{"name":"lr","parameter_type":"float","low":1e-5,"high":1e-3,"scale":"log"}]}',
+    )
+
+    context = build_context(args)
+
+    assert context["budgets"][0]["stage"] == "screen"
+    assert context["budgets"][0]["epochs"] == 3
+    assert context["search_space"]["parameters"][0]["name"] == "lr"
+
+
+def test_cli_rejects_non_list_budgets_json() -> None:
+    args = parse_args("--budgets-json", '{"stage":"bad"}')
+
+    with pytest.raises(SystemExit, match="--budgets-json must be a JSON list"):
+        build_context(args)
+
+def test_cli_passes_data_folder_to_context() -> None:
+    args = parse_args("--data-folder", "/tmp/voxceleb1")
+
+    context = build_context(args)
+
+    assert context["data_folder"] == "/tmp/voxceleb1"
+    assert context["dataset_uri"] == "/tmp/voxceleb1"
+
+def test_cli_passes_runtime_options_to_context() -> None:
+    args = parse_args(
+        "--device",
+        "cuda:0",
+        "--precision",
+        "fp32",
+        "--eval-precision",
+        "fp32",
+        "--verification-config",
+        "validation.yaml",
+        "--validation-pairs",
+        "validation_pairs.txt",
+        "--training-exclusion-pairs",
+        "all_exclusions.txt",
+    )
+
+    context = build_context(args)
+
+    assert context["runtime_options"] == {
+        "device": "cuda:0",
+        "precision": "fp32",
+        "eval_precision": "fp32",
+        "verification_config": "validation.yaml",
+        "validation_pairs": "validation_pairs.txt",
+        "training_exclusion_pairs": "all_exclusions.txt",
+    }
+
+
+def test_cli_passes_optional_single_trial_ddp_options() -> None:
+    args = parse_args(
+        "--device",
+        "cuda:1",
+        "--ddp-devices",
+        "1,3",
+        "--distributed-backend",
+        "nccl",
+        "--ddp-batch-size-semantics",
+        "global",
+    )
+
+    runtime = build_context(args)["runtime_options"]
+
+    assert runtime["device"] == "cuda:1"
+    assert runtime["ddp_devices"] == "1,3"
+    assert runtime["distributed_backend"] == "nccl"
+    assert runtime["batch_size_semantics"] == "global"
+
+
+def test_cli_builds_independent_sampler_pruner_controls() -> None:
+    args = parse_args(
+        "--strategy", "auto",
+        "--sampler", "tpe",
+        "--pruner", "successive_halving",
+        "--reduction-factor", "4",
+    )
+
+    context = build_context(args)
+    budget = build_budget(args)
+
+    assert context["sampler"] == "tpe"
+    assert context["pruner"] == "successive_halving"
+    assert budget["reduction_factor"] == 4
+
+
+def test_hypothesis_probe_cli_validates_controller_and_sampler():
+    with pytest.raises(SystemExit, match="enable-llm-advisor"):
+        build_context(parse_args("--hypothesis-probes", "--strategy", "tpe"))
+    with pytest.raises(SystemExit, match="starting with"):
+        build_context(parse_args("--hypothesis-probes", "--enable-llm-advisor"))
+    args = parse_args(
+        "--hypothesis-probes", "--enable-llm-advisor", "--strategy", "tpe"
+    )
+    assert build_context(args)["hypothesis_probes"] is True
+
+
+def test_cross_stage_cli_requires_dedicated_llm_mode():
+    with pytest.raises(SystemExit, match="either"):
+        build_context(parse_args("--cross-stage-probes", "--hypothesis-probes"))
+    with pytest.raises(SystemExit, match="enable-llm-advisor"):
+        build_context(parse_args("--cross-stage-probes"))
+    context = build_context(
+        parse_args(
+            "--cross-stage-probes",
+            "--enable-llm-advisor",
+            "--strategy",
+            "tpe",
+            "--pruner",
+            "successive_halving",
+        )
+    )
+    assert context["cross_stage_probes"] is True

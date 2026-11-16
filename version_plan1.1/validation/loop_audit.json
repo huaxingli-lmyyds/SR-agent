@@ -1,0 +1,12 @@
+{
+  "evidence_tests": {
+    "feedback_to_advisor": "tests.unit.test_version_plan11::test_workflow_feedback_reaches_advisor_and_gates_opportunities",
+    "agent_record_boundary": "tests.integration.test_version_plan11_lifecycle::test_feedback_and_decision_survive_agent_and_record_boundary",
+    "impact_blocks_real_audio": "tests.unit.test_version_plan11::test_real_audio_filter_guard_before_materialization",
+    "publication_failure": "tests.unit.test_version_plan11::test_atomic_publication_failure_preserves_previous_version",
+    "dependency_failure": "tests.unit.test_version_plan11::test_failed_dependency_blocks_transitively_but_not_independent_agent"
+  },
+  "quality_loop": "implemented_and_tested",
+  "automatic_performance_loop": "not_implemented",
+  "data_stage_resume": "not_implemented"
+}

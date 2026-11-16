@@ -1,0 +1,834 @@
+--- a/agent/agents/coordination.py
++++ b/agent/agents/coordination.py
+@@ -27,12 +27,14 @@
+     actions: Sequence[str]
+     factory: AgentFactory = field(repr=False, compare=False)
+     description: str = ""
++    requires: Sequence[str] = ()
+ 
+     def to_dict(self) -> Dict[str, Any]:
+         return {
+             "agent_type": self.agent_type,
+             "actions": list(self.actions),
+             "description": self.description,
++            "requires": list(self.requires),
+         }
+ 
+ 
+@@ -47,6 +49,10 @@
+             raise ValueError("agent_type is required")
+         if not registration.actions:
+             raise ValueError(f"agent '{registration.agent_type}' must expose at least one action")
++        if isinstance(registration.requires, str) or any(
++            not isinstance(name, str) or not name for name in registration.requires
++        ):
++            raise ValueError("requires must be a sequence of nonempty agent names")
+         self._registrations[registration.agent_type] = registration
+ 
+     def get(self, agent_type: str) -> AgentRegistration:
+@@ -70,6 +76,26 @@
+             self._registrations[key].to_dict()
+             for key in sorted(self._registrations)
+         ]
++
++    def ordered(self, preferred: Sequence[str] = ()) -> List[str]:
++        """Stable topological order, validated before any agent executes."""
++        pending = list(dict.fromkeys([
++            *[name for name in preferred if name in self._registrations],
++            *sorted(self._registrations),
++        ]))
++        for name in pending:
++            missing = set(self.get(name).requires) - set(self._registrations)
++            if missing:
++                raise ValueError(f"agent '{name}' has missing dependencies: {sorted(missing)}")
++        ordered: List[str] = []
++        while pending:
++            ready = next((name for name in pending
++                          if set(self.get(name).requires) <= set(ordered)), None)
++            if ready is None:
++                raise ValueError(f"cyclic agent dependencies: {pending}")
++            ordered.append(ready)
++            pending.remove(ready)
++        return ordered
+ 
+ 
+ @dataclass
+--- a/agent/agents/data_processing_agent.py
++++ b/agent/agents/data_processing_agent.py
+@@ -9,6 +9,7 @@
+ from agent.agents.base_agent import LangGraphAgent
+ from agent.agents.communication import AgentTaskRequest, AgentTaskResult
+ from agent.data_processing.handoff import build_data_handoff
++from agent.data_processing.feedback import normalize_feedback
+ from agent.data_processing.registry import PROCESSORS
+ from agent.data_processing.workflow import DataProcessingWorkflow
+ from agent.memory import EpisodeMemory, MemoryScope, MemoryService
+@@ -129,6 +130,7 @@
+             or processing_config.get("quality_policy")
+             or {}
+         )
++        feedback = normalize_feedback(request.context.get("hpo_feedback"), data_folder)
+         self.tracker.update_data_processing_experiment(
+             str(experiment_id),
+             status="running",
+@@ -136,27 +138,38 @@
+                 "data_processing": {
+                     "objective": request.objective,
+                     "workflow": "langgraph",
+-                    "hpo_feedback": request.context.get("hpo_feedback"),
++                    "hpo_feedback": feedback,
+                     "requested_operations": requested_operations,
+                     "input_dataset_uri": data_folder,
+                 }
+             },
+         )
+-        state = workflow.run(
+-            {
+-                "dataset_uri": data_folder,
+-                "dataset_type": request.context.get("dataset_type", "auto"),
+-                "task_type": self.task_type,
+-                "target_goal": request.context.get("target_goal")
+-                or request.objective,
+-                "output_path": str(version_path),
+-                "requested_operations": requested_operations,
+-                "quality_policy": quality_policy,
+-                "training_exclusion_pairs": (
+-                    request.context.get("runtime_options") or {}
+-                ).get("training_exclusion_pairs"),
+-            }
+-        )
++        try:
++            state = workflow.run(
++                {
++                    "dataset_uri": data_folder,
++                    "dataset_type": request.context.get("dataset_type", "auto"),
++                    "task_type": self.task_type,
++                    "target_goal": request.context.get("target_goal")
++                    or request.objective,
++                    "output_path": str(version_path),
++                    "requested_operations": requested_operations,
++                    "quality_policy": quality_policy,
++                    "hpo_feedback": request.context.get("hpo_feedback"),
++                    "consultation_mode": context_processing.get(
++                        "consultation_mode", processing_config.get("consultation_mode", "always")),
++                    "training_exclusion_pairs": (
++                        request.context.get("runtime_options") or {}
++                    ).get("training_exclusion_pairs"),
++                }
++            )
++        except Exception as exc:
++            self.tracker.update_data_processing_experiment(
++                str(experiment_id), status="failed",
++                duration=(datetime.now() - started_at).total_seconds(),
++                error=f"{type(exc).__name__}: {exc}",
++            )
++            raise
+         if state.get("status") != "success":
+             error = state.get("error") or "data processing workflow failed"
+             duration = (datetime.now() - started_at).total_seconds()
+@@ -170,6 +183,7 @@
+                         "profile": state.get("profile"),
+                         "plan": state.get("plan"),
+                         "results": state.get("results"),
++                        "decision": state.get("decision"),
+                     }
+                 },
+             )
+@@ -209,6 +223,7 @@
+                     "dataset_version_path": str(version_path),
+                     "file_hash_count": len(published.get("file_hashes") or {}),
+                     "llm_advice": advice,
++                    "decision": state.get("decision"),
+                 }
+             },
+         )
+@@ -242,7 +257,8 @@
+         )
+         return AgentTaskResult(
+             status="success",
+-            summary={"data_handoff": handoff},
++            summary={"data_handoff": handoff, "data_decision": state.get("decision"),
++                     "feedback_status": feedback["status"]},
+             metrics={"data_quality": published.get("quality_metrics") or {}},
+             artifacts=artifacts,
+             recommendations=[advice] if advice else [],
+@@ -271,6 +287,11 @@
+             "task_type": state.get("task_type"),
+             "target_goal": state.get("target_goal"),
+             "quality_metrics": profile.get("quality_metrics") or {},
++            "profile_coverage": {
++                key: ((profile.get("extensions") or {}).get("audio") or {}).get(key)
++                for key in ("probe_limit", "probe_limited", "signal_probe_count")
++            },
++            "hpo_feedback": state.get("hpo_feedback") or {"status": "absent"},
+             "distributions": profile.get("distributions") or {},
+             "issues": issues,
+             "requested_operations": state.get("requested_operations") or [],
+--- a/agent/agents/orchestration_workflow.py
++++ b/agent/agents/orchestration_workflow.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++from datetime import datetime
+ from typing import Any, Callable, Dict, List, Optional, TypedDict
+ 
+ from langgraph.graph import END, START, StateGraph
+@@ -30,11 +31,7 @@
+     """Choose registered agents deterministically; registry additions are automatic."""
+ 
+     def order(self, registry: AgentRegistry) -> List[str]:
+-        preferred = ["data_processing_agent", "hpo_agent"]
+-        available = [item["agent_type"] for item in registry.describe()]
+-        return [item for item in preferred if item in available] + [
+-            item for item in available if item not in preferred
+-        ]
++        return registry.ordered(["data_processing_agent", "hpo_agent"])
+ 
+     def order_for_context(
+         self,
+@@ -86,19 +83,23 @@
+         return graph.compile()
+ 
+     def run(self, context: Dict[str, Any], budget: Dict[str, Any]) -> OrchestrationGraphState:
++        self.registry.ordered()  # Reject invalid graphs before advice or dispatch.
+         return self.graph.invoke(
+             {
+                 "context": context,
+                 "budget": budget,
+                 "records": [],
+                 "latest_results": {},
+-            }
++            },
++            config={"recursion_limit": max(25, 2 * len(self.registry.describe()) + 5)},
+         )
+ 
+     def _plan(self, state: OrchestrationGraphState) -> Dict[str, Any]:
+         descriptions = self.registry.describe()
+         try:
+             advice = self.advisor(descriptions, state.get("context") or {}) if self.advisor else {}
++            if not isinstance(advice, dict):
++                raise ValueError("coordination advisor must return an object")
+         except Exception as exc:
+             advice = {"advice_error": f"{type(exc).__name__}: {exc}"}
+         context = state.get("context") or {}
+@@ -130,10 +131,25 @@
+         action = registration.actions[0]
+         request = self.request_factory(dict(state.get("context") or {}), dict(state.get("budget") or {}))
+         request.action = action
+-        record = self.dispatcher.dispatch(agent_type, request)
++        latest = dict(state.get("latest_results") or {})
++        dependencies = list(registration.requires)
++        # HPO owns validation of the saved data protocol when resuming a study.
++        if agent_type == "hpo_agent" and (state.get("context") or {}).get("resume_experiment_id"):
++            dependencies = [name for name in dependencies if name != "data_processing_agent"]
++        blocked = [name for name in dependencies if latest.get(name, {}).get("status") != "success"]
++        if blocked:
++            now = datetime.now().isoformat()
++            record = TaskExecutionRecord(
++                agent_type, action, request.to_dict(),
++                {"status": "failed", "request_id": request.request_id,
++                 "error": "upstream dependencies did not succeed",
++                 "summary": {"dispatch_status": "blocked", "blocked_by": blocked}},
++                now, now,
++            )
++        else:
++            record = self.dispatcher.dispatch(agent_type, request)
+         records = list(state.get("records") or [])
+         records.append(record)
+-        latest = dict(state.get("latest_results") or {})
+         latest[agent_type] = record.result
+         context = dict(state.get("context") or {})
+         context["previous_results"] = latest
+--- a/agent/agents/orchestrator.py
++++ b/agent/agents/orchestrator.py
+@@ -146,6 +146,7 @@
+                 enable_llm_advisor=self.enable_llm_advisor,
+             ),
+             "Run a model-agnostic HPO study.",
++            requires=("data_processing_agent",),
+         ))
+         return registry
+ 
+@@ -243,7 +244,15 @@
+             status="running",
+             extensions={"orchestration": {"workflow": "langgraph", "registered_agents": self.registry.describe()}},
+         )
+-        state = workflow.run(workflow_context, workflow_budget)
++        try:
++            state = workflow.run(workflow_context, workflow_budget)
++        except Exception as exc:
++            self.manage_tracker.update_orchestration_experiment(
++                self._manage_experiment_id, status="failed",
++                duration=(datetime.now() - self._run_started_at).total_seconds(),
++                error=f"{type(exc).__name__}: {exc}",
++            )
++            raise
+         records = state.get("records") or []
+         for record in records:
+             self._merge_experiment_ids(record.result.get("experiment_ids") or {})
+@@ -395,6 +404,8 @@
+     def _compact_agent_summary(agent_type: str, summary: Dict[str, Any]) -> Dict[str, Any]:
+         if not summary:
+             return {}
++        if summary.get("dispatch_status") == "blocked":
++            return {"dispatch_status": "blocked", "blocked_by": summary.get("blocked_by") or []}
+         if agent_type == "hpo_agent" or "best_trial_id" in summary:
+             campaign = summary.get("campaign") or {}
+             return {
+@@ -413,7 +424,8 @@
+                 "data_handoff": summary.get("data_handoff") or {},
+             }
+         if agent_type == "data_processing_agent":
+-            return {"data_handoff": summary.get("data_handoff") or {}}
++            return {key: summary[key] for key in ("data_handoff", "data_decision", "feedback_status")
++                    if key in summary}
+         if "dataset_version" in summary:
+             return {
+                 "dataset_version": summary.get("dataset_version") or {},
+--- a/agent/data_processing/audio.py
++++ b/agent/data_processing/audio.py
+@@ -532,6 +532,10 @@
+         return output.parent / ".preview-cache" / (
+             f"{output.name}.selection.jsonl"
+         )
++
++    def discard_preview(self, parameters: Dict[str, Any]) -> None:
++        """Release a selection when the controller rejects its impact."""
++        self._selection_path(parameters).unlink(missing_ok=True)
+ 
+     def _accept(self, path: Path, parameters: Dict[str, Any]) -> bool:
+         raise NotImplementedError
+--- a/agent/data_processing/contracts.py
++++ b/agent/data_processing/contracts.py
+@@ -66,8 +66,17 @@
+     require_valid_trials: bool = True
+     split_roles: Dict[str, str] = field(default_factory=dict)
+     hash_file_limit: int = 10000
++    max_operation_affected_fraction: Optional[float] = None
++    max_operation_output_bytes: Optional[int] = None
+ 
+     def __post_init__(self) -> None:
++        cap = self.max_operation_affected_fraction
++        if cap is not None and (isinstance(cap, bool) or not isinstance(cap, (int, float))
++                                or not 0 <= cap <= 1):
++            raise ValueError("max_operation_affected_fraction must be between 0 and 1")
++        size = self.max_operation_output_bytes
++        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size < 0):
++            raise ValueError("max_operation_output_bytes must be a nonnegative integer")
+         roles = {"train", "internal_dev", "hpo_validation", "final_test", "cohort"}
+         if not isinstance(self.split_roles, dict) or any(
+             not isinstance(name, str)
+--- /dev/null
++++ b/agent/data_processing/feedback.py
+@@ -0,0 +1,66 @@
++"""Small, scoped evidence envelopes; feedback is not an execution command."""
++
++from __future__ import annotations
++
++import math
++from pathlib import Path
++from typing import Any
++
++
++def normalize_feedback(value: Any, dataset_uri: str) -> dict[str, Any]:
++    def rejected(reason: str) -> dict[str, Any]:
++        return {"status": "rejected", "reason": reason}
++
++    if value is None or value == {}:
++        return {"status": "absent", "reason": "no_feedback"}
++    if not isinstance(value, dict):
++        return rejected("expected_object")
++    source = value.get("dataset_uri")
++    if not isinstance(source, str) or not source:
++        return rejected("missing_dataset_uri")
++    try:
++        if Path(source).resolve() != Path(dataset_uri).resolve():
++            return rejected("dataset_mismatch")
++    except (ValueError, OSError):
++        return rejected("invalid_dataset_uri")
++    if value.get("evaluation_role") != "hpo_validation":
++        return rejected("not_hpo_validation")
++    study = value.get("study_id")
++    count = value.get("trial_count")
++    if not isinstance(study, str) or not study or len(study) > 128:
++        return rejected("missing_or_invalid_study_id")
++    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
++        return rejected("missing_trial_evidence")
++    diagnostics = value.get("diagnostics", [])
++    if not isinstance(diagnostics, list) or any(not isinstance(x, str) for x in diagnostics):
++        return rejected("invalid_diagnostics")
++    # Bound individual fields, not a raw JSON string that may lose provenance.
++    evidence = {
++        "study_id": study, "dataset_uri": str(Path(source).resolve()),
++        "evaluation_role": "hpo_validation", "trial_count": count,
++        "diagnostics": [x[:240] for x in diagnostics[:5]],
++        "diagnostics_omitted": max(0, len(diagnostics) - 5),
++    }
++    metrics = value.get("metrics")
++    if isinstance(metrics, dict):
++        evidence["metrics"] = {
++            key: float(metrics[key]) for key in ("eer", "min_dcf")
++            if isinstance(metrics.get(key), (int, float))
++            and not isinstance(metrics[key], bool) and math.isfinite(metrics[key])
++        }
++    return {"status": "accepted", "reason": "scoped_validation_evidence", "evidence": evidence}
++
++
++def consultation_opportunity(state: dict[str, Any]) -> dict[str, Any]:
++    mode = state.get("consultation_mode", "always")
++    if mode not in {"always", "evidence"}:
++        raise ValueError("consultation_mode must be always or evidence")
++    profile = state.get("profile") or {}
++    issues = profile.get("issues") or []
++    actionable = sum(bool(x.get("suggested_operation")) for x in issues if isinstance(x, dict))
++    feedback = (state.get("hpo_feedback") or {}).get("status") == "accepted"
++    requested = bool(state.get("requested_operations"))
++    consult = mode == "always" or actionable > 0 or feedback or requested
++    return {"should_consult": consult, "mode": mode, "actionable_issue_count": actionable,
++            "has_validation_feedback": feedback, "has_explicit_operations": requested,
++            "reason": "evidence_available" if consult else "no_actionable_evidence"}
+--- /dev/null
++++ b/agent/data_processing/impact.py
+@@ -0,0 +1,25 @@
++"""Deterministic optional per-operation guards, before materialization."""
++
++from .contracts import OperationImpact, QualityPolicy
++
++
++def impact_rejection(impact: OperationImpact, policy: QualityPolicy) -> str | None:
++    fraction = policy.max_operation_affected_fraction
++    size = policy.max_operation_output_bytes
++    if fraction is None and size is None:
++        return None
++    if not impact.creates_new_version or impact.details.get("scan_complete") is not True:
++        return "impact_unknown_or_incomplete"
++    counts = (impact.scanned_samples, impact.affected_samples, impact.estimated_output_bytes)
++    if any(isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in counts):
++        return "invalid_impact_counts"
++    if impact.affected_samples > impact.scanned_samples:
++        return "invalid_impact_counts"
++    if fraction is not None:
++        if impact.scanned_samples == 0:
++            return "impact_sample_count_unknown"
++        if impact.affected_samples / impact.scanned_samples > fraction:
++            return "affected_fraction_exceeded"
++    if size is not None and impact.estimated_output_bytes > size:
++        return "estimated_output_bytes_exceeded"
++    return None
+--- a/agent/data_processing/service.py
++++ b/agent/data_processing/service.py
+@@ -5,6 +5,8 @@
+ import csv
+ import hashlib
+ import json
++import os
++import tempfile
+ from collections import Counter
+ from datetime import datetime
+ from pathlib import Path
+@@ -27,6 +29,7 @@
+     validate_materialization_mode,
+ )
+ from .quality import DefaultQualityGate
++from .impact import impact_rejection
+ from .scope import validate_mutation_scope
+ from .registry import PROCESSORS, PROFILERS, register_processor
+ 
+@@ -636,7 +639,17 @@
+             if callable(preview_method)
+             else OperationImpact(operation.operation)
+         )
+-        result = processor.execute(current_dataset, parameters)
++        rejection = (impact_rejection(impact, policy)
++                     if operation.operation not in AUDIT_OPERATIONS else None)
++        if rejection:
++            discard = getattr(processor, "discard_preview", None)
++            if callable(discard):
++                discard(parameters)
++        result = (DataOperationResult(
++            status="failed", operation=operation.operation,
++            error=f"impact guard blocked operation: {rejection}",
++            details={"rejection_reason": rejection},
++        ) if rejection else processor.execute(current_dataset, parameters))
+         result.impact = impact.to_dict()
+         result.impact.pop("operation", None)
+         result.parameters = {
+@@ -772,10 +785,19 @@
+         created_at=datetime.now().isoformat(),
+     )
+     output_path.parent.mkdir(parents=True, exist_ok=True)
+-    output_path.write_text(
+-        json.dumps(record.to_dict(), indent=2, ensure_ascii=False),
+-        encoding="utf-8",
+-    )
++    # Readers see either the previous complete version or the new complete version.
++    temporary = None
++    try:
++        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output_path.parent,
++                                         prefix=".dataset-", suffix=".tmp", delete=False) as stream:
++            temporary = Path(stream.name)
++            json.dump(record.to_dict(), stream, indent=2, ensure_ascii=False)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, output_path)
++    finally:
++        if temporary is not None:
++            temporary.unlink(missing_ok=True)
+     return record
+ 
+ 
+--- a/agent/data_processing/workflow.py
++++ b/agent/data_processing/workflow.py
+@@ -8,6 +8,7 @@
+ from langgraph.graph import END, START, StateGraph
+ 
+ from .contracts import QualityPolicy
++from .feedback import consultation_opportunity, normalize_feedback
+ from .scope import bind_evaluation_scope
+ from .service import (
+     build_processing_plan,
+@@ -31,6 +32,9 @@
+     quality_policy: Dict[str, Any]
+     profile: Dict[str, Any]
+     advice: Dict[str, Any]
++    hpo_feedback: Dict[str, Any]
++    consultation_mode: str
++    decision: Dict[str, Any]
+     plan: Dict[str, Any]
+     results: list[Dict[str, Any]]
+     published_version: Dict[str, Any]
+@@ -108,6 +112,7 @@
+         return graph.compile()
+ 
+     def run(self, state: DataProcessingGraphState) -> DataProcessingGraphState:
++        consultation_opportunity(state)  # Validate configuration before processing.
+         return self.graph.invoke(state)
+ 
+     def _inspect(self, state: DataProcessingGraphState) -> Dict[str, Any]:
+@@ -121,16 +126,23 @@
+         )
+         bind_evaluation_scope(self._dataset, state.get("training_exclusion_pairs"))
+         self._profile = profile_dataset(self._dataset, self._policy)
+-        return {"profile": self._profile.to_dict()}
++        return {"profile": self._profile.to_dict(),
++                "hpo_feedback": normalize_feedback(state.get("hpo_feedback"), state["dataset_uri"])}
+ 
+     def _advise(self, state: DataProcessingGraphState) -> Dict[str, Any]:
++        opportunity = consultation_opportunity(state)
+         if self.strategy_advisor is None:
+-            return {"advice": {}}
++            return {"advice": {}, "decision": {**opportunity, "status": "disabled"}}
++        if not opportunity["should_consult"]:
++            return {"advice": {}, "decision": {**opportunity, "status": "skipped"}}
+         try:
+             advice = self.strategy_advisor(dict(state))
++            if not isinstance(advice, dict):
++                raise ValueError("data advisor must return an object")
+         except Exception as exc:
+             advice = {"advice_error": f"{type(exc).__name__}: {exc}"}
+-        return {"advice": dict(advice or {})}
++        return {"advice": dict(advice or {}), "decision": {
++            **opportunity, "status": "failed" if "advice_error" in advice else "completed"}}
+ 
+     def _build_plan(self, state: DataProcessingGraphState) -> Dict[str, Any]:
+         requested = _requested_operations(state)
+--- a/agent/prompt/data_processing_planning_advice.json
++++ b/agent/prompt/data_processing_planning_advice.json
+@@ -14,7 +14,10 @@
+     "Use only context.available_operations entries compatible with context.dataset_type. Parameters must come from that operation parameter_schema; omit protected advisor_allowed=false fields and workflow-internal fields such as _output_uri.",
+     "Explicit context.requested_operations take priority and are already scheduled; do not duplicate or override them. If an operation cannot be justified by the supplied profile, leave it out.",
+     "Proposals will be validated, previewed and quality-gated. Do not promise publication, successful cleaning, better model quality, or reduced training time before execution.",
+-    "When no additional operation is justified, return suggested_operations=[] with concise diagnostics or notes. Never emit HPO parameters, agent routing or a prose report outside the JSON."
++    "When no additional operation is justified, return suggested_operations=[] with concise diagnostics or notes. Never emit HPO parameters, agent routing or a prose report outside the JSON.",
++    "Use profile_coverage to distinguish bounded probing from full inspection; null means unknown. Never generalize sampled quality counts to the whole dataset.",
++    "Only hpo_feedback with status=accepted is scoped validation evidence. Its metrics and diagnostics are hypotheses, not proof that data caused an HPO outcome. Do not use final-test evidence or request HPO changes.",
++    "Consultation success is not execution success or metric improvement. Operations remain subject to deterministic scope, parameter, preview-impact and post-processing quality gates."
+   ],
+   "task": "Review a compact dataset profile before data processing and propose only necessary, supported operations.",
+   "response_contract": {
+--- /dev/null
++++ b/tests/integration/test_version_plan11_lifecycle.py
+@@ -0,0 +1,49 @@
++"""Real agent/record boundaries; no external LLM or training calls."""
++
++import json
++
++import pytest
++
++from agent.agents.communication import AgentTaskRequest
++from agent.agents.coordination import AgentRegistration, AgentRegistry
++from agent.agents.data_processing_agent import DataProcessingAgent
++from agent.agents.orchestrator import CoordinatorAgent
++from agent.memory import MemoryService
++
++
++def test_feedback_and_decision_survive_agent_and_record_boundary(tmp_path, minimal_config, dataset_dir, monkeypatch):
++    agent = DataProcessingAgent(config_path=str(minimal_config), experiments_dir=tmp_path / "dp",
++        memory_service=MemoryService(tmp_path / "memory"), enable_llm_advisor=True, verbose=False)
++    captured = []
++    monkeypatch.setattr(agent, "_planning_advice", lambda state: captured.append(state) or {})
++    result = agent.run_workflow(AgentTaskRequest(agent.action, "validate", context={
++        "dataset_uri": str(dataset_dir), "data_processing": {"consultation_mode": "evidence"},
++        "hpo_feedback": {"dataset_uri": str(dataset_dir), "study_id": "old_study", "trial_count": 2,
++                         "evaluation_role": "hpo_validation", "diagnostics": ["inspect durations"]},
++    }))
++    assert result.status == "success" and result.summary["feedback_status"] == "accepted"
++    assert captured[0]["hpo_feedback"]["evidence"]["study_id"] == "old_study"
++    record = json.loads(next((tmp_path / "dp").glob("*/experiment_record.json")).read_text(encoding="utf-8"))
++    assert record["extensions"]["data_lifecycle"]["decision"]["status"] == "completed"
++    assert record["extensions"]["data_processing"]["hpo_feedback"]["status"] == "accepted"
++
++
++def test_invalid_registry_marks_management_record_failed(tmp_path, minimal_config, dataset_dir):
++    registry = AgentRegistry()
++    registry.register(AgentRegistration("bad", ("run",), lambda: pytest.fail("must not construct"), requires=("missing",)))
++    agent = CoordinatorAgent(config_path=str(minimal_config), output_dir=str(tmp_path / "out"), registry=registry, verbose=False)
++    with pytest.raises(ValueError, match="missing dependencies"):
++        agent.run(context={"data_folder": str(dataset_dir)})
++    record = json.loads(next((tmp_path / "out/manage").glob("*/experiment_record.json")).read_text(encoding="utf-8"))
++    assert record["status"] == "failed" and "missing dependencies" in record["error"]
++
++
++def test_data_workflow_exception_does_not_leave_running_record(tmp_path, minimal_config, dataset_dir):
++    agent = DataProcessingAgent(config_path=str(minimal_config), experiments_dir=tmp_path / "dp",
++        memory_service=MemoryService(tmp_path / "memory"), verbose=False)
++    with pytest.raises(ValueError, match="consultation_mode"):
++        agent.run_workflow(AgentTaskRequest(agent.action, "validate", context={
++            "dataset_uri": str(dataset_dir), "data_processing": {"consultation_mode": "invalid"},
++        }))
++    record = json.loads(next((tmp_path / "dp").glob("*/experiment_record.json")).read_text(encoding="utf-8"))
++    assert record["status"] == "failed" and "consultation_mode" in record["error"]
+--- /dev/null
++++ b/tests/unit/test_version_plan11.py
+@@ -0,0 +1,230 @@
++import json
++from types import SimpleNamespace
++
++import pytest
++
++from agent.agents.communication import AgentTaskRequest, AgentTaskResult, MessageService
++from agent.agents.coordination import AgentRegistration, AgentRegistry, CompletionPolicy, TaskDispatcher
++from agent.agents.orchestration_workflow import OrchestrationWorkflow
++from agent.data_processing.contracts import DataOperation, DataProcessingPlan, OperationImpact, QualityPolicy
++from agent.data_processing.feedback import normalize_feedback
++from agent.data_processing.impact import impact_rejection
++from agent.data_processing.registry import PROCESSORS
++from agent.data_processing.service import execute_plan, infer_dataset_spec, profile_dataset, publish_dataset_version
++from agent.data_processing.workflow import DataProcessingWorkflow
++
++
++def workflow(registry, advisor=None):
++    return OrchestrationWorkflow(
++        registry, TaskDispatcher(registry, MessageService("test")),
++        CompletionPolicy([item["agent_type"] for item in registry.describe()]),
++        lambda context, budget: AgentTaskRequest("run", "test", context, budget),
++        advisor=advisor,
++    )
++
++
++def register(registry, name, calls, *, requires=(), status="success"):
++    def execute(request):
++        calls.append(name)
++        return AgentTaskResult(status, request_id=request.request_id)
++    registry.register(AgentRegistration(name, ("run",), lambda: SimpleNamespace(execute_task=execute), requires=requires))
++
++
++def test_dependency_order_and_scalable_graph():
++    registry, calls = AgentRegistry(), []
++    register(registry, "a_downstream", calls, requires=("z_upstream",))
++    register(registry, "z_upstream", calls)
++    for index in range(15):
++        register(registry, f"extra{index}", calls)
++    result = workflow(registry).run({}, {})
++    assert result["completion"]["complete"]
++    assert calls.index("z_upstream") < calls.index("a_downstream")
++    assert len(calls) == 17
++
++
++@pytest.mark.parametrize("missing", [True, False])
++def test_invalid_dependency_graph_fails_before_advice(missing):
++    registry, calls = AgentRegistry(), []
++    register(registry, "a", calls, requires=("missing" if missing else "b",))
++    if not missing:
++        register(registry, "b", calls, requires=("a",))
++    with pytest.raises(ValueError, match="missing dependencies|cyclic"):
++        workflow(registry, lambda *args: pytest.fail("consulted invalid graph")).run({}, {})
++    assert calls == []
++
++
++def test_failed_dependency_blocks_transitively_but_not_independent_agent():
++    registry, calls = AgentRegistry(), []
++    register(registry, "a", calls, status="failed")
++    register(registry, "b", calls, requires=("a",))
++    register(registry, "c", calls, requires=("b",))
++    register(registry, "d", calls)
++    result = workflow(registry).run({}, {})
++    assert calls == ["a", "d"]
++    assert result["latest_results"]["c"]["summary"]["blocked_by"] == ["b"]
++    assert result["completion"]["status"] == "failed"
++
++
++def test_hpo_resume_uses_saved_protocol_without_reprocessing_data():
++    registry, calls = AgentRegistry(), []
++    register(registry, "data_processing_agent", calls)
++    register(registry, "hpo_agent", calls, requires=("data_processing_agent",))
++    graph = workflow(registry)
++    graph.completion_policy = CompletionPolicy(["hpo_agent"])
++    assert graph.run({"resume_experiment_id": "saved"}, {})["completion"]["complete"]
++    assert calls == ["hpo_agent"]
++
++
++def feedback(dataset, **updates):
++    return {"dataset_uri": str(dataset), "evaluation_role": "hpo_validation", "study_id": "study1",
++            "trial_count": 3, "diagnostics": ["short utterance degradation"], **updates}
++
++
++@pytest.mark.parametrize("updates,reason", [
++    ({"evaluation_role": "final_test"}, "not_hpo_validation"),
++    ({"dataset_uri": "some_other_dataset"}, "dataset_mismatch"),
++    ({"trial_count": 0}, "missing_trial_evidence"),
++    ({"trial_count": True}, "missing_trial_evidence"),
++    ({"study_id": ""}, "missing_or_invalid_study_id"),
++    ({"diagnostics": "unstructured"}, "invalid_diagnostics"),
++])
++def test_feedback_rejects_unscoped_evidence(tmp_path, updates, reason):
++    assert normalize_feedback(feedback(tmp_path, **updates), str(tmp_path))["reason"] == reason
++
++
++def test_feedback_bounds_fields_and_preserves_provenance(tmp_path):
++    result = normalize_feedback(feedback(tmp_path, diagnostics=["x" * 500] * 20,
++        metrics={"eer": .12, "min_dcf": float("nan")}, commands=["delete"]), str(tmp_path))
++    evidence = result["evidence"]
++    assert evidence["study_id"] == "study1"
++    assert len(evidence["diagnostics"]) == 5 and len(evidence["diagnostics"][0]) == 240
++    assert evidence["diagnostics_omitted"] == 15
++    assert evidence["metrics"] == {"eer": .12}
++    assert "commands" not in evidence
++
++
++def test_workflow_feedback_reaches_advisor_and_gates_opportunities(tmp_path, dataset_dir):
++    calls = []
++    graph = DataProcessingWorkflow(strategy_advisor=lambda state: calls.append(state) or {})
++    state = {"dataset_uri": str(dataset_dir), "dataset_type": "text", "output_path": str(tmp_path / "version.json"),
++             "consultation_mode": "evidence"}
++    skipped = graph.run(state)
++    assert not calls and skipped["decision"]["status"] == "skipped"
++    completed = graph.run({**state, "hpo_feedback": feedback(dataset_dir)})
++    assert calls[0]["hpo_feedback"]["evidence"]["study_id"] == "study1"
++    assert completed["decision"]["status"] == "completed" and completed["status"] == "success"
++    calls.clear()
++    rejected = graph.run({**state, "hpo_feedback": feedback(dataset_dir, evaluation_role="final_test")})
++    assert rejected["hpo_feedback"]["status"] == "rejected" and not calls
++
++
++def test_advisor_failure_remains_visible_and_does_not_replace_quality_gate(tmp_path, dataset_dir):
++    def fail(state):
++        raise RuntimeError("offline")
++    result = DataProcessingWorkflow(strategy_advisor=fail).run({"dataset_uri": str(dataset_dir),
++        "dataset_type": "text", "output_path": str(tmp_path / "v.json")})
++    assert result["decision"]["status"] == "failed"
++    assert "offline" in result["advice"]["advice_error"]
++    assert result["status"] == "success" and result["results"][-1]["operation"] == "quality_gate"
++
++
++@pytest.mark.parametrize("kwargs", [
++    {"max_operation_affected_fraction": float("nan")},
++    {"max_operation_affected_fraction": 1.01},
++    {"max_operation_output_bytes": -1}, {"max_operation_output_bytes": True},
++])
++def test_invalid_impact_limits_rejected(kwargs):
++    with pytest.raises(ValueError):
++        QualityPolicy(**kwargs)
++
++
++def test_impact_limits_boundary_unknown_and_legacy():
++    impact = OperationImpact("filter", 10, 2, 100, True, {"scan_complete": True})
++    assert impact_rejection(impact, QualityPolicy(max_operation_affected_fraction=.2, max_operation_output_bytes=100)) is None
++    assert impact_rejection(impact, QualityPolicy(max_operation_affected_fraction=.1)) == "affected_fraction_exceeded"
++    assert impact_rejection(impact, QualityPolicy(max_operation_output_bytes=99)) == "estimated_output_bytes_exceeded"
++    impact.details = {}
++    assert impact_rejection(impact, QualityPolicy(max_operation_affected_fraction=.2)) == "impact_unknown_or_incomplete"
++    assert impact_rejection(impact, QualityPolicy()) is None
++
++
++def test_impact_rejection_prevents_execution_and_publication(monkeypatch, tmp_path, dataset_dir):
++    processor = SimpleNamespace(
++        supported_data_types={"text"}, validate=lambda *args: None,
++        preview=lambda *args: OperationImpact("controlled", 10, 5, 100, True, {"scan_complete": True}),
++        execute=lambda *args: pytest.fail("rejected mutation executed"),
++    )
++    monkeypatch.setitem(PROCESSORS._processors, "controlled", processor)
++    dataset = infer_dataset_spec(str(dataset_dir), dataset_type="text")
++    plan = DataProcessingPlan(dataset, [DataOperation("controlled")], quality_policy={"max_operation_affected_fraction": .2})
++    results = execute_plan(plan, output_root=tmp_path / "output")
++    assert results[0].details["rejection_reason"] == "affected_fraction_exceeded"
++    with pytest.raises(ValueError, match="failed operations"):
++        publish_dataset_version(dataset, results, tmp_path / "v.json")
++    assert not (tmp_path / "v.json").exists()
++
++
++def test_atomic_publication_failure_preserves_previous_version(monkeypatch, tmp_path, dataset_dir):
++    from agent.data_processing import service
++    dataset = infer_dataset_spec(str(dataset_dir), dataset_type="text")
++    results = execute_plan(DataProcessingPlan(dataset), initial_profile=profile_dataset(dataset))
++    target = tmp_path / "v.json"
++    publish_dataset_version(dataset, results, target)
++    previous = target.read_bytes()
++    def failed_replace(*args):
++        raise OSError("simulated crash before commit")
++    monkeypatch.setattr(service.os, "replace", failed_replace)
++    with pytest.raises(OSError):
++        publish_dataset_version(dataset, results, target)
++    assert target.read_bytes() == previous
++    assert not list(tmp_path.glob(".dataset-*.tmp"))
++
++
++def test_advisor_prompt_exposes_coverage_and_scoped_feedback(monkeypatch, tmp_path):
++    from agent.agents.data_processing_agent import DataProcessingAgent
++    agent = DataProcessingAgent.__new__(DataProcessingAgent)
++    captured = []
++    monkeypatch.setattr(agent, "_request_json_advice", lambda prompt: captured.append(json.loads(prompt)) or {})
++    scoped = normalize_feedback(feedback(tmp_path), str(tmp_path))
++    agent._planning_advice({"hpo_feedback": scoped, "profile": {
++        "extensions": {"audio": {"probe_limit": 10, "probe_limited": True, "signal_probe_count": 2}}}})
++    context = captured[0]["context"]
++    assert context["profile_coverage"]["probe_limited"] is True
++    assert context["hpo_feedback"] == scoped
++
++
++def test_compact_orchestration_record_preserves_blocking_and_data_decisions():
++    from agent.agents.orchestrator import CoordinatorAgent
++    blocked = {"dispatch_status": "blocked", "blocked_by": ["data_processing_agent"]}
++    assert CoordinatorAgent._compact_agent_summary("hpo_agent", blocked) == blocked
++    summary = {"data_handoff": {}, "data_decision": {"status": "skipped"}, "feedback_status": "absent"}
++    assert CoordinatorAgent._compact_agent_summary("data_processing_agent", summary) == summary
++
++
++def test_real_audio_filter_guard_before_materialization(tmp_path):
++    import wave
++    from agent.data_processing.service import build_processing_plan
++    source = tmp_path / "audio"
++    source.mkdir()
++    for name, frames in (("short", 160), ("normal", 16000)):
++        with wave.open(str(source / f"{name}.wav"), "wb") as stream:
++            stream.setparams((1, 2, 16000, frames, "NONE", "not compressed"))
++            stream.writeframes(b"\x20\x00" * frames)
++    dataset = infer_dataset_spec(str(source), dataset_type="audio")
++    policy = QualityPolicy(max_operation_affected_fraction=.25)
++    plan = build_processing_plan(profile_dataset(dataset, policy), requested_operations=[
++        {"operation": "filter_by_duration", "parameters": {"min_seconds": .1, "max_seconds": 10}}
++    ], policy=policy)
++    results = execute_plan(plan, output_root=tmp_path / "derived")
++    assert results[-1].details["rejection_reason"] == "affected_fraction_exceeded"
++    assert len(list(source.glob("*.wav"))) == 2
++    assert not list((tmp_path / "derived").rglob("*.wav"))
++    assert not list((tmp_path / "derived").rglob("*.selection.jsonl"))
++
++
++def test_bad_coordination_advice_does_not_prevent_deterministic_execution():
++    registry, calls = AgentRegistry(), []
++    register(registry, "agent", calls)
++    result = workflow(registry, lambda *args: ["wrong type"]).run({}, {})
++    assert result["completion"]["complete"] and calls == ["agent"]
++    assert "advice_error" in result["advice"]

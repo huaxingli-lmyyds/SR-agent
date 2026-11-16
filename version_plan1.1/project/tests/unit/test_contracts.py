@@ -1,0 +1,279 @@
+import json
+from pathlib import Path
+
+from agent.agents.communication import AgentTaskRequest, AgentTaskResult
+from agent.core.contracts import Artifact, OperationRequest, OperationResult
+from agent.data_processing.contracts import DatasetSpec, DataOperationResult
+from agent.hpo.contracts import (
+    Objective,
+    SearchParameter,
+    SearchSpace,
+    StrategyDecisionRecord,
+    StrategyProposal,
+    TrialBudget,
+)
+
+
+def test_core_contracts_are_json_serializable(tmp_path: Path) -> None:
+    request = OperationRequest(
+        stage="training",
+        task_type="speaker_verification",
+        model_family="ecapa_tdnn",
+        runner="fake",
+        config_path=str(tmp_path / "config.yaml"),
+        parameters={"lr": 0.001},
+    )
+    result = OperationResult(
+        status="success",
+        stage="training",
+        metrics={"validation": {"loss": 0.2}},
+        artifacts=[Artifact("checkpoint", "best", str(tmp_path / "best.ckpt"))],
+    )
+
+    assert json.loads(request.to_json())["stage"] == "training"
+    payload = json.loads(result.to_json())
+    assert payload["metrics"]["validation"]["loss"] == 0.2
+    assert payload["artifacts"][0]["type"] == "checkpoint"
+
+
+def test_agent_and_domain_contracts_keep_required_fields(tmp_path: Path) -> None:
+    request = AgentTaskRequest(action="optimize", objective="improve")
+    result = AgentTaskResult(
+        status="success",
+        summary={"path": tmp_path},
+        request_id=request.request_id,
+    )
+    dataset = DatasetSpec("demo", "text", str(tmp_path))
+    operation = DataOperationResult(status="success", operation="validate_dataset")
+    search_space = SearchSpace([SearchParameter("lr", "float", low=1e-4, high=1e-2)])
+
+    assert json.loads(result.to_json())["request_id"] == request.request_id
+    assert dataset.to_dict()["dataset_type"] == "text"
+    assert operation.to_dict()["status"] == "success"
+    assert search_space.to_dict()["parameters"][0]["name"] == "lr"
+    assert Objective("eer").to_dict()["mode"] == "min"
+    assert TrialBudget("small", epochs=1).to_dict()["epochs"] == 1
+
+
+def test_hpo_strategy_audit_contracts_are_json_serializable() -> None:
+    proposal = StrategyProposal(
+        action="switch_strategy",
+        requested_sampler="agent_proposal",
+        sampler_config={},
+        hypotheses=[{"id": "h1", "claim": "local search should improve"}],
+        candidate_proposals=[{"parameters": {"lr": 0.001}, "hypothesis_id": "h1"}],
+        reason_codes=["use_history"],
+    )
+    decision = StrategyDecisionRecord(
+        decision="approved",
+        proposal_id=proposal.proposal_id,
+        proposal=proposal.to_dict(),
+        adopted_strategy="adaptive_search",
+        adopted_search_space={"parameters": [], "constraints": []},
+        adopted_budgets=[{"stage": "full", "epochs": 10}],
+        adopted_max_training_runs=4,
+        adopted_sampler="agent_proposal",
+        adopted_sampler_config={},
+        accepted_fields=["requested_strategy"],
+        reason_codes=["proposal_approved"],
+    )
+
+    assert proposal.to_dict()["proposal_id"].startswith("proposal_")
+    assert proposal.to_dict()["hypotheses"][0]["id"] == "h1"
+    assert proposal.to_dict()["candidate_proposals"][0]["parameters"]["lr"] == 0.001
+    assert decision.to_dict()["proposal_id"] == proposal.proposal_id
+
+
+def test_llm_cannot_supply_strategy_proposal_audit_identity() -> None:
+    proposal = StrategyProposal.from_dict({
+        "action": "keep_strategy",
+        "proposal_id": "spoofed",
+        "created_at": "spoofed",
+    })
+
+    assert proposal.proposal_id != "spoofed"
+    assert proposal.created_at != "spoofed"
+
+
+def test_trial_result_does_not_finish_parent_experiment(tmp_path: Path, minimal_config, dataset_dir) -> None:
+    from agent.core.experiment_service import ExperimentService
+    from agent.utils.experiment_tracker import ExperimentTracker
+
+    tracker = ExperimentTracker(tmp_path / "experiments")
+    experiment_id = tracker.create_hpo_experiment(
+        config_path=str(minimal_config),
+        data_folder=str(dataset_dir),
+    )
+    result = OperationResult(
+        status="failed",
+        stage="training",
+        metrics={"validation": {"loss": 0.1}},
+        error="trial failed",
+    )
+
+    assert ExperimentService(tracker).record_result(
+        experiment_id,
+        result,
+        update_status=False,
+    )
+    record = tracker.get_experiment(experiment_id)
+    assert record["status"] == "created"
+    assert record.get("error") is None
+    assert record.get("metrics") == {}
+
+
+def test_ecapa_default_search_space_stays_close_to_reference_recipe() -> None:
+    from agent.models.ecapa_tdnn import SpeechBrainEcapaAdapter
+
+    params = {
+        item["name"]: item
+        for item in SpeechBrainEcapaAdapter().default_search_space()["parameters"]
+    }
+
+    assert params["lr"]["low"] == 3e-4
+    assert params["lr"]["high"] == 3e-3
+    assert params["batch_size"]["choices"] == [16, 24, 32]
+    assert params["margin"]["low"] == 0.15
+    assert params["margin"]["high"] == 0.3
+    assert params["weight_decay"]["low"] == 5e-7
+    assert params["weight_decay"]["high"] == 2e-5
+
+def test_other_model_and_runner_resolve_through_public_adapter_boundary() -> None:
+    from agent.core.adapters import resolve_adapter_bundle
+    from agent.models import MODEL_ADAPTERS, register_model_adapter
+    from agent.runners import RUNNER_ADAPTERS, register_runner_adapter
+    from tests.fakes import FakeRunnerAdapter
+
+    class DemoModelAdapter:
+        model_family = "demo_encoder"
+        implementation = "demo_runtime"
+        default_evaluation_config = None
+
+        def validate_config(self, config):
+            if "network" not in config:
+                raise ValueError("missing network")
+
+        def default_search_space(self):
+            return {
+                "parameters": [{
+                    "name": "width",
+                    "parameter_type": "categorical",
+                    "choices": [64, 128],
+                }],
+                "constraints": [],
+            }
+
+        def validate_parameters(self, parameters):
+            if int(parameters.get("width", 64)) not in {64, 128}:
+                raise ValueError("unsupported width")
+
+    class DemoRunner(FakeRunnerAdapter):
+        runner = "demo_runtime"
+        supported_implementations = {"demo_runtime"}
+        supported_model_families = {"demo_encoder"}
+
+    previous_model = MODEL_ADAPTERS.get("demo_encoder")
+    previous_runner = RUNNER_ADAPTERS.get("demo_runtime")
+    register_model_adapter(DemoModelAdapter())
+    register_runner_adapter(DemoRunner(runner="demo_runtime"))
+    try:
+        bundle = resolve_adapter_bundle(
+            "speaker_verification",
+            "demo_encoder",
+            "demo_runtime",
+            "demo_runtime",
+        )
+        assert bundle.model.default_search_space()["parameters"][0]["name"] == "width"
+        bundle.model.validate_parameters({"width": 128})
+    finally:
+        if previous_model is None:
+            MODEL_ADAPTERS.pop("demo_encoder", None)
+        else:
+            MODEL_ADAPTERS["demo_encoder"] = previous_model
+        if previous_runner is None:
+            RUNNER_ADAPTERS.pop("demo_runtime", None)
+        else:
+            RUNNER_ADAPTERS["demo_runtime"] = previous_runner
+
+def test_speaker_model_adapters_are_registered() -> None:
+    from agent.models import get_model_adapter
+
+    resnet = get_model_adapter("resnet")
+    xvector = get_model_adapter("xvector")
+
+    assert resnet.default_evaluation_config.endswith("verification_resnet.yaml")
+    assert xvector.default_evaluation_config.endswith("verification_cosine_xvector.yaml")
+    assert any(item["name"] == "lr" for item in resnet.default_search_space()["parameters"])
+    assert any(item["name"] == "margin" for item in resnet.default_search_space()["parameters"])
+    assert any(item["name"] == "weight_decay" for item in resnet.default_search_space()["parameters"])
+    assert any(item["name"] == "lr_final" for item in xvector.default_search_space()["parameters"])
+
+def test_manage_record_compacts_child_agent_results_like_hpo_top_level() -> None:
+    from types import SimpleNamespace
+
+    from agent.agents.orchestrator import CoordinatorAgent
+
+    coordinator = object.__new__(CoordinatorAgent)
+    record = SimpleNamespace(
+        agent_type="hpo_agent",
+        action="optimize_hyperparameters",
+        started_at="start",
+        completed_at="end",
+        request={"request_id": "request_1"},
+        result={
+            "status": "success",
+            "request_id": "request_1",
+            "summary": {
+                "strategy": "tpe",
+                "best_trial_id": "trial_1",
+                "best_parameters": {"lr": 0.001},
+                "campaign": {
+                    "campaign_id": "campaign_1",
+                    "status": "completed",
+                    "stop_reason": "target_reached",
+                    "study_summaries": [{"full": "record"}],
+                    "best_experiment_id": "hpo_1",
+                    "best_value": 0.03,
+                },
+                "studies": [{"experiment_id": "hpo_1", "study_id": "study_1"}],
+            },
+            "metrics": {"eer": 0.03, "min_dcf": 0.1},
+            "artifacts": [{"type": "checkpoint"}, {"type": "predictions"}],
+            "recommendations": [{"note": "future"}],
+            "experiment_ids": {"hpo": "hpo_1"},
+        },
+    )
+
+    compact = coordinator._compact_task_record(record)
+    summary = coordinator._orchestration_summary([compact])
+    message = coordinator._compact_message({
+        "message_type": "task.request",
+        "payload": {
+            "action": "optimize_hyperparameters",
+            "objective": "improve",
+            "context": {
+                "previous_results": {"data_processing_agent": {"large": "payload"}},
+                "search_space": {"parameters": [{"name": "lr"}]},
+            },
+            "request_id": "request_1",
+        },
+    })
+
+    assert compact["summary"]["campaign"] == {
+        "campaign_id": "campaign_1",
+        "status": "completed",
+        "stop_reason": "target_reached",
+        "study_count": 1,
+        "best_experiment_id": "hpo_1",
+        "best_value": 0.03,
+    }
+    assert compact["artifact_count"] == 2
+    assert "study_summaries" not in compact["summary"]["campaign"]
+    assert summary["metrics"]["best"] == {
+        "eer": 0.03,
+        "min_dcf": 0.1,
+        "trial_id": "trial_1",
+    }
+    assert summary["metrics"]["summary"]["agent_count"] == 1
+    assert message["payload"]["context"]["previous_result_agents"] == ["data_processing_agent"]
+    assert "previous_results" not in message["payload"]["context"]
